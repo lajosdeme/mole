@@ -20,3 +20,6 @@
 *.bak
 zz_*_test.go
 dist/
+
+# nix build puts the binary here
+/result

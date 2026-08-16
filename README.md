@@ -62,6 +62,23 @@ the target directory needs it, and `--dry-run` shows what it would do. If piping
 script into a shell makes you uneasy — reasonable — read it first, or use one of
 the paths below.
 
+**Nix** — builds from the flake (Linux and macOS):
+
+```sh
+nix profile add github:lajosdeme/mole
+```
+
+Or run it without installing:
+
+```sh
+nix run github:lajosdeme/mole
+```
+
+> [!NOTE]
+> A nix build reports the commit it was built from: `mole version` prints a short
+> SHA rather than the release tag, because flakes don't have access to tags in
+> GitHub.
+
 **Homebrew** — macOS and Linux:
 
 ```sh
@@ -312,6 +329,11 @@ go build ./...
 go test ./...   # must be clean, and no new skips
 ```
 
+> [!TIP]
+> The Nix flake includes a development shell with all dependencies. Enter the shell via:
+> ```sh
+> nix develop
+> ```
 ---
 
 ## Licence
