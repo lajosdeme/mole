@@ -288,8 +288,32 @@ metric it cannot compute says so instead of quietly reading zero.
 | claim integrity | **100%** — every stored claim carries a source and a verbatim quote |
 | citation accuracy | **100%** — every quote found in the source it cites |
 | grounding rate | **80%** — of claims re-read against their source, confirmed |
-| contradiction precision | **70%** with the confirm pass, 51% without |
+| contradiction precision | **51%** on one judgement, **70%** on two that agree |
+| contradiction recall | **98%** on one judgement, **67%** on two that agree |
+| duplicate precision | **64%** on one judgement, **88%** on two that agree |
 | merge precision / recall | **1.000 / 1.000** on constructed ground truth |
+| staleness separation | **not measurable** on a provider that returns no dates |
+
+Contradiction precision and recall trade against each other, and which way to
+take the trade is a flag. Confirming an edge — asking a second time and keeping
+only agreements — buys 19 points of precision for 31 of recall, measured on 116
+hand-labelled pairs. Autonomous runs confirm by default, because there a false
+contradiction also buys a follow-up lead nobody is watching. Output a person
+reads wants `--confirm-edges duplicates` instead, which keeps every contradiction
+the first judgement found: a missed disagreement is invisible, where a false one
+is a pair of quotes on the page. Duplicates are confirmed under both of those,
+being the one place a second look costs no recall at all.
+
+Recall is an upper bound. Pairs are formed by a lexical retriever, so two
+contradicting claims that share few words are never put to the judge and never
+counted as missed — this measures the judge, not the pipeline.
+
+Staleness separation says so rather than reading zero. Telling a stale source
+from a disagreeing one needs a publication date on both claims, and a provider
+that supplies page text instead of dates leaves nothing to compare: across the
+corpus, 369 claims carried none. `mole doctor` reports whether the configured
+provider dates its results, and `--always-fetch` recovers dates from the pages
+themselves at one fetch per source.
 
 ---
 
