@@ -485,6 +485,10 @@ func TestDuplicateCollapseCountsRepetitionRemoved(t *testing.T) {
 // TestStalenessSeparationSaysWhenDatesAreMissing. The rule needs PublishedAt on both
 // claims and most web pages supply none, so a zero here is usually missing dates
 // rather than a broken rule — and a reader chasing the wrong one wastes their time.
+//
+// It used to hint at that in Detail while still reporting Measured. It now counts the
+// dated claims and reports Blocked, because a rule that never ran measured nothing:
+// "0 of N resolved" and "there was nothing to resolve with" are different facts.
 func TestStalenessSeparationSaysWhenDatesAreMissing(t *testing.T) {
 	claims := []core.Claim{
 		{Text: "A.", Source: "https://a.example/1", Quote: "a quote long enough to be real evidence"},
@@ -502,8 +506,11 @@ func TestStalenessSeparationSaysWhenDatesAreMissing(t *testing.T) {
 	if m.Value != 0 {
 		t.Errorf("value = %v with no supersedes edges", m.Value)
 	}
-	if !strings.Contains(m.Detail, "publication dates") {
-		t.Errorf("a zero does not point at the likely cause: %q", m.Detail)
+	if m.Status != eval.Blocked {
+		t.Errorf("status = %v; with no dated claim the rule could not run", m.Status)
+	}
+	if !strings.Contains(m.Reason, "publication date") {
+		t.Errorf("a zero does not point at the likely cause: %q", m.Reason)
 	}
 }
 

@@ -32,6 +32,7 @@ import (
 	"github.com/lajosdeme/mole/internal/store"
 	"github.com/lajosdeme/mole/internal/store/sqlite"
 	"github.com/lajosdeme/mole/internal/tools/academic"
+	"github.com/lajosdeme/mole/internal/tools/search"
 	"github.com/lajosdeme/mole/internal/verifier"
 	"github.com/spf13/cobra"
 )
@@ -459,13 +460,33 @@ func reportConfig(r *checks) {
 			fmt.Sprintf("%s selected but no key (run: mole config set search.%s-key ...)",
 				cfg.Search.Provider, cfg.Search.Provider))
 	default:
+		// Read from the declared table rather than a provider name written out
+		// here, so adding a provider cannot leave this reporting the wrong thing.
+		caps := search.CapabilitiesOf(search.Kind(cfg.Search.Provider))
 		note := ""
-		if cfg.Search.Provider == "tavily" {
-			// Worth surfacing: it changes how many fetches a session makes.
+		if caps.PageContent {
+			// Changes how many fetches a session makes.
 			note = " — returns page content, skips fetches"
 		}
 		report(true, "search provider",
 			fmt.Sprintf("%s, key %s%s", cfg.Search.Provider, config.Mask(cfg.Search.ActiveKey()), note))
+
+		// A note, not a failure: research works fine without dates. Said out loud
+		// because the alternative is a mechanism that is silently inert — measured
+		// on a ten-question corpus, 369 claims carried no date between them and
+		// every conflict across a decade of publication was written as a live
+		// disagreement, with nothing anywhere saying why.
+		if !caps.PublicationDates {
+			detail := "supplies no publication dates, so §11.2 cannot tell a stale " +
+				"source from a disagreeing one"
+			if caps.PageContent {
+				detail += "; page content means nothing is fetched either, and the " +
+					"extractor is the only other place a date comes from"
+			}
+			r.note(false, "source dates", detail)
+			r.note(false, "", "--always-fetch restores it at one fetch per source, "+
+				"or use a provider that dates its results")
+		}
 	}
 
 	reportLLM(report, cfg)

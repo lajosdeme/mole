@@ -149,7 +149,7 @@ func Score(ctx context.Context, st store.Store, sessionID string, opts Options) 
 		verificationCoverage(claims),
 		duplicateCollapse(claims, edges),
 		disagreementRate(claims, edges),
-		stalenessSeparation(edges),
+		stalenessSeparation(claims, edges),
 	)
 	if g := groundingRate(claims); g != nil {
 		card.Metrics = append(card.Metrics, *g)
@@ -586,8 +586,14 @@ func disagreementRate(claims []*core.Claim, edges []*core.ClaimEdge) Metric {
 // A 2019 claim contradicted by a 2025 one is usually staleness, not disagreement, and
 // this is what says whether that rule is doing anything. Not "staleness detection" —
 // that would claim to know how many stale claims exist, which needs the corpus.
-func stalenessSeparation(edges []*core.ClaimEdge) Metric {
+func stalenessSeparation(claims []*core.Claim, edges []*core.ClaimEdge) Metric {
 	m := Metric{Name: "staleness separation", Status: Measured, Unit: "edges"}
+	dated := 0
+	for _, c := range claims {
+		if c != nil && c.PublishedAt != nil {
+			dated++
+		}
+	}
 	supersedes, contradicts := 0, 0
 	for _, e := range edges {
 		if e == nil {
@@ -609,11 +615,20 @@ func stalenessSeparation(edges []*core.ClaimEdge) Metric {
 	}
 	m.Detail = fmt.Sprintf("%d of %d conflict(s) resolved as staleness by publication date",
 		supersedes, total)
+	if dated == 0 {
+		// The rule needs PublishedAt on both claims, so with none it did not run.
+		// "0 of N resolved" would imply it ran and found nothing — a different fact,
+		// and the one that hid §11.2 being inert across a whole corpus. Computed
+		// rather than left as advice to go and check.
+		m.Status = Blocked
+		m.Reason = fmt.Sprintf("no claim carried a publication date (0 of %d), so the "+
+			"rule could not run: every conflict was written as a live disagreement. "+
+			"A provider supplying no dates and enough page text to skip fetching "+
+			"leaves neither source of one — see mole doctor", len(claims))
+		return m
+	}
 	if supersedes == 0 {
-		// Worth naming: the rule needs PublishedAt on both claims, and most web
-		// pages supply none, so a zero here is usually missing dates rather than a
-		// broken rule.
-		m.Detail += " — check whether the sources carried publication dates at all"
+		m.Detail += fmt.Sprintf(" — %d of %d claim(s) carried a date", dated, len(claims))
 	}
 	return m
 }
