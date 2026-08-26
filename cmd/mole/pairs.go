@@ -44,10 +44,12 @@ func newPairsCmd() *cobra.Command {
 
 func newPairsDumpCmd() *cobra.Command {
 	var (
-		out   string
-		kinds []string
-		all   bool
-		cap   int
+		out        string
+		kinds      []string
+		all        bool
+		cap        int
+		exhaustive bool
+		maxPairs   int
 	)
 	c := &cobra.Command{
 		Use:   "dump <session-id>",
@@ -63,6 +65,7 @@ func newPairsDumpCmd() *cobra.Command {
 
 			ps, err := eval.DumpPairs(ctx, db, args[0], eval.DumpOptions{
 				Kinds: kinds, All: all, MaxCandidatesPerClaim: cap,
+				Exhaustive: exhaustive, MaxPairs: maxPairs,
 			})
 			if err != nil {
 				return err
@@ -97,6 +100,12 @@ func newPairsDumpCmd() *cobra.Command {
 	f.BoolVar(&all, "all", false,
 		"include pairs the model called unrelated; needed to measure RECALL, and there are many more of them")
 	f.IntVar(&cap, "max-candidates", 0, "retrieval cap; 0 uses the Verifier's default")
+	f.BoolVar(&exhaustive, "exhaustive", false,
+		"pair EVERY claim with every other, retrieval bypassed, recording each pair's "+
+			"lexical score and rank. --all measures the judge's recall; this measures "+
+			"the pipeline's, by including the pairs retrieval refused to form")
+	f.IntVar(&maxPairs, "max-pairs", 0,
+		"refuse an exhaustive dump larger than this; 0 uses the default")
 	return c
 }
 

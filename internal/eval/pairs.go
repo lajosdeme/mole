@@ -57,6 +57,16 @@ type LabelledPair struct {
 	// put to the model at all. Scoring skips those: they say nothing about the judge.
 	Judged bool `json:"judged"`
 
+	// Score is what the lexical retriever thought of the pair, and Rank is its
+	// position in the target claim's candidate list (1-based). Zero and zero mean it
+	// shares no content word and was never a candidate at all.
+	//
+	// Recorded so a missed contradiction says what to fix: score 0 is the lexical
+	// measure being the wrong primitive, and a rank past DefaultMaxCandidates is the
+	// cap. Only filled on an exhaustive dump, which is the only one measuring this.
+	Score float64 `json:"score,omitempty"`
+	Rank  int     `json:"rank,omitempty"`
+
 	// Label is the truth, filled in by hand. Empty means unlabelled.
 	Label string `json:"label"`
 	// Note is for the labeller.
@@ -85,7 +95,28 @@ type DumpOptions struct {
 	// MaxCandidatesPerClaim mirrors the Verifier's retrieval cap, so the candidate space
 	// is regenerated exactly as the run saw it.
 	MaxCandidatesPerClaim int
+
+	// Exhaustive pairs every claim with every other, retrieval bypassed, and records
+	// each pair's lexical score and rank.
+	//
+	// This is the denominator for PIPELINE recall. --all measures the judge: it adds
+	// the no-edge pairs from among the retriever's candidates. A contradiction the
+	// retriever never formed is in neither set, so it is missed by nothing and counted
+	// by nothing — 73% of the pair space on §14.2's corpus. Implies All.
+	Exhaustive bool
+
+	// MaxPairs refuses an exhaustive dump larger than this. Zero takes
+	// DefaultMaxDumpPairs.
+	MaxPairs int
 }
+
+// DefaultMaxDumpPairs bounds an exhaustive dump.
+//
+// n(n-1)/2 grows fast enough that a real session is five figures — 500 claims is
+// 124,750 pairs — and a labelling task nobody finishes measures nothing, which is the
+// argument the All flag already makes one order of magnitude earlier. Sized so the
+// corpus's smallest sessions fit whole: 18 claims is 153 pairs, 46 is 1,035.
+const DefaultMaxDumpPairs = 1200
 
 // DumpPairs regenerates a session's candidate pairs and pairs them with what the
 // adjudicator said.
@@ -152,8 +183,59 @@ func DumpPairs(ctx context.Context, st store.Store, sessionID string, opts DumpO
 		all = append(all, verifier.Pair{A: a, B: b})
 	}
 
-	if opts.All {
-		pairs, free, err := verifier.CandidatePairs(ctx, verifier.LexicalRetriever{},
+	// Refused before any work: the point of a cap is that an oversize dump never
+	// happens, not that it happens and is then discarded.
+	if opts.Exhaustive {
+		limit := opts.MaxPairs
+		if limit <= 0 {
+			limit = DefaultMaxDumpPairs
+		}
+		if n := len(claims) * (len(claims) - 1) / 2; n > limit {
+			return nil, fmt.Errorf("eval: an exhaustive dump of session %s is %d pair(s), "+
+				"over the limit of %d — raise it deliberately or dump a smaller session",
+				sessionID, n, limit)
+		}
+	}
+
+	// Scores and ranks the lexical retriever would have given, computed once per claim
+	// so an exhaustive dump can say why each pair was or was not surfaced.
+	type placing struct {
+		score float64
+		rank  int
+	}
+	placings := map[string]placing{}
+	if opts.Exhaustive {
+		lex := verifier.LexicalRetriever{}
+		for _, target := range claims {
+			scores := lex.Scores(target, claims)
+			ranked := make([]string, 0, len(scores))
+			for id := range scores {
+				ranked = append(ranked, id)
+			}
+			sort.SliceStable(ranked, func(i, j int) bool {
+				if scores[ranked[i]] != scores[ranked[j]] {
+					return scores[ranked[i]] > scores[ranked[j]]
+				}
+				return ranked[i] < ranked[j]
+			})
+			for i, id := range ranked {
+				key := verifier.Pair{A: target, B: byID[id]}.Key()
+				// Both ends rank the pair. Keep the better one: a pair is surfaced if
+				// EITHER claim put it in its candidate list.
+				if cur, ok := placings[key]; ok && cur.rank <= i+1 {
+					continue
+				}
+				placings[key] = placing{score: scores[id], rank: i + 1}
+			}
+		}
+	}
+
+	if opts.All || opts.Exhaustive {
+		r := verifier.Retriever(verifier.LexicalRetriever{})
+		if opts.Exhaustive {
+			r = verifier.ExhaustiveRetriever{}
+		}
+		pairs, free, err := verifier.CandidatePairs(ctx, r,
 			claims, claims, opts.MaxCandidatesPerClaim, nil)
 		if err != nil {
 			return nil, err
@@ -195,6 +277,7 @@ func DumpPairs(ctx context.Context, st store.Store, sessionID string, opts DumpO
 			Model: kind, Why: v.why,
 			// Both ends verified means the pair was reachable by the pass that ran.
 			Judged: p.A.VerifiedAt != nil && p.B.VerifiedAt != nil,
+			Score:  placings[key].score, Rank: placings[key].rank,
 		})
 	}
 	sort.SliceStable(out.Pairs, func(i, j int) bool { return out.Pairs[i].Pair < out.Pairs[j].Pair })
