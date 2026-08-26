@@ -1199,7 +1199,7 @@ func TestTheConfirmPassIsWiredIntoTheRun(t *testing.T) {
 		}
 		return `{"verdicts":[{"pair":1,"relation":"` + rel + `","confidence":0.9,"why":"x"}]}`, nil
 	})
-	r.v.ConfirmEdges = true
+	r.v.Confirm = verifier.ConfirmBoth
 
 	res, err := r.v.Run(context.Background(), r.sess.ID)
 	if err != nil {
@@ -1228,7 +1228,7 @@ func TestAConfirmedContradictionIsStillWritten(t *testing.T) {
 	r := newRig(t, 200_000, claims, func(int, string) (string, error) {
 		return `{"verdicts":[{"pair":1,"relation":"contradicts","confidence":0.9,"why":"x"}]}`, nil
 	})
-	r.v.ConfirmEdges = true
+	r.v.Confirm = verifier.ConfirmBoth
 
 	res, err := r.v.Run(context.Background(), r.sess.ID)
 	if err != nil {

@@ -112,10 +112,10 @@ type Runner struct {
 	// VerifierBatchSize caps pairs per adjudication call. Zero takes the default.
 	VerifierBatchSize int
 
-	// NoConfirmEdges disables the second adjudication pass. Phrased as an opt-OUT
-	// because confirming is the measured default and the flag exists for somebody
-	// who has measured differently on their own data.
-	NoConfirmEdges bool
+	// Confirm chooses which edge kinds need a second agreeing judgement. The zero
+	// value confirms both, the measured default — the opposite of a bare Verifier's,
+	// which confirms nothing. See confirmMode.
+	Confirm verifier.ConfirmMode
 
 	// Academic researches scholarly leads (§10.2). Nil disables the actor.
 	//
@@ -163,6 +163,16 @@ func (r *Runner) notice(format string, args ...any) {
 	if r.Notice != nil {
 		r.Notice(fmt.Sprintf(format, args...))
 	}
+}
+
+// confirmMode defaults a session to confirming both edge kinds. Opt-out here and
+// opt-in at the Verifier, because that is what each layer's zero value meant before
+// a mode replaced the bool.
+func (r *Runner) confirmMode() verifier.ConfirmMode {
+	if r.Confirm == "" {
+		return verifier.ConfirmBoth
+	}
+	return r.Confirm
 }
 
 func (r *Runner) logger() *slog.Logger {
@@ -384,11 +394,11 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 		Log:       r.logger(),
 		Model:     r.VerifierModel,
 		BatchSize: r.VerifierBatchSize,
-		// On by default: a single judgement gets "contradicts" right 51% of the
-		// time, and a false contradiction spends a research lead as well as
-		// misleading the reader. See verifier.confirm for the measurement.
-		ConfirmEdges: !r.NoConfirmEdges,
-		Grounder:     &verifier.Grounder{Fetch: actor.Fetch, Extract: actor.Extract},
+		// Both by default: one judgement gets "contradicts" right 51% of the time,
+		// and here a false edge also spends a research lead. Output a person reads
+		// wants ConfirmDuplicates — 98% recall against 67%.
+		Confirm:  r.confirmMode(),
+		Grounder: &verifier.Grounder{Fetch: actor.Fetch, Extract: actor.Extract},
 	}
 
 	owner := r.Owner

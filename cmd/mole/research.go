@@ -77,6 +77,7 @@ type researchOpts struct {
 	quiet       bool
 	alwaysFetch bool
 	noConfirm   bool
+	confirmMode string
 	maxDepth    int
 	workers     int
 	actorList   string
@@ -130,10 +131,14 @@ func newResearchCmd() *cobra.Command {
 	f.IntVar(&o.workers, "workers", executor.DefaultWorkers,
 		"leads to run at once; 1 is required when recording or replaying a cassette")
 	f.DurationVar(&o.timeout, "timeout", 5*time.Minute, "wall-clock ceiling for the whole session")
+	f.StringVar(&o.confirmMode, "confirm-edges", string(verifier.ConfirmBoth),
+		"edge kinds needing a second agreeing judgement: both, duplicates, none. "+
+			"`both` buys 70% contradiction precision against 51%, at 67% recall "+
+			"against 98%; duplicates keeps every contradiction found and costs "+
+			"no recall")
 	f.BoolVar(&o.noConfirm, "no-confirm-edges", false,
-		"write a contradiction or duplicate edge on a single judgement; the default "+
-			"asks twice and keeps only agreements, which measured 70% precision "+
-			"against 51%")
+		"deprecated alias for --confirm-edges=none")
+	_ = f.MarkDeprecated("no-confirm-edges", "use --confirm-edges=none")
 	f.BoolVar(&o.asJSON, "json", false, "emit the result as JSON")
 	f.BoolVar(&o.quiet, "quiet", false, "suppress progress; print only the result")
 	f.IntVar(&o.maxDepth, "max-depth", planner.DefaultMaxDepth,
@@ -189,6 +194,13 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 	// missing recording, and a caller who asked for something never allowed
 	// should be told that rather than that the file is absent.
 	if err := checkCassetteIsSerial(o.workers); err != nil {
+		return err
+	}
+
+	// Before anything is created or spent: a misspelt mode falling back to the
+	// default would change the graph without saying so.
+	confirmMode, err := resolveConfirmMode(o.confirmMode, o.noConfirm)
+	if err != nil {
 		return err
 	}
 
@@ -255,7 +267,7 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 		Local:             localActor,
 		VerifierModel:     cfg.LLM.VerifierModel,
 		VerifierBatchSize: cfg.LLM.VerifierBatchSize,
-		NoConfirmEdges:    o.noConfirm,
+		Confirm:           confirmMode,
 		Owner:             "cli",
 		Notice:            func(msg string) { fmt.Fprintf(os.Stderr, "warning: %s\n", msg) },
 	}
@@ -990,4 +1002,30 @@ func rankPassages(question string, passages []string, n int) []int {
 		}
 	}
 	return out
+}
+
+// resolveConfirmMode turns the flag into a mode, refusing what it does not recognise.
+//
+// Unknown is an error, not the default: the mode moves contradiction recall between
+// 98% and 67%, so a typo choosing that silently is the wrong graph reported as the
+// right one. Passing both flags is refused rather than given an invented precedence.
+func resolveConfirmMode(mode string, noConfirm bool) (verifier.ConfirmMode, error) {
+	m := verifier.ConfirmMode(strings.ToLower(strings.TrimSpace(mode)))
+	if m == "" {
+		m = verifier.ConfirmBoth
+	}
+	switch m {
+	case verifier.ConfirmBoth, verifier.ConfirmDuplicates, verifier.ConfirmNone:
+	default:
+		return "", fmt.Errorf("--confirm-edges %q: want both, duplicates or none", mode)
+	}
+
+	if noConfirm {
+		if m != verifier.ConfirmBoth {
+			return "", fmt.Errorf(
+				"--no-confirm-edges and --confirm-edges=%s disagree: pass only --confirm-edges", m)
+		}
+		return verifier.ConfirmNone, nil
+	}
+	return m, nil
 }

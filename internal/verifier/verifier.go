@@ -47,10 +47,10 @@ type Verifier struct {
 	// default.
 	BatchSize int
 
-	// ConfirmEdges re-judges every verdict that would build an edge and keeps only
-	// the ones a second call agrees with. See confirm() for the measurement behind
-	// it: 51% precision becomes 70%, at 53 edges where one judgement kept 105.
-	ConfirmEdges bool
+	// Confirm chooses which edge kinds need a second agreeing judgement before the
+	// edge is written. The zero value confirms nothing — callers opt in, as they did
+	// when this was a bool. See ConfirmMode for the measurement.
+	Confirm ConfirmMode
 
 	// StalenessGap is how far apart two publication dates must be for a
 	// contradiction to read as staleness (§11.2). Zero takes the default.
@@ -108,8 +108,9 @@ type Result struct {
 	// PairsDecidedFree were settled by a mechanical rule, with no model call.
 	PairsDecidedFree int
 	PairsJudged      int
-	// PairsConfirmed and PairsUnconfirmed count the second judgement's outcome when
-	// ConfirmEdges is on. Unconfirmed pairs kept their claims and lost their edge.
+	// PairsConfirmed and PairsUnconfirmed count the second judgement's outcome for
+	// the edge kinds Confirm names. Unconfirmed pairs kept their claims and lost
+	// their edge.
 	PairsConfirmed   int
 	PairsUnconfirmed int
 
@@ -339,6 +340,45 @@ func (v *Verifier) followUpsPerRoot(ctx context.Context, sessionID string) (map[
 // would only look like it already did.
 func followUpActor() core.ActorType { return core.ActorWeb }
 
+// ConfirmMode names which edge kinds need a second agreeing judgement. The zero
+// value confirms nothing, which is what the bool it replaced defaulted to — a mode
+// whose zero value confirmed would have switched the pass on for every caller that
+// never asked for it. session.Runner opts in, and its own zero value still does.
+//
+// Per edge kind because the two measured oppositely on 116 labelled positives:
+//
+//	contradicts   single 51% precision / 98% recall  ->  confirmed 70% / 67%
+//	duplicate_of  single 64% precision / 88% recall  ->  confirmed 88% / 88%
+//
+// So confirming duplicates is free, and confirming contradictions costs 17 of 55
+// true ones. Worth it where a false edge also buys a follow-up lead; not worth it
+// where a person adjudicates the pair and a miss is the silent failure.
+type ConfirmMode string
+
+const (
+	// ConfirmBoth is what session.Runner defaults to: right for an autonomous run.
+	ConfirmBoth ConfirmMode = "both"
+	// ConfirmDuplicates keeps every contradiction found. For output a person reads.
+	ConfirmDuplicates ConfirmMode = "duplicates"
+	// ConfirmNone is the single-judgement graph.
+	ConfirmNone ConfirmMode = "none"
+)
+
+// confirms reports whether an edge of this kind must be agreed with twice.
+//
+// An allowlist per mode: an Effect added later is unconfirmed until someone decides,
+// rather than inheriting whichever branch it falls through to.
+func confirms(mode ConfirmMode, e Effect) bool {
+	switch mode {
+	case ConfirmBoth:
+		return e == EffectDuplicate || e == EffectContradiction
+	case ConfirmDuplicates:
+		return e == EffectDuplicate
+	default: // ConfirmNone, and the zero value
+		return false
+	}
+}
+
 // confirm re-judges the verdicts that would build an edge, and keeps only the ones
 // the model stands behind twice.
 //
@@ -348,25 +388,26 @@ func followUpActor() core.ActorType { return core.ActorWeb }
 // mistake — "contradicts" on a pair that is merely related. Requiring a second,
 // agreeing judgement raises precision to 70%.
 //
-// It is a trade, not a free win: it keeps 53 edges where one judgement kept 105, and
-// F1 barely moves. The trade is taken because the two errors do not cost the same. A
-// false contradiction penalises the confidence of true claims, prints "sources
-// disagree" in a report, and proposes a follow-up lead — it spends money researching
-// a disagreement that does not exist. A missed one is a silence.
+// It is a trade, not a free win: 53 contradiction edges where one judgement kept
+// 105, recall 98% to 67%, F1 barely moving. Which side is right depends on the
+// reader, so it is a per-edge-kind choice — see ConfirmMode.
 //
-// Only the positives are re-judged, so the cost is the share of pairs that produced
-// an edge — 14% more adjudication calls on the corpus, against a verification stage
-// that is already a rounding error beside fetching and mining.
+// Only the named positives are re-judged: 14% more adjudication calls under
+// ConfirmBoth, about a tenth of that under ConfirmDuplicates.
 //
-// A pair that cannot be re-judged (allowance gone, provider failing) KEEPS its first
-// verdict rather than being dropped. Degrading to "no edges at all" because the
-// second opinion was unaffordable would be worse than the single-judgement graph
-// this replaces.
+// A pair that cannot be re-judged — allowance gone, provider failing, or a kind this
+// mode does not confirm — KEEPS its first verdict. "No edges at all" because the
+// second opinion was unaffordable is worse than the graph this replaces.
+//
+// Rests on one property it cannot check: the model must be able to disagree with
+// itself. Re-judging reproduced the stored verdict 54% of the time, which is where
+// the precision comes from — a provider caching identical requests would make this a
+// no-op that confirmed everything, silently.
 func (v *Verifier) confirm(ctx context.Context, sessionID string, judged []Judged, res *Result) []Judged {
-	if !v.ConfirmEdges || len(judged) == 0 {
+	if len(judged) == 0 {
 		return judged
 	}
-	positives := positivesOf(judged)
+	positives := positivesOf(judged, v.Confirm)
 	if len(positives) == 0 {
 		return judged
 	}
@@ -384,14 +425,14 @@ func (v *Verifier) confirm(ctx context.Context, sessionID string, judged []Judge
 	return v.applyConfirmations(judged, second, res)
 }
 
-// positivesOf is the subset worth a second call: the verdicts that build an edge.
+// positivesOf is the subset worth a second call: verdicts building an edge of a kind
+// this mode confirms.
 //
-// Re-confirming "neither" would multiply the cost of verification for nothing —
-// it is 86% of pairs and builds no edge either way.
-func positivesOf(judged []Judged) []Pair {
+// No mode confirms "neither" — 86% of pairs, and no edge either way.
+func positivesOf(judged []Judged, mode ConfirmMode) []Pair {
 	var out []Pair
 	for _, j := range judged {
-		if j.Relation.EffectOf() != EffectInert {
+		if confirms(mode, j.Relation.EffectOf()) {
 			out = append(out, j.Pair)
 		}
 	}
