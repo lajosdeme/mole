@@ -50,6 +50,16 @@ const (
 	OutcomeRobotsDenied Outcome = "robots_denied"
 	OutcomeGuardDenied  Outcome = "guard_denied"
 
+	// OutcomeNotSelected is a search result the actor never asked for, because
+	// the source cap or the input-token budget was already spent.
+	//
+	// Recorded so coverage has a denominator. Search results are otherwise not
+	// persisted anywhere, so "read 14 sources" had no "of how many" — and a count
+	// of what was read, presented as coverage, reads as a complete denominator.
+	// Not a failure and not a refusal: nothing was wrong with these pages, the
+	// budget simply ran out before their turn.
+	OutcomeNotSelected Outcome = "not_selected"
+
 	OutcomeExtractFailed Outcome = "extract_failed"
 	OutcomeServerError   Outcome = "server_error"
 	OutcomeTooLarge      Outcome = "too_large"
@@ -74,8 +84,16 @@ func (o Outcome) Usable() bool {
 }
 
 // Attempted reports whether a request was actually made. It is the denominator
-// for every per-cause rate: provider_content never touched the network.
-func (o Outcome) Attempted() bool { return o != OutcomeProviderContent }
+// for every per-cause rate.
+//
+// Two outcomes never touched the network: provider_content, where the search
+// provider had already returned the text, and not_selected, where the actor never
+// reached that result. Counting either would pad the denominator with requests
+// nobody made and drag every per-cause rate down by however much of the result
+// list happened to go unread.
+func (o Outcome) Attempted() bool {
+	return o != OutcomeProviderContent && o != OutcomeNotSelected
+}
 
 // Result is one fetch attempt, recorded whether or not it succeeded.
 type Result struct {

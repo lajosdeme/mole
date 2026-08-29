@@ -106,16 +106,18 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 		perSource       []sourceSummary
 	)
 
-	for _, hit := range sr.Results {
+	for i, hit := range sr.Results {
 		// Count sources READ, not sources that yielded something. Counting
 		// summaries meant a run where nothing extracted cleanly walked the
 		// entire result list — spending a fetch, an extract, and a model call
 		// per hit against a cap that never advanced.
 		if sourcesRead >= budget.MaxSources {
+			a.recordNotSelected(ctx, lead, sr.Results[i:])
 			break
 		}
 		if remaining := budget.MaxInputTokens - inputTokensUsed; remaining <= 0 {
 			res.Truncated = true
+			a.recordNotSelected(ctx, lead, sr.Results[i:])
 			break
 		}
 
@@ -470,6 +472,25 @@ func (a *WebActor) reduce(ctx context.Context, lead core.Lead, sources []sourceS
 // meaningless without a denominator, and §17.1's gate reads both.
 func (a *WebActor) recordOutcome(ctx context.Context, lead core.Lead, rawURL string, outcome fetch.Outcome, status int, bytes int64, errText string) {
 	a.recordOutcomeFor(ctx, lead, rawURL, fetch.DomainOf(rawURL), outcome, status, bytes, errText)
+}
+
+// recordNotSelected records the tail of a result list the actor never reached.
+//
+// Coverage needs a denominator and there was none: search results are persisted
+// nowhere, so "14 sources read" could not be qualified by "of how many". A read
+// count presented as coverage reads as a complete denominator, which is the one
+// thing a coverage section exists to prevent.
+//
+// These are not failures. Nothing was wrong with these pages; the source cap or
+// the input-token budget ran out before their turn, which is why the outcome is
+// excluded from every per-cause rate — see Outcome.Attempted.
+func (a *WebActor) recordNotSelected(ctx context.Context, lead core.Lead, skipped []search.Result) {
+	for _, hit := range skipped {
+		if hit.URL == "" {
+			continue
+		}
+		a.recordOutcome(ctx, lead, hit.URL, fetch.OutcomeNotSelected, 0, 0, "")
+	}
 }
 
 // recordOutcomeFor is recordOutcome for a caller that already knows the domain.

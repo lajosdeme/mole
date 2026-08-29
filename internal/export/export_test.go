@@ -20,6 +20,14 @@ import (
 // contradiction, and a fetch that failed.
 func fixture(t *testing.T) (*sqlite.DB, *core.Session) {
 	t.Helper()
+	return fixtureWith(t, true)
+}
+
+// fixtureWith builds the session, optionally without the not_selected rows that
+// give coverage its denominator — which is every session recorded before that
+// outcome existed.
+func fixtureWith(t *testing.T, withNotSelected bool) (*sqlite.DB, *core.Session) {
+	t.Helper()
 	ctx := context.Background()
 
 	db, err := sqlite.Open(filepath.Join(t.TempDir(), "t.db"), sqlite.Options{})
@@ -73,10 +81,25 @@ func fixture(t *testing.T) (*sqlite.DB, *core.Session) {
 		}}); err != nil {
 			return err
 		}
-		return tx.RecordFetchOutcome(ctx, &store.FetchOutcome{
+		if err := tx.RecordFetchOutcome(ctx, &store.FetchOutcome{
 			SessionID: &sess.ID, URL: "https://paywalled.example/report",
 			Domain: "paywalled.example", Outcome: "paywall", StatusCode: 402,
-		})
+		}); err != nil {
+			return err
+		}
+		// Two results the source cap never reached: the denominator.
+		if !withNotSelected {
+			return nil
+		}
+		for _, u := range []string{"https://skipped.example/a", "https://skipped.example/b"} {
+			if err := tx.RecordFetchOutcome(ctx, &store.FetchOutcome{
+				SessionID: &sess.ID, URL: u, Domain: "skipped.example",
+				Outcome: "not_selected",
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -171,7 +194,8 @@ func TestTheEnvelopeIsPinned(t *testing.T) {
 		"cost.by_role[].usd_micros", "cost.calls", "cost.tokens",
 		"cost.tokens.cache_read", "cost.tokens.cache_write", "cost.tokens.input",
 		"cost.tokens.output", "cost.usd_micros", "coverage",
-		"coverage.considered_known", "coverage.note", "coverage.read",
+		"coverage.considered", "coverage.considered_known",
+		"coverage.not_selected", "coverage.note", "coverage.read",
 		"coverage.unreachable", "coverage.unreachable[].domain", "coverage.unreachable[].outcome",
 		"coverage.unreachable[].status_code", "coverage.unreachable[].url", "evidence",
 		"evidence[].confidence", "evidence[].id", "evidence[].lead_id",
@@ -242,21 +266,54 @@ func TestTheReceiptIsAbsentRatherThanZero(t *testing.T) {
 	}
 }
 
-// TestCoverageDoesNotClaimADenominatorItLacks.
-//
-// Search results are not persisted, so "31 sources considered" cannot be
-// reconstructed. Reporting read-count alone as coverage would read as a complete
-// denominator — the failure the coverage section exists to prevent.
-func TestCoverageDoesNotClaimADenominatorItLacks(t *testing.T) {
+// TestCoverageCountsWhatWasConsidered. A read count presented as coverage reads
+// as a complete denominator; the not_selected rows are what make it a fraction.
+func TestCoverageCountsWhatWasConsidered(t *testing.T) {
 	ex := build(t, export.Options{})
+	if !ex.Coverage.ConsideredKnown {
+		t.Fatal("coverage does not know its denominator despite not_selected rows")
+	}
+	// 2 sources produced claims, 1 paywalled, 2 never reached.
+	if ex.Coverage.Considered != 5 {
+		t.Errorf("considered = %d, want 5", ex.Coverage.Considered)
+	}
+	if ex.Coverage.Read != 2 {
+		t.Errorf("read = %d, want 2", ex.Coverage.Read)
+	}
+	if ex.Coverage.NotSelected != 2 {
+		t.Errorf("not_selected = %d, want 2", ex.Coverage.NotSelected)
+	}
+}
+
+// TestAnUnreadResultIsNotReportedAsUnreachable. A source the budget never reached
+// and a source that refused to be read are different facts, and a pack that
+// printed the first as the second would name pages nothing was wrong with.
+func TestAnUnreadResultIsNotReportedAsUnreachable(t *testing.T) {
+	ex := build(t, export.Options{})
+	if len(ex.Coverage.Unreachable) != 1 || ex.Coverage.Unreachable[0].Outcome != "paywall" {
+		t.Errorf("unreachable should name the paywall alone: %+v", ex.Coverage.Unreachable)
+	}
+}
+
+// TestCoverageSaysSoWhenNothingRecordedADenominator.
+//
+// Every session recorded before the not_selected outcome existed has no
+// denominator. Reporting considered == read for those would be the exact
+// overstatement this section exists to avoid, and it would be invisible.
+func TestCoverageSaysSoWhenNothingRecordedADenominator(t *testing.T) {
+	db, sess := fixtureWith(t, false)
+	ex, err := export.Build(context.Background(), db, sess.ID, export.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if ex.Coverage.ConsideredKnown {
-		t.Error("coverage claims to know how many sources were considered")
+		t.Error("coverage claims a denominator nothing recorded")
+	}
+	if ex.Coverage.Considered != 0 {
+		t.Errorf("considered = %d with nothing to count it from", ex.Coverage.Considered)
 	}
 	if ex.Coverage.Note == "" {
 		t.Error("nothing tells a consumer why the denominator is missing")
-	}
-	if len(ex.Coverage.Unreachable) != 1 || ex.Coverage.Unreachable[0].Outcome != "paywall" {
-		t.Errorf("the paywalled source is not named: %+v", ex.Coverage.Unreachable)
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/store"
+	"github.com/lajosdeme/mole/internal/tools/fetch"
 )
 
 // SchemaVersion is the envelope's version.
@@ -120,19 +121,29 @@ type Conflict struct {
 
 // Coverage is what was read and what was not.
 type Coverage struct {
+	// Considered is how many distinct sources the session had available to read:
+	// what it read, what refused to be read, and what the budget never reached.
+	Considered int `json:"considered"`
 	// Read is how many distinct sources produced a claim.
 	Read int `json:"read"`
+	// NotSelected is how many results the source cap or the token budget passed
+	// over. Not failures — nothing was wrong with those pages.
+	NotSelected int `json:"not_selected"`
 
-	// ConsideredKnown is false, and says so rather than being absent.
+	// ConsideredKnown says whether Considered means anything.
 	//
-	// Search results are not persisted — tool_calls records the call, not the URLs
-	// it returned — so how many sources were CONSIDERED cannot be reconstructed.
-	// Reporting the read count alone would read as a complete denominator, which is
-	// the exact failure a coverage section exists to prevent.
+	// False for every session recorded before the not_selected outcome existed,
+	// where search results were persisted nowhere and the denominator cannot be
+	// reconstructed. Reporting considered == read for those would be the exact
+	// overstatement a coverage section exists to prevent, and it would be
+	// invisible — so the flag is carried rather than inferred from a zero.
 	ConsideredKnown bool   `json:"considered_known"`
 	Note            string `json:"note"`
 
-	// Unreachable names every source that could not be read, and why.
+	// Unreachable names every source that could not be read, and why. A result the
+	// budget never reached is NOT in here: "nobody asked" and "it refused" are
+	// different facts, and a pack printing the first as the second would name pages
+	// nothing was wrong with.
 	Unreachable []Unreachable `json:"unreachable"`
 }
 
@@ -343,11 +354,14 @@ func conflictsOf(edges []*core.ClaimEdge, claims []*core.Claim) []Conflict {
 	return out
 }
 
-// coverageNote states the denominator's absence in the document itself, so a
-// consumer rendering coverage cannot accidentally present a partial count as a
-// complete one.
-const coverageNote = "sources considered is not recorded: search results are not " +
-	"persisted, so only what was read and what could not be read are known"
+// The note travels in the document, so a consumer rendering coverage cannot
+// present a partial count as a complete one by accident.
+const (
+	coverageKnown = "considered counts every distinct source the session had: read, " +
+		"refused, and passed over when the source cap or token budget ran out"
+	coverageUnknown = "sources considered is not recorded for this session: it predates " +
+		"the not_selected outcome, so only what was read and what could not be read are known"
+)
 
 func coverageOf(claims []*core.Claim, fetches []*store.FetchOutcome) Coverage {
 	read := map[string]bool{}
@@ -357,21 +371,32 @@ func coverageOf(claims []*core.Claim, fetches []*store.FetchOutcome) Coverage {
 		}
 	}
 
-	seen := map[string]bool{}
+	considered := map[string]bool{}
+	for u := range read {
+		considered[u] = true
+	}
+
+	seenBad := map[string]bool{}
+	skipped := map[string]bool{}
 	var bad []Unreachable
 	for _, f := range fetches {
-		if f == nil || f.Outcome == "" {
+		if f == nil || f.Outcome == "" || f.URL == "" {
 			continue
 		}
-		// "ok" and provider-supplied text are not failures; everything else is a
-		// source the reader did not get, whatever the cause.
-		if f.Outcome == "ok" || f.Outcome == "provider_content" {
+		considered[f.URL] = true
+
+		switch fetch.Outcome(f.Outcome) {
+		case fetch.OutcomeNotSelected:
+			skipped[f.URL] = true
+			continue
+		case fetch.OutcomeOK, fetch.OutcomeProviderContent, fetch.OutcomeStructuredOnly:
+			// Read, by one route or another.
 			continue
 		}
-		if seen[f.URL] {
+		if seenBad[f.URL] {
 			continue
 		}
-		seen[f.URL] = true
+		seenBad[f.URL] = true
 		bad = append(bad, Unreachable{
 			URL: f.URL, Domain: f.Domain, Outcome: f.Outcome, StatusCode: f.StatusCode,
 		})
@@ -381,9 +406,18 @@ func coverageOf(claims []*core.Claim, fetches []*store.FetchOutcome) Coverage {
 		bad = []Unreachable{}
 	}
 
-	return Coverage{
-		Read: len(read), ConsideredKnown: false, Note: coverageNote, Unreachable: bad,
+	// Known only when something actually recorded what went unread. A session with
+	// no not_selected rows either predates the outcome or read everything it found,
+	// and those are indistinguishable from here — so neither claims a denominator.
+	known := len(skipped) > 0
+	c := Coverage{
+		Read: len(read), NotSelected: len(skipped),
+		ConsideredKnown: known, Note: coverageUnknown, Unreachable: bad,
 	}
+	if known {
+		c.Considered, c.Note = len(considered), coverageKnown
+	}
+	return c
 }
 
 func costOf(byRole map[core.Role]core.Cost, calls []*core.ToolCall) Cost {
