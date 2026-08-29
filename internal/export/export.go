@@ -17,6 +17,7 @@ package export
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -193,9 +194,12 @@ type Options struct {
 	MoleVersion string
 	// Now overrides the export timestamp. Zero takes time.Now; tests set it.
 	Now time.Time
-	// Receipt, when non-nil, is the verification result to carry. Build does not
-	// run it: verification re-fetches every cited source, and a function documented
-	// as deriving from stored state must not quietly open sockets.
+	// Receipt, when non-nil, overrides whatever the session has stored. Build never
+	// runs verification itself: it re-fetches every cited source, and a function
+	// documented as deriving from stored state must not quietly open sockets.
+	//
+	// Nil takes the stored receipt, so a session verified once renders with its
+	// receipt for ever after at no cost.
 	Receipt *Receipt
 }
 
@@ -252,10 +256,30 @@ func Build(ctx context.Context, st store.Store, sessionID string, opts Options) 
 		Evidence:      evidenceOf(claims),
 		Receipt:       opts.Receipt,
 	}
+	if ex.Receipt == nil {
+		ex.Receipt = storedReceipt(sess.ReceiptJSON)
+	}
 	ex.Conflicts = conflictsOf(edges, claims)
 	ex.Coverage = coverageOf(claims, fetches)
 	ex.Cost = costOf(byRole, calls)
 	return ex, nil
+}
+
+// storedReceipt decodes what a previous verification left on the session.
+//
+// A receipt that will not parse is dropped rather than surfaced half-read: the
+// alternative is a pack printing a partial count as a complete one, which is the
+// failure the receipt exists to prevent. Empty and unparseable both mean "not
+// verified", which is the honest reading of both.
+func storedReceipt(raw string) *Receipt {
+	if raw == "" {
+		return nil
+	}
+	var r Receipt
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		return nil
+	}
+	return &r
 }
 
 func sessionOf(s *core.Session) Session {

@@ -83,6 +83,17 @@ func cmdExport(ctx context.Context, sessionID string, o exportOpts) error {
 			return err
 		}
 		opts.Receipt = receipt
+
+		// Stored, so the fetches are paid for once. Every later export of this
+		// session carries the receipt without touching the network.
+		if b, err := json.Marshal(receipt); err == nil {
+			if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+				return tx.SetSessionReceipt(ctx, sessionID, string(b))
+			}); err != nil {
+				// The export is still correct; only the saving is lost.
+				fmt.Fprintf(os.Stderr, "warning: could not store the receipt: %v\n", err)
+			}
+		}
 	}
 
 	ex, err := export.Build(ctx, db, sessionID, opts)

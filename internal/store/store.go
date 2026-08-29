@@ -199,6 +199,10 @@ type Tx interface {
 	// SetSessionReport stores the rendered answer and why it is degraded, if it is.
 	SetSessionReport(ctx context.Context, id, reportMD, degraded string) error
 
+	// SetSessionReceipt stores the citation receipt as opaque JSON. Empty means
+	// verification never ran, which is distinct from a receipt of zeroes.
+	SetSessionReceipt(ctx context.Context, id, receiptJSON string) error
+
 	// InsertRows writes a batch of extracted dataset rows (M9, §13).
 	//
 	// All or nothing, for the same reason as InsertClaims: a partial batch would

@@ -348,3 +348,69 @@ func TestAMissingSessionIsNotAnEmptyExport(t *testing.T) {
 		t.Fatal("exporting an unknown session succeeded")
 	}
 }
+
+// TestAStoredReceiptIsReused, so the fetches a verification cost are paid once
+// rather than once per render.
+func TestAStoredReceiptIsReused(t *testing.T) {
+	ctx := context.Background()
+	db, sess := fixture(t)
+
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.SetSessionReceipt(ctx, sess.ID, `{"verified":23,"mismatch":0,`+
+			`"offset_drift":1,"unreachable":2,"skipped":3}`)
+	}); err != nil {
+		t.Fatalf("store receipt: %v", err)
+	}
+
+	ex, err := export.Build(ctx, db, sess.ID, export.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.Receipt == nil {
+		t.Fatal("a stored receipt was ignored")
+	}
+	if ex.Receipt.Verified != 23 || ex.Receipt.Skipped != 3 {
+		t.Errorf("stored receipt read back wrong: %+v", ex.Receipt)
+	}
+}
+
+// TestAFreshVerificationBeatsTheStoredOne. Re-verifying is how a caller checks
+// whether sources have changed since; the older answer must not win.
+func TestAFreshVerificationBeatsTheStoredOne(t *testing.T) {
+	ctx := context.Background()
+	db, sess := fixture(t)
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.SetSessionReceipt(ctx, sess.ID, `{"verified":1}`)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ex, err := export.Build(ctx, db, sess.ID,
+		export.Options{Receipt: &export.Receipt{Verified: 99}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.Receipt.Verified != 99 {
+		t.Errorf("verified = %d; the stored receipt overrode a fresh one", ex.Receipt.Verified)
+	}
+}
+
+// TestAnUnreadableStoredReceiptIsNotVerified.
+//
+// Half a receipt is worse than none: a pack would print a partial count as a
+// complete one. Empty and unparseable both honestly mean "not verified".
+func TestAnUnreadableStoredReceiptIsNotVerified(t *testing.T) {
+	ctx := context.Background()
+	db, sess := fixture(t)
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.SetSessionReceipt(ctx, sess.ID, `{not json`)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ex, err := export.Build(ctx, db, sess.ID, export.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.Receipt != nil {
+		t.Errorf("a corrupt receipt was reported as one: %+v", ex.Receipt)
+	}
+}

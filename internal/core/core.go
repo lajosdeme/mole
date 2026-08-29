@@ -213,6 +213,12 @@ type Session struct {
 	// ReportDegraded says why the prose is missing or unsynthesized, so an empty
 	// Report can be told from a failed one.
 	ReportDegraded string
+
+	// ReceiptJSON is the citation receipt as opaque JSON, empty when verification
+	// never ran. Opaque because the store carries it without owning its shape, the
+	// same way it carries Report without parsing markdown — and because an absent
+	// check and a receipt of zeroes are different facts a consumer must tell apart.
+	ReceiptJSON string
 }
 
 // Available is the spendable balance: everything not already spent, held by an
