@@ -130,6 +130,7 @@ func newRootCmd() *cobra.Command {
 		newSessionsCmd(),
 		newStatsCmd(),
 		newTraceCmd(),
+		newExportCmd(),
 	)
 
 	// Development and evaluation commands.
