@@ -461,7 +461,11 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 			// Written WITH the report, because it cannot be written later. The
 			// [n] markers in the prose are numbered over a findings set capped by
 			// the report's token budget, and that cap does not outlive this call.
-			cites, err := json.Marshal(res.Report.Citations)
+			cited := res.Report.Citations
+			if cited == nil {
+				cited = []output.Citation{}
+			}
+			cites, err := json.Marshal(cited)
 			if err != nil {
 				return err
 			}

@@ -302,6 +302,12 @@ func storedCitations(raw string) []Citation {
 	if err := json.Unmarshal([]byte(raw), &cs); err != nil {
 		return []Citation{}
 	}
+	if cs == nil {
+		// A report with no citations marshals as the literal "null", which
+		// unmarshals into a nil slice and back out as null — so a consumer would
+		// have to null-check an array the envelope promises is an array.
+		return []Citation{}
+	}
 	sort.SliceStable(cs, func(i, j int) bool { return cs[i].N < cs[j].N })
 	return cs
 }

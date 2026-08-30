@@ -510,3 +510,65 @@ func TestUnreadableCitationsAreDroppedWhole(t *testing.T) {
 		t.Errorf("a corrupt bibliography was partly reported: %+v", ex.Report.Citations)
 	}
 }
+
+// TestNoArrayInTheEnvelopeIsEverNull.
+//
+// A consumer parses this document in another language and another repository. An
+// array that is sometimes [] and sometimes null makes every read a null-check,
+// and the one that gets forgotten is the one that ships. Found the honest way: a
+// real session whose every search failed marshalled its citations as null,
+// because a nil Go slice does, while the neighbouring field already guarded
+// against exactly that.
+//
+// Nullable POINTERS are a different thing and are left alone: receipt null means
+// verification never ran, and published_at null means the source carried no date.
+// Both are facts a reader needs, not missing arrays.
+func TestNoArrayInTheEnvelopeIsEverNull(t *testing.T) {
+	ctx := context.Background()
+	db, sess := fixtureWith(t, false)
+
+	// A session that found nothing at all: no report, no citations, no claims.
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		if err := tx.SetSessionReport(ctx, sess.ID, "", "nothing survived"); err != nil {
+			return err
+		}
+		return tx.SetSessionReportCitations(ctx, sess.ID, "null")
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ex, err := export.Build(ctx, db, sess.ID, export.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(ex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every array the envelope declares. Adding one here is the price of adding
+	// one to the envelope, and TestTheEnvelopeIsPinned is where that is noticed.
+	for _, path := range []string{
+		"scope", "conflicts", "evidence",
+		"report.citations",
+		"coverage.unreachable",
+		"cost.by_role",
+		"session.actors",
+	} {
+		v := any(raw)
+		for _, part := range strings.Split(path, ".") {
+			m, ok := v.(map[string]any)
+			if !ok {
+				t.Fatalf("%s: %s is not an object", path, part)
+			}
+			v = m[part]
+		}
+		if v == nil {
+			t.Errorf("%s is null; the envelope promises an array", path)
+		}
+	}
+}
