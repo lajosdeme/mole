@@ -26,16 +26,22 @@ import (
 )
 
 // Citation is one numbered source.
+// The tags are load-bearing, not decoration. This struct is PERSISTED — the
+// report's numbering cannot be recomputed, so it is stored — which makes its
+// marshalled shape a storage format rather than an implementation detail.
+// Without them the fields serialise as Go names, and a reader whose tag is
+// published_at silently never matches PublishedAt: encoding/json compares keys
+// case-insensitively, so N, Source and Quotes survived and the date did not.
 type Citation struct {
-	N      int
-	Source string
+	N      int    `json:"n"`
+	Source string `json:"source"`
 	// Quotes are the verified spans supporting the claims cited to this
 	// source, so a reader can check the report without re-fetching.
-	Quotes []string
+	Quotes []string `json:"quotes"`
 	// PublishedAt is the earliest publication date seen for the source, when
 	// one was recoverable. §13 asks for it per citation: a 2024 preprint and a
 	// 2026 paper carry different weight and the reader has to see which.
-	PublishedAt *time.Time
+	PublishedAt *time.Time `json:"published_at"`
 }
 
 // Report is a rendered answer.
