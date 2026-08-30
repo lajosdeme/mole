@@ -12,6 +12,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -325,6 +326,27 @@ func (d Deps) status(ctx context.Context, _ *mcp.CallToolRequest, in SessionRef)
 }
 
 // ---------------------------------------------------------------------------
+// ResultCitation is one numbered source behind the report's prose.
+type ResultCitation struct {
+	N      int      `json:"n"`
+	Source string   `json:"source"`
+	Quotes []string `json:"quotes,omitempty"`
+}
+
+// resultCitations decodes the stored bibliography, dropping it whole if it will
+// not parse: a marker resolving to the wrong source is worse than one resolving
+// to nothing, because only the second is visible.
+func resultCitations(raw string) []ResultCitation {
+	if raw == "" {
+		return nil
+	}
+	var cs []ResultCitation
+	if err := json.Unmarshal([]byte(raw), &cs); err != nil {
+		return nil
+	}
+	return cs
+}
+
 // research.result
 // ---------------------------------------------------------------------------
 
@@ -353,6 +375,12 @@ type ResultOut struct {
 	SessionID string `json:"session_id"`
 	Status    string `json:"status"`
 	ReportMD  string `json:"report_md"`
+
+	// Citations resolve the [n] markers in ReportMD. Without them a caller reads
+	// prose citing [4] with no way to learn what [4] was — the numbering is
+	// assigned over a findings set capped at generation time and cannot be
+	// recomputed, so it is carried from the session or it is lost.
+	Citations []ResultCitation `json:"citations"`
 
 	Claims []Claim `json:"claims"`
 	Edges  []Edge  `json:"edges"`
@@ -396,6 +424,7 @@ func (d Deps) result(ctx context.Context, _ *mcp.CallToolRequest, in SessionRef)
 		SessionID:   sess.ID,
 		Status:      string(sess.Status),
 		ReportMD:    sess.Report,
+		Citations:   resultCitations(sess.ReportCitationsJSON),
 		TotalClaims: countNonNil(claims),
 		TotalEdges:  countNonNil(edges),
 	}

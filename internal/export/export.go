@@ -87,6 +87,26 @@ type Report struct {
 	Markdown string `json:"markdown"`
 	// Degraded is mole's own account of why the report is thin, when it is.
 	Degraded string `json:"degraded"`
+	// Citations resolve the [n] markers in Markdown. Carried from the session
+	// rather than recomputed: the numbering was assigned over a findings set
+	// capped by the report's token budget at generation time, and that cap is not
+	// persisted, so deriving it again agrees with the prose only by luck.
+	//
+	// Empty is correct for a report that cites nothing — dataset mode renders a
+	// table. Empty beside prose that DOES cite means the session predates the
+	// column, and needs no separate flag to say so: the markers are right there
+	// with nothing to resolve them.
+	Citations []Citation `json:"citations"`
+}
+
+// Citation is one numbered source behind the prose.
+type Citation struct {
+	N      int    `json:"n"`
+	Source string `json:"source"`
+	// Quotes are the verified spans supporting it, so a reader can check the
+	// citation without re-fetching the page.
+	Quotes      []string   `json:"quotes"`
+	PublishedAt *time.Time `json:"published_at"`
 }
 
 // Claim is one assertion and the text it was mined from.
@@ -252,9 +272,13 @@ func Build(ctx context.Context, st store.Store, sessionID string, opts Options) 
 		ExportedAt:    now.UTC(),
 		Session:       sessionOf(sess),
 		Scope:         scopeOf(leads),
-		Report:        Report{Markdown: sess.Report, Degraded: sess.ReportDegraded},
-		Evidence:      evidenceOf(claims),
-		Receipt:       opts.Receipt,
+		Report: Report{
+			Markdown:  sess.Report,
+			Degraded:  sess.ReportDegraded,
+			Citations: storedCitations(sess.ReportCitationsJSON),
+		},
+		Evidence: evidenceOf(claims),
+		Receipt:  opts.Receipt,
 	}
 	if ex.Receipt == nil {
 		ex.Receipt = storedReceipt(sess.ReceiptJSON)
@@ -263,6 +287,23 @@ func Build(ctx context.Context, st store.Store, sessionID string, opts Options) 
 	ex.Coverage = coverageOf(claims, fetches)
 	ex.Cost = costOf(byRole, calls)
 	return ex, nil
+}
+
+// storedCitations decodes the bibliography written with the report.
+//
+// A bibliography that will not parse is dropped WHOLE rather than partly read. A
+// marker resolving to the wrong source is worse than one resolving to nothing,
+// because only the second is visible to a reader.
+func storedCitations(raw string) []Citation {
+	if raw == "" {
+		return []Citation{}
+	}
+	var cs []Citation
+	if err := json.Unmarshal([]byte(raw), &cs); err != nil {
+		return []Citation{}
+	}
+	sort.SliceStable(cs, func(i, j int) bool { return cs[i].N < cs[j].N })
+	return cs
 }
 
 // storedReceipt decodes what a previous verification left on the session.

@@ -214,6 +214,11 @@ type Session struct {
 	// Report can be told from a failed one.
 	ReportDegraded string
 
+	// ReportCitationsJSON is the report's bibliography as opaque JSON: the [n]
+	// markers in Report resolved to sources. Carried rather than recomputed
+	// because the numbering depends on a generation-time cap nobody persists.
+	ReportCitationsJSON string
+
 	// ReceiptJSON is the citation receipt as opaque JSON, empty when verification
 	// never ran. Opaque because the store carries it without owning its shape, the
 	// same way it carries Report without parsing markdown — and because an absent

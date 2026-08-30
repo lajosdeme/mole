@@ -1,0 +1,24 @@
+-- The report's citation numbering, stored because it cannot be recomputed.
+--
+-- The prose carries bracket markers -- [1], [4][5] -- and their numbers are
+-- assigned over a findings set capped by the report's token budget at the moment
+-- of generation (output.Report: Findings(claims, edges, gen.MaxClaims)). That cap
+-- is not persisted, so recomputing the numbering from stored claims agrees with
+-- the prose only when the cap did not bite, and silently disagrees when it did.
+--
+-- A [4] resolving to the wrong source, in a document sold as verified evidence, is
+-- precisely the failure this project exists to prevent. So the mapping the model
+-- actually wrote against is carried rather than derived -- the same reasoning
+-- DumpPairs already records for candidate pairs: regenerating does not reproduce
+-- what the run did.
+--
+-- Opaque JSON, like receipt_json: the store carries it without owning its shape,
+-- as it carries report_md without parsing markdown. A column on sessions rather
+-- than a table, for report_md's reasons -- one session has one bibliography,
+-- written when the report is, and nothing queries citations independently of it.
+--
+-- Empty is correct for dataset mode, whose markdown is a table and cites nothing.
+-- Empty beside prose that DOES cite means the session predates this column, and is
+-- detectable without a separate flag: markers present, nothing to resolve them.
+
+ALTER TABLE sessions ADD COLUMN report_citations_json TEXT NOT NULL DEFAULT '';

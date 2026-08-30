@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -105,7 +107,15 @@ func fixtureWith(t *testing.T, withNotSelected bool) (*sqlite.DB, *core.Session)
 	}
 
 	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
-		return tx.SetSessionReport(ctx, sess.ID, "## Finding\n\nThe 40% figure traces to one press release.", "")
+		if err := tx.SetSessionReport(ctx, sess.ID,
+			"## Finding\n\nThe 40% figure traces to one press release [1], against "+
+				"an independent series [2].", ""); err != nil {
+			return err
+		}
+		return tx.SetSessionReportCitations(ctx, sess.ID, `[
+			{"n":1,"source":"https://trade.example/press","quotes":["shipments grew 40%"]},
+			{"n":2,"source":"https://stats.example/2026","quotes":["installations rose 11.4%"]}
+		]`)
 	}); err != nil {
 		t.Fatalf("set report: %v", err)
 	}
@@ -201,7 +211,9 @@ func TestTheEnvelopeIsPinned(t *testing.T) {
 		"evidence[].confidence", "evidence[].id", "evidence[].lead_id",
 		"evidence[].published_at", "evidence[].quote", "evidence[].source",
 		"evidence[].text", "exported_at", "mole_version",
-		"receipt", "report", "report.degraded",
+		"receipt", "report", "report.citations", "report.citations[].n",
+		"report.citations[].published_at", "report.citations[].quotes",
+		"report.citations[].source", "report.degraded",
 		"report.markdown", "schema_version", "scope",
 		"scope[].actor", "scope[].depth", "scope[].id",
 		"scope[].parent_id", "scope[].query", "scope[].status",
@@ -412,5 +424,89 @@ func TestAnUnreadableStoredReceiptIsNotVerified(t *testing.T) {
 	}
 	if ex.Receipt != nil {
 		t.Errorf("a corrupt receipt was reported as one: %+v", ex.Receipt)
+	}
+}
+
+// TestEveryCitationMarkerResolves is the property the whole of phase 0 exists for.
+//
+// Citation numbers are assigned over a findings set capped by the report's token
+// budget at generation time, and that cap is not persisted — so recomputing them
+// gives a different mapping whenever the cap bit. A [4] pointing at the wrong
+// source in a document sold as verified evidence is the failure this product
+// exists to prevent, which is why the numbering is carried rather than derived.
+func TestEveryCitationMarkerResolves(t *testing.T) {
+	ex := build(t, export.Options{})
+
+	byN := map[int]bool{}
+	for _, c := range ex.Report.Citations {
+		byN[c.N] = true
+	}
+
+	markers := regexp.MustCompile(`\[(\d+)\]`).FindAllStringSubmatch(ex.Report.Markdown, -1)
+	if len(markers) == 0 {
+		t.Fatal("the fixture's prose carries no citation markers, so this asserts nothing")
+	}
+	for _, m := range markers {
+		n, _ := strconv.Atoi(m[1])
+		if !byN[n] {
+			t.Errorf("the prose cites [%d] and nothing resolves it", n)
+		}
+	}
+}
+
+// TestACitationCarriesWhatAReaderNeedsToCheckIt: a number and a source are not
+// enough to verify anything without re-fetching, which is the point of the quote.
+func TestACitationCarriesWhatAReaderNeedsToCheckIt(t *testing.T) {
+	ex := build(t, export.Options{})
+	if len(ex.Report.Citations) != 2 {
+		t.Fatalf("%d citation(s), want 2", len(ex.Report.Citations))
+	}
+	for _, c := range ex.Report.Citations {
+		if c.N == 0 || c.Source == "" || len(c.Quotes) == 0 {
+			t.Errorf("citation %+v cannot be checked by a reader", c)
+		}
+	}
+}
+
+// TestProseWithNoMarkersNeedsNoCitations. Dataset mode renders a table, not
+// prose, so an empty array there is correct rather than missing — and an empty
+// array beside prose that DOES cite is detectable without a separate flag.
+func TestProseWithNoMarkersNeedsNoCitations(t *testing.T) {
+	ctx := context.Background()
+	db, sess := fixture(t)
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		if err := tx.SetSessionReport(ctx, sess.ID, "A table, no prose.", ""); err != nil {
+			return err
+		}
+		return tx.SetSessionReportCitations(ctx, sess.ID, "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ex, err := export.Build(ctx, db, sess.ID, export.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ex.Report.Citations) != 0 {
+		t.Errorf("%d citation(s) invented for prose that cites nothing", len(ex.Report.Citations))
+	}
+}
+
+// TestUnreadableCitationsAreDroppedWhole. Half a bibliography renumbers the
+// document: a marker resolving to the wrong source is worse than one resolving
+// to nothing, because only the second is visible.
+func TestUnreadableCitationsAreDroppedWhole(t *testing.T) {
+	ctx := context.Background()
+	db, sess := fixture(t)
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.SetSessionReportCitations(ctx, sess.ID, `[{"n":1,`)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ex, err := export.Build(ctx, db, sess.ID, export.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ex.Report.Citations) != 0 {
+		t.Errorf("a corrupt bibliography was partly reported: %+v", ex.Report.Citations)
 	}
 }
