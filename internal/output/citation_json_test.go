@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/lajosdeme/mole/internal/core"
 )
 
 // TestACitationSurvivesBeingStored.
@@ -48,5 +50,31 @@ func TestACitationSurvivesBeingStored(t *testing.T) {
 	}
 	if !out[0].PublishedAt.Equal(at) {
 		t.Errorf("date = %v, want %v", out[0].PublishedAt, at)
+	}
+}
+
+// TestACitationDoesNotQuoteItselfTwice.
+//
+// Several claims routinely quote the same sentence — one page asserting one
+// thing is what duplicate clustering exists to collapse — and printing it three
+// times under one citation reads as three pieces of evidence. Seen in a rendered
+// pack, where citation 3 carried the same sentence twice.
+func TestACitationDoesNotQuoteItselfTwice(t *testing.T) {
+	same := "sales of 98,469 hydronic heat pumps were largely driven by monobloc"
+	findings := []Finding{{
+		Sources: []string{"https://example.test/a"},
+		cluster: []*core.Claim{
+			{Source: "https://example.test/a", Quote: same},
+			{Source: "https://example.test/a", Quote: same},
+			{Source: "https://example.test/a", Quote: "a different sentence entirely"},
+		},
+	}}
+
+	cits := citeFindings(findings)
+	if len(cits) != 1 {
+		t.Fatalf("%d citation(s), want 1", len(cits))
+	}
+	if len(cits[0].Quotes) != 2 {
+		t.Errorf("quotes = %v; the repeated sentence was kept twice", cits[0].Quotes)
 	}
 }

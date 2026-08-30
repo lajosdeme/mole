@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -339,7 +340,12 @@ func citeFindings(findings []Finding) []Citation {
 				continue
 			}
 			cit := &out[n-1]
-			if q := strings.TrimSpace(c.Quote); q != "" && len(cit.Quotes) < 3 {
+			// Deduplicated. Several claims routinely quote the same sentence —
+			// one page asserting one thing is exactly what the duplicate
+			// clustering collapses — and printing it three times under one
+			// citation reads as three pieces of evidence.
+			if q := strings.TrimSpace(c.Quote); q != "" && len(cit.Quotes) < 3 &&
+				!slices.Contains(cit.Quotes, q) {
 				cit.Quotes = append(cit.Quotes, q)
 			}
 			if c.PublishedAt != nil && (cit.PublishedAt == nil || c.PublishedAt.Before(*cit.PublishedAt)) {
