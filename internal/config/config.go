@@ -65,12 +65,13 @@ type Config struct {
 }
 
 type SearchConfig struct {
-	// Provider is "brave" or "tavily".
+	// Provider is "brave", "tavily", or "youcom".
 	Provider string `json:"provider,omitempty"`
-	// BraveKey and TavilyKey are stored separately so switching providers does
-	// not require re-entering a key you already gave.
+	// BraveKey, TavilyKey, and YoucomKey are stored separately so switching
+	// providers does not require re-entering a key you already gave.
 	BraveKey  string `json:"brave_key,omitempty"`
 	TavilyKey string `json:"tavily_key,omitempty"`
+	YoucomKey string `json:"youcom_key,omitempty"`
 	// CostPerQueryMicros overrides the default price for the active provider,
 	// for users on a plan that differs from the published entry tier.
 	CostPerQueryMicros int64 `json:"cost_per_query_micros,omitempty"`
@@ -83,6 +84,8 @@ func (s SearchConfig) ActiveKey() string {
 		return s.BraveKey
 	case "tavily":
 		return s.TavilyKey
+	case "youcom":
+		return s.YoucomKey
 	}
 	return ""
 }
@@ -209,6 +212,7 @@ func (c *Config) applyEnv() {
 	setIf(&c.Search.Provider, "MOLE_SEARCH_PROVIDER")
 	setIf(&c.Search.BraveKey, "MOLE_BRAVE_API_KEY", "BRAVE_API_KEY")
 	setIf(&c.Search.TavilyKey, "MOLE_TAVILY_API_KEY", "TAVILY_API_KEY")
+	setIf(&c.Search.YoucomKey, "MOLE_YOUCOM_API_KEY", "YDC_API_KEY")
 	setIf(&c.LLM.APIKey, "MOLE_LLM_API_KEY", "ANTHROPIC_API_KEY")
 	setIf(&c.LLM.BaseURL, "MOLE_LLM_BASE_URL")
 	setIf(&c.LLM.Model, "MOLE_LLM_MODEL")
@@ -284,12 +288,12 @@ type Field struct {
 func Fields() []Field {
 	return []Field{
 		{
-			Name: "search.provider", Help: "search backend: brave | tavily",
+			Name: "search.provider", Help: "search backend: brave | tavily | youcom",
 			get: func(c *Config) string { return c.Search.Provider },
 			set: func(c *Config, v string) error {
 				v = strings.ToLower(strings.TrimSpace(v))
-				if v != "brave" && v != "tavily" {
-					return fmt.Errorf("search.provider must be brave or tavily, got %q", v)
+				if v != "brave" && v != "tavily" && v != "youcom" {
+					return fmt.Errorf("search.provider must be brave, tavily or youcom, got %q", v)
 				}
 				c.Search.Provider = v
 				return nil
@@ -304,6 +308,11 @@ func Fields() []Field {
 			Name: "search.tavily-key", Secret: true, Help: "Tavily API key (tvly-…)",
 			get: func(c *Config) string { return c.Search.TavilyKey },
 			set: func(c *Config, v string) error { c.Search.TavilyKey = strings.TrimSpace(v); return nil },
+		},
+		{
+			Name: "search.youcom-key", Secret: true, Help: "You.com API key",
+			get: func(c *Config) string { return c.Search.YoucomKey },
+			set: func(c *Config, v string) error { c.Search.YoucomKey = strings.TrimSpace(v); return nil },
 		},
 		{
 			Name: "llm.provider", Help: "model backend: anthropic | openai-compatible",

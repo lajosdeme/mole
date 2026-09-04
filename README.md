@@ -113,7 +113,7 @@ You need a search provider and a model provider. Keys live in
 leak into process listings, and never in `.mcp.json`.
 
 ```bash
-mole config set search.provider tavily          # or: brave
+mole config set search.provider tavily          # or: brave, youcom
 mole config set search.tavily-key tvly-...
 
 mole config set llm.provider anthropic          # or: openai-compatible
