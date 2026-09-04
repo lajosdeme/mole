@@ -1,11 +1,11 @@
 // Package search turns a question into candidate URLs.
 //
-// Two providers ship: Brave and Tavily. They are not interchangeable in one
-// respect that matters more than price — Tavily returns extracted page content
-// alongside each result, so a result that arrives with usable text skips the
-// fetch entirely. §10.4 lists that as the first thing to try before adding any
-// fetch capability, because it removes latency, failure modes, and rate-limit
-// pressure all at once.
+// Three providers ship: Brave, Tavily, and You.com. They are not
+// interchangeable in one respect that matters more than price — Tavily and
+// You.com return extracted page content alongside each result, so a result
+// that arrives with usable text skips the fetch entirely. §10.4 lists that as
+// the first thing to try before adding any fetch capability, because it
+// removes latency, failure modes, and rate-limit pressure all at once.
 package search
 
 import (
@@ -27,12 +27,15 @@ type Kind string
 const (
 	KindBrave  Kind = "brave"
 	KindTavily Kind = "tavily"
+	KindYoucom Kind = "youcom"
 )
 
-func (k Kind) Valid() bool { return k == KindBrave || k == KindTavily }
+func (k Kind) Valid() bool {
+	return k == KindBrave || k == KindTavily || k == KindYoucom
+}
 
 // Kinds lists the providers this build supports.
-func Kinds() []Kind { return []Kind{KindBrave, KindTavily} }
+func Kinds() []Kind { return []Kind{KindBrave, KindTavily, KindYoucom} }
 
 // Result is one search hit.
 type Result struct {
@@ -194,6 +197,11 @@ type Config struct {
 const (
 	DefaultBraveCostMicros  = 5_000 // ~$5 / 1000 queries
 	DefaultTavilyCostMicros = 8_000 // ~$8 / 1000 queries
+	// You.com's search call is ~$5 / 1000 queries. With extraction_mode
+	// "full_page" the provider bills a further ~$1 / 1000 pages on top, which
+	// the default does not include — a user on that plan can override
+	// CostPerQueryMicros rather than having the budget silently overcharge.
+	DefaultYoucomCostMicros = 5_000
 )
 
 // New builds the configured provider.
@@ -219,6 +227,8 @@ func New(cfg Config, client *http.Client) (Provider, error) {
 		return newBrave(cfg, client), nil
 	case KindTavily:
 		return newTavily(cfg, client), nil
+	case KindYoucom:
+		return newYoucom(cfg, client), nil
 	default:
 		return nil, fmt.Errorf("search: unhandled provider %q", cfg.Provider)
 	}

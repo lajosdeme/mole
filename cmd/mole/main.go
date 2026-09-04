@@ -453,14 +453,14 @@ func reportConfig(r *checks) {
 
 	switch {
 	case cfg.Search.Provider == "":
-		report(false, "search provider", "not selected (run: mole config set search.provider brave|tavily)")
+		report(false, "search provider", "not selected (run: mole config set search.provider brave|tavily|youcom)")
 	case cfg.Search.ActiveKey() == "":
 		report(false, "search provider",
 			fmt.Sprintf("%s selected but no key (run: mole config set search.%s-key ...)",
 				cfg.Search.Provider, cfg.Search.Provider))
 	default:
 		note := ""
-		if cfg.Search.Provider == "tavily" {
+		if cfg.Search.Provider == "tavily" || cfg.Search.Provider == "youcom" {
 			// Worth surfacing: it changes how many fetches a session makes.
 			note = " — returns page content, skips fetches"
 		}

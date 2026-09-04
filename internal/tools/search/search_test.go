@@ -371,3 +371,134 @@ func TestMaxResultsIsBounded(t *testing.T) {
 		t.Errorf("count = %q, want it clamped to 20", c)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// You.com
+// ---------------------------------------------------------------------------
+
+const youcomFixture = `{
+  "results": {
+    "web": [
+      {
+        "url": "https://arxiv.org/abs/2401.13660",
+        "title": "MambaByte",
+        "description": "Brief description of the content",
+        "snippets": ["Relevant excerpt from the page", "Another relevant passage"],
+        "page_age": "2025-11-15T10:30:00",
+        "contents": {
+          "markdown": "# MambaByte\n\nFULL PAGE TEXT. MambaByte achieves 1.31 bits per byte on PG-19, outperforming comparable subword models at equal compute. This is long enough to be treated as usable content by the actor and therefore skip a fetch entirely, which is the whole point of preferring a provider that returns page text."
+        }
+      },
+      {
+        "url": "https://example.com/short",
+        "title": "Snippet only",
+        "description": "tiny",
+        "snippets": [],
+        "page_age": ""
+      },
+      { "title": "no url here", "url": "" }
+    ]
+  },
+  "metadata": { "query": "byte level llm", "search_uuid": "x", "latency": 0.342 }
+}`
+
+func TestYoucomParsesResults(t *testing.T) {
+	var authHeader string
+	srv := serve(t, 200, youcomFixture, func(r *http.Request) { authHeader = r.Header.Get("X-API-Key") })
+
+	p, err := search.New(search.Config{
+		Provider: search.KindYoucom, APIKey: "ydc-test",
+		BaseURL: srv.URL, RateLimit: fastLimit(),
+	}, srv.Client())
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	resp, err := p.Search(context.Background(), "byte level llm", search.Options{MaxResults: 5, IncludeContent: true})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+
+	// The empty-URL row is dropped rather than surfacing as a result the actor
+	// would then try to fetch.
+	if len(resp.Results) != 2 {
+		t.Fatalf("got %d results, want 2", len(resp.Results))
+	}
+	r0 := resp.Results[0]
+	if r0.URL != "https://arxiv.org/abs/2401.13660" {
+		t.Errorf("url = %q", r0.URL)
+	}
+	if r0.Rank != 1 {
+		t.Errorf("rank = %d, want 1", r0.Rank)
+	}
+	if r0.PublishedAt == nil || r0.PublishedAt.Year() != 2025 {
+		t.Errorf("published = %v, want 2025", r0.PublishedAt)
+	}
+	if resp.Results[1].PublishedAt != nil {
+		t.Errorf("empty age parsed into %v, want nil", resp.Results[1].PublishedAt)
+	}
+
+	// contents.markdown is the full page: enough text to skip the fetch on
+	// result 1, not enough on result 2 — the same efficiency the provider is
+	// chosen for.
+	if !strings.HasPrefix(r0.Content, "# MambaByte") {
+		t.Errorf("content = %.20q, want contents.markdown", r0.Content)
+	}
+	if !r0.HasUsableContent() {
+		t.Error("result 1 should carry usable content and skip a fetch")
+	}
+	if resp.Results[1].HasUsableContent() {
+		t.Error("result 2 has only a tiny snippet and should still need a fetch")
+	}
+
+	// The key travels in a header — the cassette redaction list covers
+	// X-API-Key, so a key in the body would land on disk.
+	if authHeader != "ydc-test" {
+		t.Errorf("X-API-Key = %q", authHeader)
+	}
+}
+
+func TestYoucomDomainFiltersAreSentServerSide(t *testing.T) {
+	var body []byte
+	srv := serve(t, 200, youcomFixture, func(r *http.Request) { body, _ = io.ReadAll(r.Body) })
+
+	p, _ := search.New(search.Config{
+		Provider: search.KindYoucom, APIKey: "k", BaseURL: srv.URL, RateLimit: fastLimit(),
+	}, srv.Client())
+
+	_, err := p.Search(context.Background(), "topic", search.Options{
+		ExcludeDomains: []string{"spam.example"},
+		IncludeDomains: []string{"arxiv.org"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatalf("request body: %v", err)
+	}
+	if _, ok := sent["include_domains"]; !ok {
+		t.Error("include_domains not sent — You.com filters domains server-side, unlike Brave")
+	}
+	if _, ok := sent["exclude_domains"]; !ok {
+		t.Error("exclude_domains not sent")
+	}
+}
+
+func TestYoucomSnippetsFallbackForDescription(t *testing.T) {
+	// A result with an empty description but populated snippets should still
+	// carry a snippet the planner can judge the result by.
+	fixture := `{"results":{"web":[{"url":"https://example.com/x","title":"t","description":"","snippets":["the only text"],"page_age":""}]}}`
+	srv := serve(t, 200, fixture, nil)
+	p, _ := search.New(search.Config{
+		Provider: search.KindYoucom, APIKey: "k", BaseURL: srv.URL, RateLimit: fastLimit(),
+	}, srv.Client())
+
+	resp, err := p.Search(context.Background(), "q", search.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Results[0].Snippet != "the only text" {
+		t.Errorf("snippet = %q, want the first snippets entry", resp.Results[0].Snippet)
+	}
+}

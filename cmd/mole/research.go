@@ -370,7 +370,7 @@ func buildWebActor(
 	var provider search.Provider
 	if needSearch {
 		if cfg.Search.Provider == "" {
-			return nil, errors.New("no search provider selected (run: mole config set search.provider brave|tavily)")
+			return nil, errors.New("no search provider selected (run: mole config set search.provider brave|tavily|youcom)")
 		}
 		if cfg.Search.ActiveKey() == "" {
 			return nil, fmt.Errorf("no API key for %s (run: mole config set search.%s-key ...)",
