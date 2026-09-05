@@ -226,14 +226,14 @@ type Options struct {
 // Build assembles the export from stored state.
 func Build(ctx context.Context, st store.Store, sessionID string, opts Options) (*Export, error) {
 	var (
-		sess     *core.Session
-		leads    []*core.Lead
-		claims   []*core.Claim
-		edges    []*core.ClaimEdge
-		fetches  []*store.FetchOutcome
-		byRole   map[core.Role]core.Cost
-		calls    []*core.ToolCall
-		callsErr error
+		sess      *core.Session
+		leads     []*core.Lead
+		claims    []*core.Claim
+		edges     []*core.ClaimEdge
+		fetches   []*store.FetchOutcome
+		byRole    map[core.Role]core.Cost
+		totals    core.Cost
+		callCount int64
 	)
 	if err := st.Read(ctx, func(ctx context.Context, q store.Queries) error {
 		var err error
@@ -255,8 +255,23 @@ func Build(ctx context.Context, st store.Store, sessionID string, opts Options) 
 		if byRole, err = q.SumCostsByRole(ctx, sessionID); err != nil {
 			return err
 		}
-		calls, callsErr = q.ListToolCalls(ctx, sessionID, 0)
-		return callsErr
+		// Aggregated in SQL, not summed from a list.
+		//
+		// ListToolCalls takes a limit and its zero means 200, and an ordinary
+		// session now makes more than that — the corpus averages 175 and five of
+		// ten recorded sessions hit exactly 200. Summing the returned slice
+		// therefore reported a cost that was silently low, in the one document
+		// that says what a run cost, while by_role beside it came from an
+		// aggregate over every row. The envelope disagreed with itself:
+		// cost.usd_micros was under session.spent AND under the sum of
+		// cost.by_role.
+		if totals, err = q.SumCosts(ctx, sessionID); err != nil {
+			return err
+		}
+		if callCount, err = q.CountToolCalls(ctx, sessionID); err != nil {
+			return err
+		}
+		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("export %s: %w", sessionID, err)
 	}
@@ -285,7 +300,7 @@ func Build(ctx context.Context, st store.Store, sessionID string, opts Options) 
 	}
 	ex.Conflicts = conflictsOf(edges, claims)
 	ex.Coverage = coverageOf(claims, fetches)
-	ex.Cost = costOf(byRole, calls)
+	ex.Cost = costOf(byRole, totals, callCount)
 	return ex, nil
 }
 
@@ -447,6 +462,20 @@ func coverageOf(claims []*core.Claim, fetches []*store.FetchOutcome) Coverage {
 		considered[u] = true
 	}
 
+	// One URL, one outcome, decided by precedence rather than by which rows
+	// happen to exist.
+	//
+	// A session's leads share search results and every attempt writes its own
+	// row, so the same URL is routinely passed over by one lead and read by
+	// another. Counting it in both made the parts exceed the whole: on the
+	// recorded corpus one session reported 15 read plus 20 not selected against
+	// 29 considered, so a reader subtracting to find what was left got a
+	// negative number — from the section whose entire job is to say honestly
+	// what was and was not looked at.
+	//
+	// Read wins over unreachable, and both win over not selected: a page that
+	// was reached is reached however many other leads walked past it, and
+	// "nobody asked" is only true when nobody did.
 	seenBad := map[string]bool{}
 	skipped := map[string]bool{}
 	var bad []Unreachable
@@ -462,6 +491,7 @@ func coverageOf(claims []*core.Claim, fetches []*store.FetchOutcome) Coverage {
 			continue
 		case fetch.OutcomeOK, fetch.OutcomeProviderContent, fetch.OutcomeStructuredOnly:
 			// Read, by one route or another.
+			read[f.URL] = true
 			continue
 		}
 		if seenBad[f.URL] {
@@ -472,6 +502,27 @@ func coverageOf(claims []*core.Claim, fetches []*store.FetchOutcome) Coverage {
 			URL: f.URL, Domain: f.Domain, Outcome: f.Outcome, StatusCode: f.StatusCode,
 		})
 	}
+
+	// Applied after the loop, because the rows arrive in no particular order and
+	// the last one seen must not decide.
+	for u := range read {
+		delete(skipped, u)
+		if seenBad[u] {
+			seenBad[u] = false
+		}
+	}
+	for u := range seenBad {
+		if seenBad[u] {
+			delete(skipped, u)
+		}
+	}
+	kept := bad[:0]
+	for _, u := range bad {
+		if seenBad[u.URL] {
+			kept = append(kept, u)
+		}
+	}
+	bad = kept
 	sort.SliceStable(bad, func(i, j int) bool { return bad[i].URL < bad[j].URL })
 	if bad == nil {
 		bad = []Unreachable{}
@@ -491,18 +542,21 @@ func coverageOf(claims []*core.Claim, fetches []*store.FetchOutcome) Coverage {
 	return c
 }
 
-func costOf(byRole map[core.Role]core.Cost, calls []*core.ToolCall) Cost {
-	var c Cost
-	for _, call := range calls {
-		if call == nil {
-			continue
-		}
-		c.Calls++
-		c.USDMicros += call.Cost.USDMicros
-		c.Tokens.Input += call.Cost.InputTokens
-		c.Tokens.Output += call.Cost.OutputTokens
-		c.Tokens.CacheRead += call.Cost.CacheReadTokens
-		c.Tokens.CacheWrite += call.Cost.CacheWriteTokens
+// costOf assembles the cost section from aggregates.
+//
+// Totals and the call count arrive already summed by the database rather than
+// added up from a page of rows. See the comment at the query: the paged list
+// silently truncates at 200, which an ordinary session now exceeds.
+func costOf(byRole map[core.Role]core.Cost, totals core.Cost, calls int64) Cost {
+	c := Cost{
+		USDMicros: totals.USDMicros,
+		Calls:     calls,
+		Tokens: Tokens{
+			Input:      totals.InputTokens,
+			Output:     totals.OutputTokens,
+			CacheRead:  totals.CacheReadTokens,
+			CacheWrite: totals.CacheWriteTokens,
+		},
 	}
 
 	c.ByRole = make([]RoleCost, 0, len(byRole))

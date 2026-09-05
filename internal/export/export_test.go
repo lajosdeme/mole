@@ -572,3 +572,113 @@ func TestNoArrayInTheEnvelopeIsEverNull(t *testing.T) {
 		}
 	}
 }
+
+// TestCostIsNotTruncatedByAPageOfToolCalls.
+//
+// The cost section used to be summed from ListToolCalls, whose zero limit means
+// 200 — and an ordinary session now makes more than that. Five of ten sessions
+// in the recorded corpus report exactly 200 calls, with cost.usd_micros under
+// session.spent AND under the sum of cost.by_role beside it, because by_role
+// came from a SQL aggregate over every row and the total did not.
+//
+// The document billed as "what it spent" was silently low. This pins the shape
+// rather than the number: whatever the export says it cost must equal what the
+// ledger says was spent, and must equal its own breakdown.
+func TestCostIsNotTruncatedByAPageOfToolCalls(t *testing.T) {
+	ctx := context.Background()
+	db, sess := fixture(t)
+
+	// Past the 200-row page, in the roles a real run uses.
+	const extra = 260
+	led := budget.New(db, budget.DefaultConfig())
+	for i := 0; i < extra; i++ {
+		res, err := led.Reserve(ctx, sess.ID, 1_000)
+		if err != nil {
+			t.Fatalf("reserve %d: %v", i, err)
+		}
+		role := core.RoleExecutor
+		if i%3 == 0 {
+			role = core.RoleVerifier
+		}
+		if _, err := led.Settle(ctx, res, []core.ToolCall{{
+			Role: role, Type: core.CallLLM, Model: "m",
+			Cost: core.Cost{USDMicros: 100, InputTokens: 10, OutputTokens: 2},
+		}}); err != nil {
+			t.Fatalf("settle %d: %v", i, err)
+		}
+	}
+
+	ex, err := export.Build(ctx, db, sess.ID, export.Options{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	if ex.Cost.Calls <= 200 {
+		t.Errorf("cost.calls is %d after %d calls; the page limit is still the answer",
+			ex.Cost.Calls, extra)
+	}
+	if ex.Cost.USDMicros != ex.Session.Spent {
+		t.Errorf("cost.usd_micros %d, session.spent %d — the envelope disagrees with itself",
+			ex.Cost.USDMicros, ex.Session.Spent)
+	}
+
+	var byRole int64
+	for _, r := range ex.Cost.ByRole {
+		byRole += r.USDMicros
+	}
+	if byRole != ex.Cost.USDMicros {
+		t.Errorf("by_role sums to %d and the total says %d; one of them is a page "+
+			"and the other is an aggregate", byRole, ex.Cost.USDMicros)
+	}
+	if ex.Cost.Tokens.Input < int64(extra*10) {
+		t.Errorf("tokens.input is %d after %d calls of 10", ex.Cost.Tokens.Input, extra)
+	}
+}
+
+// TestTheCoverageCountsDoNotExceedTheirDenominator.
+//
+// A session's leads share search results, and every attempt writes its own
+// fetch row, so one URL is routinely passed over by one lead and read by
+// another. Counted in both, the parts exceeded the whole: on the recorded
+// corpus a session reported 15 read plus 20 not selected against 29 considered,
+// so a reader subtracting to find what was left over got a negative number —
+// from the one section whose job is to say honestly what was and was not read.
+func TestTheCoverageCountsDoNotExceedTheirDenominator(t *testing.T) {
+	ctx := context.Background()
+	db, sess := fixture(t)
+
+	// The same URL, three ways, as three leads would record it.
+	const shared = "https://shared.example/report"
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		for _, o := range []string{"not_selected", "ok", "paywall"} {
+			if err := tx.RecordFetchOutcome(ctx, &store.FetchOutcome{
+				SessionID: &sess.ID, URL: shared, Domain: "shared.example", Outcome: o,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	ex, err := export.Build(ctx, db, sess.ID, export.Options{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	cv := ex.Coverage
+
+	if got := cv.Read + cv.NotSelected + len(cv.Unreachable); got > cv.Considered {
+		t.Errorf("read %d + not_selected %d + unreachable %d = %d, over a "+
+			"denominator of %d", cv.Read, cv.NotSelected, len(cv.Unreachable),
+			got, cv.Considered)
+	}
+
+	// And the shared URL is counted as READ, not as passed over: a page reached
+	// is reached however many other leads walked past it.
+	for _, u := range cv.Unreachable {
+		if u.URL == shared {
+			t.Errorf("%s is listed unreachable although a lead read it", shared)
+		}
+	}
+}

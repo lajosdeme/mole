@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"github.com/lajosdeme/mole/internal/verifier"
 	"os"
 	"path/filepath"
 	"strings"
@@ -350,5 +351,53 @@ func TestTraceNamesContradictions(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("trace omits %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestTheDeprecatedConfirmFlagDoesNotInventPrecedence.
+//
+// resolveConfirmMode compared against "both" to decide whether --confirm-edges
+// had been passed, which it cannot do while "both" is also the flag's default.
+// Both directions were wrong: two flags saying the identical thing were refused
+// for disagreeing, and the deprecated alias silently overruled an explicit
+// choice.
+func TestTheDeprecatedConfirmFlagDoesNotInventPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mode      string
+		noConfirm bool
+		want      verifier.ConfirmMode
+		wantErr   bool
+	}{
+		{"nothing passed", "", false, verifier.ConfirmBoth, false},
+		{"alias alone", "", true, verifier.ConfirmNone, false},
+		// The two say the same thing. Refusing this told the user they had
+		// contradicted themselves when they had not.
+		{"alias agrees with an explicit none", "none", true, verifier.ConfirmNone, false},
+		// The two genuinely disagree, and the explicit flag is not overruled
+		// quietly — the run stops instead.
+		{"alias contradicts an explicit both", "both", true, "", true},
+		{"alias contradicts duplicates", "duplicates", true, "", true},
+		{"explicit both", "both", false, verifier.ConfirmBoth, false},
+		{"explicit duplicates", "duplicates", false, verifier.ConfirmDuplicates, false},
+		{"misspelt", "bath", false, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveConfirmMode(tc.mode, tc.noConfirm)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("resolveConfirmMode(%q, %v) = %q, want an error",
+						tc.mode, tc.noConfirm, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveConfirmMode(%q, %v): %v", tc.mode, tc.noConfirm, err)
+			}
+			if got != tc.want {
+				t.Errorf("resolveConfirmMode(%q, %v) = %q, want %q",
+					tc.mode, tc.noConfirm, got, tc.want)
+			}
+		})
 	}
 }

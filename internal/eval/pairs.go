@@ -219,7 +219,22 @@ func DumpPairs(ctx context.Context, st store.Store, sessionID string, opts DumpO
 				return ranked[i] < ranked[j]
 			})
 			for i, id := range ranked {
-				key := verifier.Pair{A: target, B: byID[id]}.Key()
+				// Canonical order, because Pair.Key is a raw "A|B" with no
+				// normalisation and Pair itself documents A.ID < B.ID.
+				//
+				// Without the swap each unordered pair was written under two
+				// different keys — one per end — so the "keep the better rank"
+				// comparison below only ever compared an end against itself, and
+				// the output loop, which looks up the canonical key, silently
+				// discarded half the writes. A pair ranked 40 from one claim and 1
+				// from the other was reported as 40: "the cap is the constraint"
+				// for a pair the cap never blocked, which is the exact
+				// misdiagnosis Rank was added to prevent.
+				a, b := target, byID[id]
+				if a.ID > b.ID {
+					a, b = b, a
+				}
+				key := verifier.Pair{A: a, B: b}.Key()
 				// Both ends rank the pair. Keep the better one: a pair is surfaced if
 				// EITHER claim put it in its candidate list.
 				if cur, ok := placings[key]; ok && cur.rank <= i+1 {

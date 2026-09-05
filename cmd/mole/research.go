@@ -131,8 +131,13 @@ func newResearchCmd() *cobra.Command {
 	f.IntVar(&o.workers, "workers", executor.DefaultWorkers,
 		"leads to run at once; 1 is required when recording or replaying a cassette")
 	f.DurationVar(&o.timeout, "timeout", 5*time.Minute, "wall-clock ceiling for the whole session")
-	f.StringVar(&o.confirmMode, "confirm-edges", string(verifier.ConfirmBoth),
-		"edge kinds needing a second agreeing judgement: both, duplicates, none. "+
+	// Empty default so "was it passed" is answerable. The mode's real default
+	// is both, applied in resolveConfirmMode, and stated in the usage below —
+	// with the flag defaulting to "both" there is no way to tell an explicit
+	// --confirm-edges=both from no flag at all, and the deprecated alias needs
+	// exactly that distinction.
+	f.StringVar(&o.confirmMode, "confirm-edges", "",
+		"edge kinds needing a second agreeing judgement: both (default), duplicates, none. "+
 			"`both` buys 70% contradiction precision against 51%, at 67% recall "+
 			"against 98%; duplicates keeps every contradiction found and costs "+
 			"no recall")
@@ -1009,9 +1014,17 @@ func rankPassages(question string, passages []string, n int) []int {
 // Unknown is an error, not the default: the mode moves contradiction recall between
 // 98% and 67%, so a typo choosing that silently is the wrong graph reported as the
 // right one. Passing both flags is refused rather than given an invented precedence.
+//
+// An EMPTY mode means the flag was not passed, which is why the flag's own
+// default is empty rather than "both". Comparing against "both" instead got the
+// precedence wrong in both directions: --confirm-edges=none --no-confirm-edges
+// was refused for disagreeing when the two say the same thing, and
+// --confirm-edges=both --no-confirm-edges silently let the deprecated alias
+// overrule an explicit choice — the invented precedence this refuses to have.
 func resolveConfirmMode(mode string, noConfirm bool) (verifier.ConfirmMode, error) {
 	m := verifier.ConfirmMode(strings.ToLower(strings.TrimSpace(mode)))
-	if m == "" {
+	explicit := m != ""
+	if !explicit {
 		m = verifier.ConfirmBoth
 	}
 	switch m {
@@ -1021,7 +1034,7 @@ func resolveConfirmMode(mode string, noConfirm bool) (verifier.ConfirmMode, erro
 	}
 
 	if noConfirm {
-		if m != verifier.ConfirmBoth {
+		if explicit && m != verifier.ConfirmNone {
 			return "", fmt.Errorf(
 				"--no-confirm-edges and --confirm-edges=%s disagree: pass only --confirm-edges", m)
 		}

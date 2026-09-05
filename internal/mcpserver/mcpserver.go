@@ -336,13 +336,21 @@ type ResultCitation struct {
 // resultCitations decodes the stored bibliography, dropping it whole if it will
 // not parse: a marker resolving to the wrong source is worse than one resolving
 // to nothing, because only the second is visible.
+// Empty rather than nil in every case, so the field is an array and never
+// JSON null. An MCP caller iterating it should not have to check first, and
+// every session recorded before the citations column — plus every dataset-mode
+// session, which cites nothing by design — takes one of these paths.
 func resultCitations(raw string) []ResultCitation {
 	if raw == "" {
-		return nil
+		return []ResultCitation{}
 	}
 	var cs []ResultCitation
 	if err := json.Unmarshal([]byte(raw), &cs); err != nil {
-		return nil
+		return []ResultCitation{}
+	}
+	if cs == nil {
+		// "null" parses without error and yields a nil slice.
+		return []ResultCitation{}
 	}
 	return cs
 }

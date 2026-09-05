@@ -483,9 +483,12 @@ func reportConfig(r *checks) {
 				detail += "; page content means nothing is fetched either, and the " +
 					"extractor is the only other place a date comes from"
 			}
+			// One condition, one check. Emitting a second note with an empty
+			// label printed a nameless failed line and counted one problem as
+			// two pending checks.
+			detail += ". --always-fetch restores it at one fetch per source, " +
+				"or use a provider that dates its results"
 			r.note(false, "source dates", detail)
-			r.note(false, "", "--always-fetch restores it at one fetch per source, "+
-				"or use a provider that dates its results")
 		}
 	}
 

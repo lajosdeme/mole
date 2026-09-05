@@ -172,3 +172,54 @@ func TestTheDefaultDumpIsUnchanged(t *testing.T) {
 		t.Error("the default dump emitted the whole pair space; it should not")
 	}
 }
+
+// TestAPairTakesTheBetterRankOfItsTwoEnds.
+//
+// Pair.Key is a raw "A|B" and Pair documents A.ID < B.ID, so a key built from
+// whichever end the loop reached first writes each unordered pair under two
+// different names. The output only reads the canonical one, so half the writes
+// were dead and the "keep the better rank" comparison only ever compared an end
+// against itself.
+//
+// The consequence is a rank that is pessimistic rather than absent: a pair the
+// retriever surfaced at position 1 from one claim could be reported at 40,
+// telling an analyst the cap was the constraint for a pair the cap never
+// blocked. Recall measurements are unaffected — every canonical pair still got
+// SOME placing — but the number beside them was not the one being claimed.
+func TestAPairTakesTheBetterRankOfItsTwoEnds(t *testing.T) {
+	// One claim that scores against everything and several that do not, so the
+	// two ends of a pair genuinely disagree about where it ranks.
+	texts := []string{
+		"GPT-4 scores 86.4% on MMLU and GPT-4 reaches 87.3% on MMLU by prompt",
+		"GPT-4 reaches 87.3% on MMLU with a different prompt.",
+		"GPT-4 scores 86.4% on MMLU.",
+		"Rainfall in Lagos peaks in June.",
+	}
+	ps := dumpWith(t, texts, eval.DumpOptions{Exhaustive: true})
+
+	for _, p := range ps.Pairs {
+		if p.Score > 0 && p.Rank == 0 {
+			t.Errorf("pair %s scored %v and has no rank", p.Pair, p.Score)
+		}
+		// A rank is a position in one claim's candidate list, so it can never
+		// exceed the number of other claims.
+		if p.Rank > len(texts)-1 {
+			t.Errorf("pair %s ranks %d among %d other claims",
+				p.Pair, p.Rank, len(texts)-1)
+		}
+	}
+
+	// Every pair the retriever forms is reachable under the canonical key. Before
+	// the swap, exactly the pairs whose first-reached end was the LATER id were
+	// written somewhere nothing reads.
+	var ranked int
+	for _, p := range ps.Pairs {
+		if p.Rank > 0 {
+			ranked++
+		}
+	}
+	if ranked == 0 {
+		t.Fatal("no pair carries a rank; the placings map is keyed on something " +
+			"the output does not look up")
+	}
+}

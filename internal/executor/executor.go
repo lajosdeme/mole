@@ -438,6 +438,16 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			// has no way to know the difference.
 			e.verify(ctx, digest, res)
 
+			// The latch is honoured HERE too, and it was not: a session draining
+			// the verifier's follow-ups asked the planner again every ReplanEvery
+			// completed leads, paying for a model call each time to be told the
+			// same thing it had already said. Verification still runs — new claims
+			// need scoring either way — but the planner has finished.
+			if plannerDone {
+				completedSinceReplan = 0
+				continue
+			}
+
 			added, done, reason, err := e.replan(ctx, sess, digest, depth, res, leadQuestion)
 			if err != nil {
 				e.logger().WarnContext(ctx, "replan failed; continuing with the current queue", "err", err)
