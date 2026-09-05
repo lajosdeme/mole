@@ -1500,6 +1500,12 @@ func TestVerificationRunsInTheLoopAndScoresClaims(t *testing.T) {
 // TestAContradictionQueuesAFollowUpWhoseClaimsInheritTheChain is the whole point of
 // slice 5, and the reason the cap could not ship before the mechanism.
 //
+// Note what it does to keep the loop alive — three planner replies, ReplanEvery
+// 1 — and why: for years that was load-bearing, because a follow-up only ran if
+// the planner happened to still be adding leads beside it. That was the bug in
+// TestAFollowUpRunsWhenThePlannerIsDone, not a property of this test, and the
+// scaffolding stays here to test lineage rather than dispatch.
+//
 // §11.4's argument is that a per-row counter cannot bind, because a follow-up
 // produces a NEW claim whose counter starts at zero. So the chain has to be carried
 // on the lead and stamped onto the claims — and if it is not, the depth cap reads a
@@ -1582,6 +1588,111 @@ func TestAContradictionQueuesAFollowUpWhoseClaimsInheritTheChain(t *testing.T) {
 	if inherited == 0 {
 		t.Error("no claim inherited a root claim from its lead")
 	}
+}
+
+// TestAFollowUpRunsWhenThePlannerIsDone.
+//
+// The inverse of the lineage test above, and the one the corpus needed. The
+// planner answers once and then reports done — the ordinary shape, and what
+// every session on the corpus did — so nothing keeps the loop alive except the
+// follow-up itself.
+//
+// It used to end here with the lead sitting in the queue. replan asks the
+// PLANNER whether to continue, the Verifier queues leads the planner has no view
+// of, and `added == 0` was read as "there is nothing to do". Twelve of thirteen
+// recorded sessions ended holding the very query that would have settled their
+// disagreement, having spent 2-6% of their budget.
+func TestAFollowUpRunsWhenThePlannerIsDone(t *testing.T) {
+	fl := &verifierLLM{
+		// One plan. Every call after this answers {"done":true}.
+		plans:    []string{planJSON("the question")},
+		relation: "contradicts",
+	}
+	r := newRig(t, 20*core.MicrosPerUSD, nil, opposingClaims)
+	r.exec.Planner = &planner.Planner{LLM: fl, MaxInitialLeads: 1, ReplanEvery: 3, MaxDepth: 2}
+	v := r.withVerifier(fl)
+	v.MaxFollowUpsPerRoot = 5
+	v.MaxVerifyDepth = 4
+
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.FollowUpsQueued == 0 {
+		t.Fatal("a contradiction queued no follow-up lead; nothing to dispatch")
+	}
+
+	leads := leadsOf(t, r)
+	var queued, ran int
+	for _, l := range leads {
+		if l.RootClaimID == nil {
+			continue
+		}
+		switch l.Status {
+		case core.LeadDone, core.LeadSkippedCache:
+			ran++
+		case core.LeadQueued:
+			queued++
+		}
+	}
+	if ran == 0 {
+		t.Errorf("%d follow-up lead(s) queued and %d left queued; none ran. The "+
+			"planner reporting done ended the session with the work that would "+
+			"settle its contradiction still in the queue", res.FollowUpsQueued, queued)
+	}
+	if queued > 0 {
+		t.Errorf("%d follow-up lead(s) still queued when the run ended", queued)
+	}
+}
+
+// TestFollowUpsStopAtTheLeadCeiling.
+//
+// Draining the verifier's queue must not become a way around §8.5. MaxLeads is
+// checked in the same transaction that increments it, so this asserts the
+// property rather than the mechanism: leads are dispatched, and the ceiling
+// holds.
+func TestFollowUpsStopAtTheLeadCeiling(t *testing.T) {
+	const maxLeads = 3
+
+	fl := &verifierLLM{plans: []string{planJSON("the question")}, relation: "contradicts"}
+	r := newRigWithCeilings(t, 20*core.MicrosPerUSD, maxLeads, 200, nil, opposingClaims)
+	r.exec.Planner = &planner.Planner{LLM: fl, MaxInitialLeads: 1, ReplanEvery: 3, MaxDepth: 2}
+	v := r.withVerifier(fl)
+	// Uncapped at the verifier, so the only thing that can stop it is the ceiling.
+	v.MaxFollowUpsPerRoot = 50
+	v.MaxVerifyDepth = 50
+
+	if _, err := r.exec.Run(context.Background(), r.sess.ID); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var ran int
+	for _, l := range leadsOf(t, r) {
+		if l.Status == core.LeadDone || l.Status == core.LeadSkippedCache {
+			ran++
+		}
+	}
+	if ran == 0 {
+		t.Fatal("no lead ran at all; the ceiling cannot be what stopped it")
+	}
+	if ran > maxLeads {
+		t.Errorf("%d lead(s) ran against a ceiling of %d — draining the verifier's "+
+			"queue walked past the lead ceiling", ran, maxLeads)
+	}
+}
+
+// leadsOf reads a session's leads.
+func leadsOf(t *testing.T, r *rig) []*core.Lead {
+	t.Helper()
+	var leads []*core.Lead
+	if err := r.db.Read(context.Background(), func(ctx context.Context, q store.Queries) error {
+		var err error
+		leads, err = q.ListLeads(ctx, r.sess.ID, 0)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return leads
 }
 
 // TestVerificationFailureDoesNotFailTheSession. Verification improves an answer; it

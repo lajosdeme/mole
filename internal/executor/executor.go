@@ -261,6 +261,10 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 	// 2. Work the queue.
 	completedSinceReplan := 0
 	depth := 0
+	// plannerDone latches once the planner has said its piece. Follow-up leads
+	// can still be dispatched after that, but asking the planner again buys
+	// another model call to be told the same thing.
+	plannerDone := false
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -315,6 +319,17 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			// reaching the report with confidence 0.
 			e.verify(ctx, digest, res)
 
+			// That verification may have queued work, and it is the work this
+			// engine exists to do (§11.4). Go and run it.
+			if e.hasQueuedLeads(ctx, sessionID) {
+				continue
+			}
+
+			if plannerDone {
+				// Asked once, answered. Everything queued since has now drained.
+				break
+			}
+
 			added, done, reason, err := e.replan(ctx, sess, digest, depth, res, leadQuestion)
 			if err != nil {
 				// A failed replan at drain time is the END of the research, not
@@ -332,6 +347,15 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 				// The cap and "the planner had nothing left to add" are
 				// different endings; report whichever it was.
 				res.StoppedBecause = orElse(reason, "no further leads")
+				// The replan itself does not queue follow-ups, but it verifies
+				// nothing either — so the only way back into the loop here is
+				// work the verification above created and this pass has not yet
+				// seen. Checked again because replan can take long enough for a
+				// concurrent worker to finish a lead.
+				if e.hasQueuedLeads(ctx, sessionID) {
+					plannerDone = true
+					continue
+				}
 				break
 			}
 			depth++
@@ -421,6 +445,14 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			completedSinceReplan = 0
 			if done {
 				res.StoppedBecause = orElse(reason, "planner reported done")
+				// Same rule as the drain branch: the verification above may have
+				// queued leads to settle a contradiction, and the planner has no
+				// view of them. Draining them is not overruling it — it never
+				// answered this question.
+				if e.hasQueuedLeads(ctx, sessionID) {
+					plannerDone = true
+					continue
+				}
 				break
 			}
 			if added > 0 {
@@ -530,6 +562,32 @@ func headroom(ceiling, used int64) int {
 		return int(room)
 	}
 	return 0
+}
+
+// hasQueuedLeads reports whether work is waiting that this loop can take.
+//
+// It exists because the loop used to end on the planner's verdict alone. The
+// Verifier queues leads too — a contradiction is the one finding §11.4 says is
+// worth more budget, and it composes the query that would settle it — but
+// replan asks the PLANNER, which knows nothing about them. So `added == 0` was
+// read as "there is nothing to do" when it only ever meant "the planner had
+// nothing to add", and every session on the corpus ended with the leads that
+// would have settled its disagreements sitting in the queue, at 2-6% of budget
+// spent.
+//
+// Queued and not Pending: a leased lead is held by another worker and is not
+// work this loop can take, so counting it would spin.
+//
+// A store that cannot answer reports false, which ends the run. The alternative
+// is a loop that cannot see its own exit condition.
+func (e *Executor) hasQueuedLeads(ctx context.Context, sessionID string) bool {
+	st, err := e.Queue.Stats(ctx, sessionID)
+	if err != nil {
+		e.logger().WarnContext(ctx, "could not count queued leads; ending the run",
+			"session", sessionID, "err", err)
+		return false
+	}
+	return st.Queued > 0
 }
 
 // leaseBatch takes up to max leads off the queue.
