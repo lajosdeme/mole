@@ -188,8 +188,9 @@ func jsonPaths(t *testing.T, v any) []string {
 
 // TestTheEnvelopeIsPinned.
 //
-// A paying product parses this, so a renamed field is an outage rather than a
-// refactor. The list below IS the contract: adding to it is a minor version,
+// Consumers outside this repository parse this, so a renamed field is an outage
+// rather than a refactor. The list below IS the contract: adding to it is a minor
+// version,
 // removing or renaming anything in it is a breaking change and this test is where
 // that conversation starts.
 func TestTheEnvelopeIsPinned(t *testing.T) {
@@ -432,7 +433,7 @@ func TestAnUnreadableStoredReceiptIsNotVerified(t *testing.T) {
 // Citation numbers are assigned over a findings set capped by the report's token
 // budget at generation time, and that cap is not persisted — so recomputing them
 // gives a different mapping whenever the cap bit. A [4] pointing at the wrong
-// source in a document sold as verified evidence is the failure this product
+// source in a document offered as verified evidence is the failure this project
 // exists to prevent, which is why the numbering is carried rather than derived.
 func TestEveryCitationMarkerResolves(t *testing.T) {
 	ex := build(t, export.Options{})

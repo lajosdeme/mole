@@ -6,7 +6,7 @@
 -- is not persisted, so recomputing the numbering from stored claims agrees with
 -- the prose only when the cap did not bite, and silently disagrees when it did.
 --
--- A [4] resolving to the wrong source, in a document sold as verified evidence, is
+-- A [4] resolving to the wrong source, in a document offered as verified evidence, is
 -- precisely the failure this project exists to prevent. So the mapping the model
 -- actually wrote against is carried rather than derived -- the same reasoning
 -- DumpPairs already records for candidate pairs: regenerating does not reproduce

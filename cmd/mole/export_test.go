@@ -15,7 +15,7 @@ func TestExportRefusesAnUnknownSession(t *testing.T) {
 	}
 }
 
-// TestExportIsInTheVisibleCommandSet. It is the contract a paying consumer reads,
+// TestExportIsInTheVisibleCommandSet. It is the contract a consumer reads,
 // not an evaluation tool, so it belongs beside research and trace rather than in
 // the hidden group with eval and pairs.
 func TestExportIsInTheVisibleCommandSet(t *testing.T) {
