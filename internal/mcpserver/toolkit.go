@@ -272,7 +272,7 @@ func (d Deps) toolkitSessionClose(ctx context.Context, _ *mcp.CallToolRequest, i
 	out.Scored = scored
 
 	if err := d.Store.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
-		return tx.SetSessionStatus(ctx, in.SessionID, core.StatusDone)
+		return tx.FinishSession(ctx, in.SessionID, core.StatusDone, "")
 	}); err != nil {
 		return nil, sessionCloseOut{}, err
 	}

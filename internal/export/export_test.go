@@ -682,3 +682,64 @@ func TestTheCoverageCountsDoNotExceedTheirDenominator(t *testing.T) {
 		}
 	}
 }
+
+// TestTheExportSaysWhichCeilingEndedTheRun.
+//
+// The status alone is misleading. core.StatusExhausted marshals as
+// "budget_exhausted" and is reached by five different endings, only one of
+// which is about money — and in practice the unit-independent ceilings bind
+// first. A reader who takes the status at face value concludes a run exceeded
+// its budget when most of that budget was untouched.
+func TestTheExportSaysWhichCeilingEndedTheRun(t *testing.T) {
+	ctx := context.Background()
+	db, sess := fixture(t)
+
+	if err := budget.New(db, budget.DefaultConfig()).Finish(
+		ctx, sess.ID, core.StatusExhausted, "max_tool_calls"); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	ex, err := export.Build(ctx, db, sess.ID, export.Options{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if ex.Session.Status != "budget_exhausted" {
+		t.Fatalf("status = %q", ex.Session.Status)
+	}
+	if ex.Session.StoppedBecause != "max_tool_calls" {
+		t.Errorf("stopped_because = %q, want max_tool_calls", ex.Session.StoppedBecause)
+	}
+
+	// And it survives the round trip somebody actually reads.
+	b, err := json.Marshal(ex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"stopped_because":"max_tool_calls"`) {
+		t.Errorf("the marshalled export does not carry the reason")
+	}
+}
+
+// TestACompletedRunExplainsNothing, so the field cannot be mistaken for
+// decoration: it is absent from the JSON of a session that simply finished.
+func TestACompletedRunExplainsNothing(t *testing.T) {
+	ctx := context.Background()
+	db, sess := fixture(t)
+
+	if err := budget.New(db, budget.DefaultConfig()).Finish(
+		ctx, sess.ID, core.StatusDone, ""); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	ex, err := export.Build(ctx, db, sess.ID, export.Options{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	b, err := json.Marshal(ex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "stopped_because") {
+		t.Errorf("a completed run carries a stop reason: %s", b)
+	}
+}

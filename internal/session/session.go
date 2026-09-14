@@ -91,6 +91,11 @@ type Result struct {
 
 	// Status is what the session was finalized as.
 	Status core.SessionStatus
+	// StoppedBecause names the ceiling or condition that ended the run, or is
+	// empty for one that simply finished. Carried out of the loop because
+	// Status cannot say it: "budget_exhausted" is reached by the budget running
+	// out AND by every unit-independent ceiling in §8.5.
+	StoppedBecause string
 	// Err is the loop's error. Returned in the struct rather than as the
 	// function's error because a failed loop still has a session, a spend, and
 	// usually claims — a caller that gets only an error has to go and find them.
@@ -435,6 +440,7 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 
 	if res.Run != nil {
 		res.Status = res.Run.Status
+		res.StoppedBecause = res.Run.StoppedBecause
 	}
 	if res.Err != nil && res.Status == core.StatusDone {
 		res.Status = core.StatusFailed
@@ -474,7 +480,12 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 			r.notice("could not store the report: %v", err)
 		}
 	}
-	if err := led.Finish(context.WithoutCancel(ctx), sess.ID, res.Status); err != nil {
+	// res.StoppedBecause is the whole point of this call taking a reason: the
+	// executor computed which ceiling ended the run, and until now nothing kept
+	// it.
+	if err := led.Finish(
+		context.WithoutCancel(ctx), sess.ID, res.Status, res.StoppedBecause,
+	); err != nil {
 		r.notice("could not finalize session: %v", err)
 	}
 	return res, nil

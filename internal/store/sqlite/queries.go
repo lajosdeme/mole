@@ -81,8 +81,8 @@ func strPtr(v sql.NullString) *string {
 
 const sessionCols = `id, prompt, mode, actor_types, budget_unit, budget, spent, held, escrow,
 	max_tool_calls, max_leads, max_wallclock_ns, tool_call_count, lead_count,
-	status, created_at, updated_at, report_md, report_degraded, receipt_json,
-	report_citations_json`
+	status, stopped_because, created_at, updated_at, report_md, report_degraded,
+	receipt_json, report_citations_json`
 
 func (t *queries) InsertSession(ctx context.Context, s *core.Session) error {
 	if err := s.Validate(); err != nil {
@@ -96,11 +96,12 @@ func (t *queries) InsertSession(ctx context.Context, s *core.Session) error {
 
 	_, err := t.q.ExecContext(ctx, `
 		INSERT INTO sessions (`+sessionCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		s.ID, s.Prompt, string(s.Mode), core.EncodeActorTypes(s.ActorTypes),
 		string(s.BudgetUnit), s.Budget, s.Spent, s.Held, s.Escrow,
 		s.MaxToolCalls, s.MaxLeads, int64(s.MaxWallClock), s.ToolCallCount, s.LeadCount,
-		string(s.Status), toMicros(s.CreatedAt), toMicros(s.UpdatedAt), s.Report, s.ReportDegraded, s.ReceiptJSON, s.ReportCitationsJSON)
+		string(s.Status), s.StoppedBecause, toMicros(s.CreatedAt), toMicros(s.UpdatedAt),
+		s.Report, s.ReportDegraded, s.ReceiptJSON, s.ReportCitationsJSON)
 	if err != nil {
 		return fmt.Errorf("sqlite: insert session: %w", err)
 	}
@@ -121,7 +122,8 @@ func scanSession(sc interface{ Scan(...any) error }) (*core.Session, error) {
 	err := sc.Scan(&s.ID, &s.Prompt, &mode, &actorTypes, &budgetUnit,
 		&s.Budget, &s.Spent, &s.Held, &s.Escrow,
 		&s.MaxToolCalls, &s.MaxLeads, &wallclockNS, &s.ToolCallCount, &s.LeadCount,
-		&status, &created, &updated, &s.Report, &s.ReportDegraded, &s.ReceiptJSON, &s.ReportCitationsJSON)
+		&status, &s.StoppedBecause, &created, &updated,
+		&s.Report, &s.ReportDegraded, &s.ReceiptJSON, &s.ReportCitationsJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -201,15 +203,17 @@ func (t *queries) SetSessionReceipt(ctx context.Context, id, receiptJSON string)
 	return requireOneRow(res, "session")
 }
 
-func (t *queries) SetSessionStatus(ctx context.Context, id string, status core.SessionStatus) error {
+func (t *queries) FinishSession(
+	ctx context.Context, id string, status core.SessionStatus, because string,
+) error {
 	if !status.Valid() {
 		return fmt.Errorf("sqlite: invalid status %q", status)
 	}
 	res, err := t.q.ExecContext(ctx,
-		`UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?`,
-		string(status), toMicros(time.Now()), id)
+		`UPDATE sessions SET status = ?, stopped_because = ?, updated_at = ? WHERE id = ?`,
+		string(status), because, toMicros(time.Now()), id)
 	if err != nil {
-		return fmt.Errorf("sqlite: set status: %w", err)
+		return fmt.Errorf("sqlite: finish session: %w", err)
 	}
 	return requireOneRow(res, "session")
 }

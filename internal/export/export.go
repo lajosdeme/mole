@@ -57,16 +57,25 @@ type Export struct {
 
 // Session is what was asked and what it was allowed to spend.
 type Session struct {
-	ID         string    `json:"id"`
-	Question   string    `json:"question"`
-	Mode       string    `json:"mode"`
-	Status     string    `json:"status"`
-	Actors     []string  `json:"actors"`
-	BudgetUnit string    `json:"budget_unit"`
-	Budget     int64     `json:"budget"`
-	Spent      int64     `json:"spent"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID       string `json:"id"`
+	Question string `json:"question"`
+	Mode     string `json:"mode"`
+	Status   string `json:"status"`
+	// StoppedBecause names the ceiling that ended the run, or is absent for one
+	// that simply finished.
+	//
+	// Status alone cannot say it. "budget_exhausted" is reached by the budget
+	// running out and by every unit-independent ceiling in §8.5 — and in
+	// practice the money is almost never the one that binds, so a reader who
+	// takes the status at face value reaches the wrong conclusion about why a
+	// run was short.
+	StoppedBecause string    `json:"stopped_because,omitempty"`
+	Actors         []string  `json:"actors"`
+	BudgetUnit     string    `json:"budget_unit"`
+	Budget         int64     `json:"budget"`
+	Spent          int64     `json:"spent"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // Sub is one sub-question, as executed.
@@ -351,7 +360,8 @@ func sessionOf(s *core.Session) Session {
 	}
 	return Session{
 		ID: s.ID, Question: s.Prompt, Mode: string(s.Mode), Status: string(s.Status),
-		Actors: actors, BudgetUnit: string(s.BudgetUnit),
+		StoppedBecause: s.StoppedBecause,
+		Actors:         actors, BudgetUnit: string(s.BudgetUnit),
 		Budget: s.Budget, Spent: s.Spent,
 		CreatedAt: s.CreatedAt.UTC(), UpdatedAt: s.UpdatedAt.UTC(),
 	}

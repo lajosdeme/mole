@@ -567,6 +567,15 @@ type researchOutput struct {
 	Report string       `json:"report"`
 	Claims []core.Claim `json:"claims"`
 
+	// StoppedBecause names the ceiling that ended the run, when one did.
+	//
+	// Declared here from the start and filled by nothing until the reason was
+	// persisted: session.Result had no such field, so this marshalled empty on
+	// every run a caller parsed it from.
+	//
+	// Status is not enough on its own. "budget_exhausted" is what a run reports
+	// after hitting max_tool_calls, max_leads or max_wallclock as well as after
+	// actually running out of money, and the money is rarely the one that binds.
 	StoppedBecause string `json:"stopped_because,omitempty"`
 	Degraded       string `json:"degraded,omitempty"`
 	Error          string `json:"error,omitempty"`
@@ -581,6 +590,7 @@ func fillOutput(out *researchOutput, res *session.Result) {
 		return
 	}
 	out.Status = string(res.Status)
+	out.StoppedBecause = res.StoppedBecause
 	if res.Err != nil {
 		out.Error = res.Err.Error()
 	}

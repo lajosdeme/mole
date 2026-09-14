@@ -200,9 +200,18 @@ type Session struct {
 	ToolCallCount int64
 	LeadCount     int64
 
-	Status    SessionStatus
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	Status SessionStatus
+	// StoppedBecause names the ceiling or condition that ended the run, or is
+	// empty for one that simply finished.
+	//
+	// Status cannot say it. StatusExhausted is the string "budget_exhausted"
+	// and five different endings reach it: the budget running out, and the four
+	// ceilings that have nothing to do with money — max_tool_calls, max_leads,
+	// max_wallclock and a context deadline. HitCeiling already returns which,
+	// and this is where that answer is kept.
+	StoppedBecause string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 	// Report is the session's rendered answer, written when it finalizes.
 	//
 	// Persisted because §5.1's research.result is defined as returning it, and

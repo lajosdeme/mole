@@ -195,7 +195,14 @@ type Tx interface {
 	Queries
 
 	InsertSession(ctx context.Context, s *core.Session) error
-	SetSessionStatus(ctx context.Context, id string, status core.SessionStatus) error
+	// FinishSession marks a session terminal and records why it stopped.
+	//
+	// The reason is a ceiling name — "max_tool_calls", "max_leads",
+	// "max_wallclock" — or empty for a session that simply finished. It is
+	// taken alongside the status rather than in a separate call because the two
+	// are one fact: a status of "budget_exhausted" written without its reason is
+	// the defect this replaced.
+	FinishSession(ctx context.Context, id string, status core.SessionStatus, because string) error
 	// SetSessionReport stores the rendered answer and why it is degraded, if it is.
 	SetSessionReport(ctx context.Context, id, reportMD, degraded string) error
 

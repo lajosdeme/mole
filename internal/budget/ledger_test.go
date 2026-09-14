@@ -731,7 +731,7 @@ func TestFinishedSessionsAreLeftAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := led.Finish(ctx, done.ID, core.StatusDone); err != nil {
+	if err := led.Finish(ctx, done.ID, core.StatusDone, ""); err != nil {
 		t.Fatal(err)
 	}
 

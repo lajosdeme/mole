@@ -275,7 +275,9 @@ func (d Deps) closeAsk(
 			spent = settled.Cost.BudgetAmount(core.BudgetUSD)
 		}
 	}
-	if err := led.Finish(ctx, askSess.ID, status); err != nil {
+	// No reason: an ask is one call with no ceilings to hit, so there is never
+	// anything to explain beyond the status.
+	if err := led.Finish(ctx, askSess.ID, status, ""); err != nil {
 		d.Log.Warn("could not finalize an ask session", "session", askSess.ID, "err", err)
 	}
 	return spent

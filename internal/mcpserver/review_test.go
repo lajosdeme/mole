@@ -176,7 +176,7 @@ func seedFinishedSession(t *testing.T, db *sqlite.DB) string {
 		}}); err != nil {
 			return err
 		}
-		return tx.SetSessionStatus(ctx, sess.ID, core.StatusDone)
+		return tx.FinishSession(ctx, sess.ID, core.StatusDone, "")
 	}); err != nil {
 		t.Fatal(err)
 	}

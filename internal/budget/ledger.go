@@ -588,9 +588,16 @@ func (l *Ledger) SweepExpired(ctx context.Context) (int, error) {
 	return n, err
 }
 
-// Finish marks a session terminal.
-func (l *Ledger) Finish(ctx context.Context, sessionID string, status core.SessionStatus) error {
+// Finish marks a session terminal and records why it stopped.
+//
+// because is a ceiling name — "max_tool_calls", "max_leads", "max_wallclock" —
+// or empty for a session that simply finished. Taken here rather than left to
+// the caller's logs, because a status of "budget_exhausted" is reached by five
+// different endings and only one of them is about money.
+func (l *Ledger) Finish(
+	ctx context.Context, sessionID string, status core.SessionStatus, because string,
+) error {
 	return l.st.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
-		return tx.SetSessionStatus(ctx, sessionID, status)
+		return tx.FinishSession(ctx, sessionID, status, because)
 	})
 }

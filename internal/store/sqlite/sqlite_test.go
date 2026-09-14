@@ -757,3 +757,70 @@ func TestScoringMarksVerifiedWithoutTouchingEvidence(t *testing.T) {
 		t.Errorf("scoring a missing claim: err = %v, want ErrNotFound", err)
 	}
 }
+
+// TestAFinishedSessionRecordsWhyItStopped.
+//
+// core.StatusExhausted is the string "budget_exhausted", and FIVE different
+// endings produce it: the budget actually running out, and the four ceilings
+// that have nothing to do with money — max_tool_calls, max_leads,
+// max_wallclock, and a context deadline. HitCeiling already returns which one
+// it was and the executor already assigns it to Result.StoppedBecause; the
+// value was then dropped, because nothing persisted it.
+//
+// A recorded session saying "budget_exhausted" with 90% of its dollars unspent
+// is not a puzzle anybody should have to solve twice.
+func TestAFinishedSessionRecordsWhyItStopped(t *testing.T) {
+	ctx := context.Background()
+	db, _ := open(t)
+	insertSession(t, db, "s_why", 400_000)
+
+	err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.FinishSession(ctx, "s_why", core.StatusExhausted, "max_tool_calls")
+	})
+	if err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	var got *core.Session
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		s, err := tx.GetSession(ctx, "s_why")
+		got = s
+		return err
+	}); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+
+	if got.Status != core.StatusExhausted {
+		t.Errorf("status = %q", got.Status)
+	}
+	if got.StoppedBecause != "max_tool_calls" {
+		t.Errorf("stopped because %q, want max_tool_calls — the reason was dropped",
+			got.StoppedBecause)
+	}
+}
+
+// TestAnOrdinaryEndingNamesNoCeiling, so the field is evidence rather than
+// decoration: a session that simply finished has nothing to explain.
+func TestAnOrdinaryEndingNamesNoCeiling(t *testing.T) {
+	ctx := context.Background()
+	db, _ := open(t)
+	insertSession(t, db, "s_done", 400_000)
+
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.FinishSession(ctx, "s_done", core.StatusDone, "")
+	}); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	var got *core.Session
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		s, err := tx.GetSession(ctx, "s_done")
+		got = s
+		return err
+	}); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got.StoppedBecause != "" {
+		t.Errorf("a completed session claims it stopped because %q", got.StoppedBecause)
+	}
+}

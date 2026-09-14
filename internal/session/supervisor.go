@@ -172,7 +172,8 @@ func (s *Supervisor) abandon(ctx context.Context, sess *core.Session) {
 	// WithoutCancel: the caller's request context may already be gone, and a
 	// status write that fails here recreates exactly the orphan being prevented.
 	if err := s.runner.ledger().Finish(
-		context.WithoutCancel(ctx), sess.ID, core.StatusFailed); err != nil {
+		context.WithoutCancel(ctx), sess.ID, core.StatusFailed,
+		"refused after creation"); err != nil {
 		s.log.Warn("could not finalize a session refused after creation",
 			"session", sess.ID, "err", err)
 	}
@@ -204,7 +205,7 @@ func (s *Supervisor) run(ctx context.Context, h *handle, sess *core.Session, spe
 			} else if n > 0 {
 				s.log.Warn("released holds stranded by a panic", "session", sess.ID, "holds", n)
 			}
-			s.finalize(ctx, sess, core.StatusFailed)
+			s.finalize(ctx, sess, core.StatusFailed, "panicked")
 			s.mu.Lock()
 			h.err = fmt.Errorf("session: panicked: %v", p)
 			h.finished = true
@@ -218,8 +219,8 @@ func (s *Supervisor) run(ctx context.Context, h *handle, sess *core.Session, spe
 		// Runner.Run returns early — before its own led.Finish — when its
 		// preconditions fail. Without this the row stays "running" with escrow
 		// held, and the supervisor only logs. A second write is harmless;
-		// SetSessionStatus is idempotent.
-		s.finalize(ctx, sess, core.StatusFailed)
+		// FinishSession is idempotent.
+		s.finalize(ctx, sess, core.StatusFailed, "preconditions failed")
 	}
 
 	// No status write here. The executor already derives one from the context
@@ -343,11 +344,15 @@ func (s *Supervisor) Shutdown(ctx context.Context) error {
 // leave a row running goes through here, because the alternative — a permanently
 // running row with escrow held — is invisible until somebody wonders why their
 // budget is short.
-func (s *Supervisor) finalize(ctx context.Context, sess *core.Session, status core.SessionStatus) {
+func (s *Supervisor) finalize(
+	ctx context.Context, sess *core.Session, status core.SessionStatus, because string,
+) {
 	if sess == nil {
 		return
 	}
-	if err := s.runner.ledger().Finish(context.WithoutCancel(ctx), sess.ID, status); err != nil {
+	if err := s.runner.ledger().Finish(
+		context.WithoutCancel(ctx), sess.ID, status, because,
+	); err != nil {
 		s.log.Warn("could not finalize session", "session", sess.ID, "err", err)
 	}
 }

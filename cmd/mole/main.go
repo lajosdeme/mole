@@ -805,7 +805,7 @@ func cmdDevSeed(ctx context.Context, path string) error {
 	}
 	outSpan.End(ctx, "ok")
 
-	if err := led.Finish(ctx, sess.ID, core.StatusDone); err != nil {
+	if err := led.Finish(ctx, sess.ID, core.StatusDone, ""); err != nil {
 		return err
 	}
 

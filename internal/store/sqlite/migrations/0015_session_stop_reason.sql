@@ -1,0 +1,24 @@
+-- Why a session stopped, beside the status that cannot say.
+--
+-- `status` has five values and one of them, 'budget_exhausted', is reached by
+-- five different endings: the budget genuinely running out, and the four
+-- ceilings that have nothing to do with money — max_tool_calls, max_leads,
+-- max_wallclock (§8.5), and a context deadline. Session.HitCeiling already
+-- returns which one it was, and the executor already assigns it to
+-- Result.StoppedBecause. Nothing stored it, so the answer existed for the
+-- length of one function call and was then dropped.
+--
+-- What that cost, concretely: a recorded session reading 'budget_exhausted'
+-- with 90% of its dollars unspent, which took an hour to explain and turned
+-- out to be the tool-call ceiling — a limit derived from lead and source
+-- counts that binds long before the money does.
+--
+-- The status is NOT renamed. 'budget_exhausted' is already written into every
+-- recorded export and the golden corpus, and a more honest name is not worth
+-- rewriting history for when the reason beside it answers the question.
+--
+-- Empty for a session that simply finished. A field that always has something
+-- in it is decoration; this one is evidence, so it says nothing when there is
+-- nothing to explain.
+
+ALTER TABLE sessions ADD COLUMN stopped_because TEXT NOT NULL DEFAULT '';

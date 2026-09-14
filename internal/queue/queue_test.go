@@ -466,7 +466,7 @@ func TestSweepSkipsTerminalSessions(t *testing.T) {
 	if _, err := q.LeaseNext(ctx, sid, "w"); err != nil {
 		t.Fatal(err)
 	}
-	if err := budget.New(db, budget.DefaultConfig()).Finish(ctx, sid, core.StatusDone); err != nil {
+	if err := budget.New(db, budget.DefaultConfig()).Finish(ctx, sid, core.StatusDone, ""); err != nil {
 		t.Fatal(err)
 	}
 
