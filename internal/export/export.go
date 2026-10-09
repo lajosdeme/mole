@@ -89,6 +89,20 @@ type Sub struct {
 	Depth    int    `json:"depth"`
 	ParentID string `json:"parent_id"`
 	Status   string `json:"status"`
+
+	// VerifyDepth and RootClaimID are the OTHER lineage a lead can have: not a
+	// planner child but a follow-up queued to settle a contradiction, naming the
+	// claim it was spawned from.
+	//
+	// Both pairs, because they answer different questions and a lead has at most
+	// one of them. Carrying only Depth/ParentID left every follow-up in the
+	// envelope reading depth 0 with no parent — identical to an opening
+	// sub-question, so the document could not say why the question was asked and
+	// anybody counting from exports concluded follow-ups never ran.
+	//
+	// Absent on an opening sub-question, so their presence means something.
+	VerifyDepth int    `json:"verify_depth,omitempty"`
+	RootClaimID string `json:"root_claim_id,omitempty"`
 }
 
 // Report is the synthesized answer, as written.
@@ -377,9 +391,14 @@ func scopeOf(leads []*core.Lead) []Sub {
 		if l.ParentID != nil {
 			parent = *l.ParentID
 		}
+		var root string
+		if l.RootClaimID != nil {
+			root = *l.RootClaimID
+		}
 		out = append(out, Sub{
 			ID: l.ID, Query: l.Query, Actor: string(l.ActorType),
 			Depth: l.Depth, ParentID: parent, Status: string(l.Status),
+			VerifyDepth: l.VerifyDepth, RootClaimID: root,
 		})
 	}
 	// Depth then id: the decomposition reads as a tree rather than in whatever

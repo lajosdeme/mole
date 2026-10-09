@@ -744,3 +744,68 @@ func TestACompletedRunExplainsNothing(t *testing.T) {
 		t.Errorf("a completed run carries a stop reason: %s", b)
 	}
 }
+
+// TestAFollowUpSaysWhatItCameFrom.
+//
+// A lead spawned to settle a contradiction carries RootClaimID and VerifyDepth;
+// an ordinary sub-question carries ParentID and Depth. The export mapped only
+// the second pair, so every follow-up left the envelope reading depth 0 with no
+// parent — indistinguishable from an opening sub-question.
+//
+// Two costs. The pack cannot say "this question exists because those two claims
+// disagreed", which is the thing the document is for. And anyone measuring from
+// exports concludes follow-ups never run: 45 sub-questions across the recorded
+// corpus, every one of them apparently depth 0, while the logs show follow-ups
+// being queued the whole time.
+func TestAFollowUpSaysWhatItCameFrom(t *testing.T) {
+	ctx := context.Background()
+	db, sess := fixture(t)
+
+	root := "c_root"
+	follow := &core.Lead{
+		ID: "l_follow", SessionID: sess.ID, ActorType: core.ActorWeb,
+		Query:  "evidence resolving whether X contradicts Y",
+		Status: core.LeadDone,
+		// What the verifier actually sets. Depth and ParentID stay zero: a
+		// follow-up is not a planner child.
+		RootClaimID: &root,
+		VerifyDepth: 1,
+	}
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.InsertLead(ctx, follow)
+	}); err != nil {
+		t.Fatalf("insert lead: %v", err)
+	}
+
+	ex, err := export.Build(ctx, db, sess.ID, export.Options{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	var got *export.Sub
+	for i := range ex.Scope {
+		if ex.Scope[i].ID == "l_follow" {
+			got = &ex.Scope[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("the follow-up is not in the scope: %+v", ex.Scope)
+	}
+	if got.VerifyDepth != 1 {
+		t.Errorf("verify_depth = %d, want 1", got.VerifyDepth)
+	}
+	if got.RootClaimID != "c_root" {
+		t.Errorf("root_claim_id = %q, want c_root — the lineage was dropped", got.RootClaimID)
+	}
+}
+
+// TestAnOpeningQuestionClaimsNoLineage, so the two fields mean something when
+// they are there.
+func TestAnOpeningQuestionClaimsNoLineage(t *testing.T) {
+	ex := build(t, export.Options{})
+	for _, s := range ex.Scope {
+		if s.VerifyDepth != 0 || s.RootClaimID != "" {
+			t.Errorf("an opening sub-question carries lineage: %+v", s)
+		}
+	}
+}
