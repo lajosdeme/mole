@@ -915,9 +915,11 @@ func TestCallerFanOutIsClamped(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// leads x sources x 4, with sources clamped.
-	if max := int64(mcpserver.MaxSourcesCeiling) * 4 * sess.MaxLeads; sess.MaxToolCalls > max {
-		t.Errorf("MaxToolCalls = %d, over the clamped maximum %d", sess.MaxToolCalls, max)
+	// The ceiling is sized from the clamped LEAD count now; fan-out no longer
+	// multiplies into it at all, so a caller asking for a million sources cannot
+	// inflate it by even one call.
+	if sess.MaxLeads > int64(mcpserver.MaxDepthCeiling)*10 {
+		t.Errorf("MaxLeads = %d, which a caller should not be able to reach", sess.MaxLeads)
 	}
 	if sess.MaxToolCalls > 10_000 {
 		t.Errorf("MaxToolCalls = %d — a caller disabled §8.5's ceiling", sess.MaxToolCalls)

@@ -68,22 +68,23 @@ arrives with its milestone.
 
 // researchOpts is what the flags resolve to.
 type researchOpts struct {
-	usd         string
-	tokens      int64
-	mode        string
-	maxSources  int
-	timeout     time.Duration
-	asJSON      bool
-	quiet       bool
-	alwaysFetch bool
-	noConfirm   bool
-	confirmMode string
-	maxDepth    int
-	workers     int
-	actorList   string
-	schemaSpec  string
-	schemaFile  string
-	dbPath      string
+	usd          string
+	tokens       int64
+	mode         string
+	maxSources   int
+	maxToolCalls int64
+	timeout      time.Duration
+	asJSON       bool
+	quiet        bool
+	alwaysFetch  bool
+	noConfirm    bool
+	confirmMode  string
+	maxDepth     int
+	workers      int
+	actorList    string
+	schemaSpec   string
+	schemaFile   string
+	dbPath       string
 
 	// silent suppresses ALL output, including the report.
 	//
@@ -125,6 +126,8 @@ func newResearchCmd() *cobra.Command {
 			"(! marks a key field; =text after the type adds a description)")
 	f.StringVar(&o.schemaFile, "schema-file", "", "dataset schema as a JSON file")
 	f.IntVar(&o.maxSources, "max-sources", 5, "sources to read per lead")
+	f.Int64Var(&o.maxToolCalls, "max-tool-calls", 0,
+		"tool calls for the whole session (0 sizes a backstop from --max-depth)")
 	f.StringVar(&o.actorList, "actors", "web",
 		"comma-separated actors: web, academic, local_compute "+
 			"(academic needs contact-email; local_compute needs `mole connect add`)")
@@ -286,17 +289,18 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 	}
 
 	spec := session.Spec{
-		Question:   question,
-		Mode:       sessionMode,
-		Schema:     schema,
-		BudgetUnit: unit,
-		Budget:     amount,
-		MaxSources: o.maxSources,
-		MaxDepth:   o.maxDepth,
-		MaxLeads:   maxLeadsFor(o),
-		Timeout:    o.timeout,
-		Workers:    o.workers,
-		ActorTypes: actorTypes,
+		Question:     question,
+		Mode:         sessionMode,
+		Schema:       schema,
+		BudgetUnit:   unit,
+		Budget:       amount,
+		MaxSources:   o.maxSources,
+		MaxDepth:     o.maxDepth,
+		MaxLeads:     maxLeadsFor(o),
+		MaxToolCalls: o.maxToolCalls,
+		Timeout:      o.timeout,
+		Workers:      o.workers,
+		ActorTypes:   actorTypes,
 	}
 
 	sess, err := runner.Create(ctx, spec)

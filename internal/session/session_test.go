@@ -144,10 +144,17 @@ func TestCreateAppliesTheUnitIndependentCeilings(t *testing.T) {
 	if sess.MaxWallClock != spec.Timeout {
 		t.Errorf("MaxWallClock = %s, want %s", sess.MaxWallClock, spec.Timeout)
 	}
-	// Sized from what the planner can produce: leads × sources, with headroom. A
-	// fixed value here was left over from M1, when the CLI ran exactly one lead.
-	if want := int64(spec.MaxLeads * spec.MaxSources * 4); sess.MaxToolCalls != want {
-		t.Errorf("MaxToolCalls = %d, want %d (leads × sources × 4)", sess.MaxToolCalls, want)
+	// A backstop sized from the lead count, not from fan-out. It used to be
+	// leads × sources × 4 — a claim about what a lead costs that measurement put
+	// at less than half the truth, so the backstop bound before the clock or the
+	// money ever did. A caller that knows better sets Spec.MaxToolCalls.
+	if sess.MaxToolCalls <= int64(spec.MaxLeads) {
+		t.Errorf("MaxToolCalls = %d, not a ceiling above %d leads",
+			sess.MaxToolCalls, spec.MaxLeads)
+	}
+	if sess.MaxToolCalls != int64(spec.MaxLeads)*150 {
+		t.Errorf("MaxToolCalls = %d, want %d (leads × the per-lead backstop)",
+			sess.MaxToolCalls, int64(spec.MaxLeads)*150)
 	}
 
 	// A caller that leaves them unset must still get a bounded session, not zero

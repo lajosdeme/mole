@@ -53,6 +53,12 @@ type Spec struct {
 	MaxSources int
 	MaxDepth   int
 	MaxLeads   int
+	// MaxToolCalls bounds tool calls for the whole session. Zero takes a
+	// backstop derived from MaxLeads.
+	//
+	// Set it when the caller knows what the run is worth. The default cannot:
+	// see defaultCallsPerLead.
+	MaxToolCalls int64
 
 	// Timeout is the session's wall-clock ceiling (§8.5). The caller owns the
 	// context deadline; this is the ceiling the loop checks itself against, and
@@ -277,6 +283,32 @@ func (r *Runner) PurgeDocuments(ctx context.Context) (int64, error) {
 // Separate from Run so a daemon can hand a session id back to its caller before
 // any research happens. Nothing is spent here beyond the escrow reserved at
 // creation (§8.3).
+// defaultCallsPerLead sizes the tool-call backstop when a caller names no
+// ceiling of its own.
+//
+// It is NOT a model of what a lead costs. It used to be: the ceiling was
+// maxLeads * maxSources * 4, an assertion that a lead spends four calls per
+// source. Measured across fourteen recorded sessions the real figure is a
+// median of 42.6 calls per lead and a maximum of 62 — so the ceiling sat at
+// roughly half of what a healthy run needed, and cut runs in half without
+// saying so. One measured session wanted 431 calls, was stopped at 240, and
+// returned 134 claims where the same question uncapped returned 272.
+//
+// What is supposed to stop a run is the clock (§8.5) and the money (§8.3).
+// This exists for the case those cannot cover — a budget estimate that is
+// wrong, a unit that cannot price a provider — so it belongs far above what a
+// healthy run needs, not inside it. A backstop that binds first is not a
+// backstop; it is a budget nobody set.
+const defaultCallsPerLead = 150
+
+// toolCallCeiling takes the caller's ceiling, or sizes a backstop.
+func toolCallCeiling(explicit int64, maxLeads int) int64 {
+	if explicit > 0 {
+		return explicit
+	}
+	return int64(maxLeads) * defaultCallsPerLead
+}
+
 func (r *Runner) Create(ctx context.Context, spec Spec) (*core.Session, error) {
 	if spec.Question == "" {
 		return nil, errors.New("session: no question given")
@@ -304,7 +336,7 @@ func (r *Runner) Create(ctx context.Context, spec Spec) (*core.Session, error) {
 		// is wrong, which is the case they exist for. Sized from what the planner
 		// can actually produce: an initial fan-out plus one round of follow-ups per
 		// depth level, with headroom.
-		MaxToolCalls: int64(maxLeads) * int64(sources) * 4,
+		MaxToolCalls: toolCallCeiling(spec.MaxToolCalls, maxLeads),
 		MaxLeads:     int64(maxLeads),
 		MaxWallClock: spec.Timeout,
 	})
