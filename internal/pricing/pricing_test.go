@@ -216,3 +216,53 @@ func TestADatedSnapshotPricesAsItsBaseModel(t *testing.T) {
 		t.Errorf("explicit registration lost to the base-model fallback (input=%d)", r.Input)
 	}
 }
+
+// TestAnUnregisteredModelFallsBackToTheConfiguredOne.
+//
+// The model a provider ANSWERS with is not the model you configured, and it is
+// theirs to rename without telling anyone. DeepSeek did exactly that: a run
+// configured as "deepseek-chat" started coming back as "deepseek-flash", which
+// no table knew, so every call priced at $0.00 and a --usd ceiling could not
+// bind. The pre-flight check did not catch it, because it validates the name in
+// the config while the ledger prices the name in the response.
+//
+// A rate that is an estimate is a budget that still works. Zero is a budget
+// that has been switched off by a third party.
+func TestAnUnregisteredModelFallsBackToTheConfiguredOne(t *testing.T) {
+	tbl := pricing.NewTable()
+	tbl.SetFallbackModel("deepseek-chat")
+
+	const n = 1_000_000
+	want, err := tbl.Cost("deepseek-chat", pricing.Usage{InputTokens: n})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := tbl.Cost("deepseek-some-name-nobody-registered", pricing.Usage{InputTokens: n})
+	if err != nil {
+		t.Fatalf("an unknown model with a fallback configured is still an error: %v", err)
+	}
+	if got.USDMicros != want.USDMicros {
+		t.Errorf("unknown model priced at %d micros, want the configured model's %d",
+			got.USDMicros, want.USDMicros)
+	}
+	if got.USDMicros == 0 {
+		t.Error("priced at zero, so a --usd ceiling could never bind")
+	}
+}
+
+// TestNoFallbackKeepsTheErrorStrict, so a deployment that registered nothing is
+// still told rather than quietly billed at a guess.
+func TestNoFallbackKeepsTheErrorStrict(t *testing.T) {
+	tbl := pricing.NewTable()
+	if _, err := tbl.Cost("nobody-registered-this", pricing.Usage{InputTokens: 1}); err == nil {
+		t.Error("an unknown model with no fallback was accepted")
+	}
+}
+
+// TestAFallbackNobodyRegisteredIsRefusedAtOnce, rather than at the first call.
+func TestAFallbackNobodyRegisteredIsRefusedAtOnce(t *testing.T) {
+	tbl := pricing.NewTable()
+	if err := tbl.SetFallbackModel("not-a-model"); err == nil {
+		t.Error("an unpriced fallback was accepted")
+	}
+}

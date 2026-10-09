@@ -102,7 +102,11 @@ func defaultTable() map[string]Rates {
 		// so the write rates equal Input rather than being zero. A zero would mean a
 		// provider that starts reporting cache-creation tokens gets them free.
 		"deepseek-v4-flash": {Input: 140, Output: 280, CacheRead: 3, CacheWrite: 140, CacheWrite1h: 140},
-		"deepseek-chat":     {Input: 140, Output: 280, CacheRead: 3, CacheWrite: 140, CacheWrite1h: 140},
+		// What the API began answering with in October 2026, where it had said
+		// "deepseek-v4-flash" before. Registered because a rename is theirs to
+		// make; the fallback above is what stops the NEXT one costing anything.
+		"deepseek-flash": {Input: 140, Output: 280, CacheRead: 3, CacheWrite: 140, CacheWrite1h: 140},
+		"deepseek-chat":  {Input: 140, Output: 280, CacheRead: 3, CacheWrite: 140, CacheWrite1h: 140},
 
 		"deepseek-v4-pro":   {Input: 435, Output: 870, CacheRead: 4, CacheWrite: 435, CacheWrite1h: 435},
 		"deepseek-reasoner": {Input: 435, Output: 870, CacheRead: 4, CacheWrite: 435, CacheWrite1h: 435},
@@ -130,10 +134,47 @@ type Table struct {
 	// true: silently pricing an unknown model at zero would make the budget
 	// ceiling unenforceable for exactly the model you forgot to register.
 	strict bool
+	// fallback is the model whose rates price a response naming a model nobody
+	// registered. Empty leaves an unknown model an error.
+	//
+	// It exists because the name a provider ANSWERS with is not the name you
+	// configured, and it is theirs to repoint without telling anyone. A
+	// configured "deepseek-chat" began coming back as "deepseek-flash", which no
+	// table knew, so every call priced at zero and a --usd ceiling stopped
+	// binding — silently, in the direction of spending more.
+	//
+	// Charging the configured model's rate makes the ledger an estimate. A
+	// budget enforced on an estimate is a budget; a budget enforced on zero is
+	// not one at all.
+	fallback string
 }
 
 func NewTable() *Table {
 	return &Table{rates: defaultTable(), strict: true}
+}
+
+// SetFallbackModel names the model whose rates price a response that names a
+// model nobody registered.
+//
+// Refused up front when the fallback itself has no rates: a fallback that
+// cannot price anything is not a fallback, and discovering that at the first
+// call means discovering it after the run has started spending.
+//
+// Empty clears it, returning the table to strict.
+func (t *Table) SetFallbackModel(model string) error {
+	if model == "" {
+		t.mu.Lock()
+		t.fallback = ""
+		t.mu.Unlock()
+		return nil
+	}
+	if _, ok := t.Lookup(normalize(model)); !ok {
+		return &ErrUnknownModel{Model: model}
+	}
+	t.mu.Lock()
+	t.fallback = model
+	t.mu.Unlock()
+	return nil
 }
 
 // NewEmptyTable returns a table with no models registered — the starting point
@@ -268,12 +309,22 @@ func (t *Table) Cost(model string, u Usage) (core.Cost, error) {
 	r, ok := t.Lookup(normalize(model))
 	if !ok {
 		t.mu.RLock()
-		strict := t.strict
+		strict, fallback := t.strict, t.fallback
 		t.mu.RUnlock()
-		if strict {
-			return c, &ErrUnknownModel{Model: model}
+		// The configured model's rate, when there is one. SetFallbackModel has
+		// already checked it is registered, so this lookup cannot miss unless
+		// somebody unregistered it afterwards — in which case strict applies.
+		if fallback != "" {
+			if fr, found := t.Lookup(normalize(fallback)); found {
+				r, ok = fr, true
+			}
 		}
-		return c, nil
+		if !ok {
+			if strict {
+				return c, &ErrUnknownModel{Model: model}
+			}
+			return c, nil
+		}
 	}
 
 	write := r.CacheWrite

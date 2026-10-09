@@ -477,13 +477,29 @@ func checkUSDIsEnforceable(p llm.Provider) error {
 // whoever runs it.
 func pricingFor(cfg *config.Config) *pricing.Table {
 	t := pricing.NewTable()
-	if cfg != nil && pricing.IsLocalEndpoint(cfg.LLM.BaseURL) {
+	if cfg == nil {
+		return t
+	}
+	if pricing.IsLocalEndpoint(cfg.LLM.BaseURL) {
 		for _, m := range []string{cfg.LLM.Model, cfg.LLM.CheapModel, cfg.LLM.VerifierModel} {
 			if m != "" {
 				t.RegisterLocal(m)
 			}
 		}
+		return t
 	}
+	// The configured model prices a response that names one nobody registered.
+	//
+	// What a provider ANSWERS with is not what you configured, and it is theirs
+	// to repoint silently: a run configured as "deepseek-chat" began coming back
+	// as "deepseek-flash", which no table knew, so every call priced at zero and
+	// --usd stopped binding. checkUSDIsEnforceable could not catch it — it
+	// validates the configured name, and the ledger prices the returned one.
+	//
+	// Best effort. A configured model with no rates of its own leaves the table
+	// strict, which is the state checkUSDIsEnforceable already refuses to start
+	// a USD run in.
+	_ = t.SetFallbackModel(cfg.LLM.Model)
 	return t
 }
 
