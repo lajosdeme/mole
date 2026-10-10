@@ -105,13 +105,13 @@ func Score(ctx context.Context, st store.Store, sessionID string, opts Options) 
 		if sess, err = q.GetSession(ctx, sessionID); err != nil {
 			return err
 		}
-		if claims, err = q.ListClaims(ctx, sessionID, 10_000); err != nil {
+		if claims, err = q.ListClaims(ctx, sessionID, 0); err != nil {
 			return err
 		}
-		if calls, err = q.ListToolCalls(ctx, sessionID, 10_000); err != nil {
+		if calls, err = q.ListToolCalls(ctx, sessionID, 0); err != nil {
 			return err
 		}
-		if outcomes, err = q.ListFetchOutcomes(ctx, sessionID, 10_000); err != nil {
+		if outcomes, err = q.ListFetchOutcomes(ctx, sessionID, 0); err != nil {
 			return err
 		}
 		edges, err = q.ListEdges(ctx, sessionID, 0)

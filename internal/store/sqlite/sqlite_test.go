@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -892,5 +893,141 @@ func TestDeferredLeadsAreNeitherLeasableNorCountedAsQueued(t *testing.T) {
 	}
 	if counts[core.LeadDeferred] != 1 {
 		t.Errorf("deferred = %d, want 1", counts[core.LeadDeferred])
+	}
+}
+
+// TestZeroMeansEverything.
+//
+// These list queries take a limit, and a caller that wants all the rows
+// naturally passes 0 — there is no limit to impose. Zero did not mean that. It
+// meant "use the default", and the default was a finite number: 500 claims, 200
+// leads, 1000 fetch outcomes, 5000 edges. So a call that read as "give me
+// everything" returned the first 500 of them, with no error and nothing
+// anywhere saying there had been more.
+//
+// Unreachable until recently. Sessions produced 130-290 claims, comfortably
+// under the cap, so nobody noticed the word was a lie. Then follow-ups stopped
+// being discarded and a Deep run produced 661 — and the export began shipping
+// 500 of them, while the verifier's pairing pool silently excluded the newest
+// 161 from ever being compared against anything. ORDER BY created_at means the
+// rows dropped are the newest, which on a session like that are the ones the
+// follow-up research produced.
+//
+// Four call sites made this mistake. Three others worked around it by passing
+// 10_000, which is the same bug noticed and papered over rather than fixed.
+func TestZeroMeansEverything(t *testing.T) {
+	ctx := context.Background()
+	db, _ := open(t)
+	insertSession(t, db, "s_all", 1_000_000)
+
+	// One past each old default, so the test fails if any of them comes back.
+	const (
+		claims  = 501
+		leads   = 201
+		fetches = 1001
+		edges   = 5001
+	)
+
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		batch := make([]core.Claim, 0, claims)
+		for i := range claims {
+			batch = append(batch, core.Claim{
+				ID: fmt.Sprintf("c_%04d", i), SessionID: "s_all",
+				Text:   fmt.Sprintf("Claim number %d.", i),
+				Source: "https://x.example/p", Quote: "a quote long enough to be evidence",
+			})
+		}
+		if err := tx.InsertClaims(ctx, batch); err != nil {
+			return err
+		}
+		for i := range leads {
+			l := core.Lead{
+				ID: fmt.Sprintf("l_%04d", i), SessionID: "s_all",
+				ActorType: core.ActorWeb, Query: fmt.Sprintf("question %d", i),
+			}
+			if err := tx.InsertLead(ctx, &l); err != nil {
+				return err
+			}
+		}
+		for i := range fetches {
+			sid := "s_all"
+			if err := tx.RecordFetchOutcome(ctx, &store.FetchOutcome{
+				SessionID: &sid, URL: fmt.Sprintf("https://x%d.example/p", i),
+				Domain: "x.example", Outcome: "ok", StatusCode: 200,
+			}); err != nil {
+				return err
+			}
+		}
+		es := make([]core.ClaimEdge, 0, edges)
+		for i := range edges {
+			es = append(es, core.ClaimEdge{
+				SessionID: "s_all",
+				FromID:    fmt.Sprintf("c_%04d", i%claims),
+				ToID:      fmt.Sprintf("e_%05d", i),
+				Kind:      core.EdgeContradicts,
+			})
+		}
+		return tx.InsertEdges(ctx, es)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		gotClaims, err := tx.ListClaims(ctx, "s_all", 0)
+		if err != nil {
+			return err
+		}
+		if len(gotClaims) != claims {
+			t.Errorf("ListClaims(0) = %d, want %d — the newest %d are invisible to "+
+				"the export and to the verifier's pairing pool",
+				len(gotClaims), claims, claims-len(gotClaims))
+		}
+
+		gotLeads, err := tx.ListLeads(ctx, "s_all", 0)
+		if err != nil {
+			return err
+		}
+		if len(gotLeads) != leads {
+			t.Errorf("ListLeads(0) = %d, want %d", len(gotLeads), leads)
+		}
+
+		gotFetches, err := tx.ListFetchOutcomes(ctx, "s_all", 0)
+		if err != nil {
+			return err
+		}
+		if len(gotFetches) != fetches {
+			t.Errorf("ListFetchOutcomes(0) = %d, want %d", len(gotFetches), fetches)
+		}
+
+		gotEdges, err := tx.ListEdges(ctx, "s_all", 0)
+		if err != nil {
+			return err
+		}
+		if len(gotEdges) != edges {
+			t.Errorf("ListEdges(0) = %d, want %d", len(gotEdges), edges)
+		}
+
+		// Unverified claims self-corrects across passes — a verified claim drops
+		// out of the set — so the cap paced it rather than losing anything. It
+		// is still a limit nobody asked for.
+		gotUnverified, err := tx.ListUnverifiedClaims(ctx, "s_all", 0)
+		if err != nil {
+			return err
+		}
+		if len(gotUnverified) != claims {
+			t.Errorf("ListUnverifiedClaims(0) = %d, want %d", len(gotUnverified), claims)
+		}
+
+		// An explicit limit still means what it says.
+		capped, err := tx.ListClaims(ctx, "s_all", 10)
+		if err != nil {
+			return err
+		}
+		if len(capped) != 10 {
+			t.Errorf("ListClaims(10) = %d, want 10", len(capped))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

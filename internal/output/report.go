@@ -135,7 +135,7 @@ func (g *Generator) Generate(ctx context.Context, st store.Store, sessionID stri
 		if sess, err = q.GetSession(ctx, sessionID); err != nil {
 			return err
 		}
-		if claims, err = q.ListClaims(ctx, sessionID, 10_000); err != nil {
+		if claims, err = q.ListClaims(ctx, sessionID, 0); err != nil {
 			return err
 		}
 		// Edges too: §11.2 collapses duplicate clusters into one finding, and a

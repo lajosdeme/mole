@@ -501,9 +501,7 @@ func (t *queries) CountToolCalls(ctx context.Context, sessionID string) (int64, 
 }
 
 func (t *queries) ListToolCalls(ctx context.Context, sessionID string, limit int) ([]*core.ToolCall, error) {
-	if limit <= 0 {
-		limit = 200
-	}
+	limit = allRowsIfUnset(limit)
 	rows, err := t.q.QueryContext(ctx,
 		`SELECT `+toolCallCols+` FROM tool_calls WHERE session_id = ? ORDER BY created_at LIMIT ?`,
 		sessionID, limit)
@@ -564,9 +562,7 @@ func (t *queries) RecordFetchOutcome(ctx context.Context, o *store.FetchOutcome)
 
 // ListFetchOutcomes returns one session's fetch rows, oldest first.
 func (t *queries) ListFetchOutcomes(ctx context.Context, sessionID string, limit int) ([]*store.FetchOutcome, error) {
-	if limit <= 0 {
-		limit = 1000
-	}
+	limit = allRowsIfUnset(limit)
 	rows, err := t.q.QueryContext(ctx, `
 		SELECT id, session_id, lead_id, url, domain, outcome, status_code, bytes, duration_ms, err, created_at
 		FROM fetch_outcomes WHERE session_id = ? ORDER BY created_at ASC LIMIT ?`, sessionID, limit)
@@ -833,9 +829,7 @@ func (t *queries) GetLead(ctx context.Context, id string) (*core.Lead, error) {
 }
 
 func (t *queries) ListLeads(ctx context.Context, sessionID string, limit int) ([]*core.Lead, error) {
-	if limit <= 0 {
-		limit = 200
-	}
+	limit = allRowsIfUnset(limit)
 	rows, err := t.q.QueryContext(ctx,
 		`SELECT `+leadCols+` FROM leads WHERE session_id = ? ORDER BY created_at LIMIT ?`,
 		sessionID, limit)
@@ -1119,10 +1113,41 @@ func (t *queries) InsertClaims(ctx context.Context, claims []core.Claim) error {
 	return nil
 }
 
-func (t *queries) ListClaims(ctx context.Context, sessionID string, limit int) ([]*core.Claim, error) {
+// allRowsIfUnset turns "no limit asked for" into SQLite's no-limit.
+//
+// LIMIT 0 is zero rows, not every row, so a caller that passes 0 cannot simply
+// have it forwarded. -1 is SQLite's "all of them".
+func allRowsIfUnset(limit int) int {
 	if limit <= 0 {
-		limit = 500
+		return -1
 	}
+	return limit
+}
+
+// A limit of zero means every row, in this query and in the four others whose
+// callers ask for everything that way: ListLeads, ListUnverifiedClaims,
+// ListFetchOutcomes and ListEdges.
+//
+// It used to mean "the default", and the default was finite — 500 claims, 200
+// leads, 1000 fetch outcomes, 5000 edges. So a call that read as "give me
+// everything" returned the first 500, with no error and nothing saying there
+// had been more. Four call sites made that mistake; three others passed 10_000
+// instead, which is the same bug spotted and worked around.
+//
+// Unreachable while sessions produced 130-290 claims. Then follow-ups stopped
+// being discarded, a Deep run produced 661, and the export began shipping 500
+// of them while the verifier's pairing pool silently excluded the newest 161
+// from being compared against anything — ORDER BY created_at drops the newest,
+// which on such a session are exactly what the follow-up research found.
+//
+// ListToolCalls joins them: its one caller wants every call a session made, and
+// the largest session measured made 945 against a default of 200.
+//
+// ListSessions keeps its default. Every caller passes a real bound — 1, 1000,
+// or whatever a person typed — and the default guards a listing somebody asked
+// to be bounded rather than standing in for "all of them".
+func (t *queries) ListClaims(ctx context.Context, sessionID string, limit int) ([]*core.Claim, error) {
+	limit = allRowsIfUnset(limit)
 	rows, err := t.q.QueryContext(ctx,
 		`SELECT `+claimCols+` FROM claims WHERE session_id = ? ORDER BY created_at, seq, id LIMIT ?`,
 		sessionID, limit)
@@ -1138,9 +1163,7 @@ func (t *queries) ListClaims(ctx context.Context, sessionID string, limit int) (
 // uncorroborated claim carrying a contradiction, so the zero would make a
 // correctly-scored claim look unexamined and get rescored on every pass.
 func (t *queries) ListUnverifiedClaims(ctx context.Context, sessionID string, limit int) ([]*core.Claim, error) {
-	if limit <= 0 {
-		limit = 500
-	}
+	limit = allRowsIfUnset(limit)
 	rows, err := t.q.QueryContext(ctx,
 		`SELECT `+claimCols+` FROM claims
 		 WHERE session_id = ? AND verified_at IS NULL
@@ -1256,9 +1279,7 @@ func (t *queries) InsertEdges(ctx context.Context, edges []core.ClaimEdge) error
 }
 
 func (t *queries) ListEdges(ctx context.Context, sessionID string, limit int) ([]*core.ClaimEdge, error) {
-	if limit <= 0 {
-		limit = 5000
-	}
+	limit = allRowsIfUnset(limit)
 	rows, err := t.q.QueryContext(ctx,
 		`SELECT `+edgeCols+` FROM claim_edges WHERE session_id = ? ORDER BY created_at LIMIT ?`,
 		sessionID, limit)
