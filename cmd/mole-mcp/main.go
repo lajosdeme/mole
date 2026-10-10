@@ -1,14 +1,12 @@
 // Command mole-mcp forwards MCP over stdio to a running mole daemon.
 //
-// Deliberately almost nothing. The daemon speaks MCP on its socket directly, so
-// this copies bytes in both directions and does not parse, buffer, validate or
-// log a single frame. That is the whole design (§5): an editor spawns this, it
-// forwards, and it dies with the editor session — while the research continues
-// in the daemon, which is the asymmetry the daemon/shim split exists for.
+// Deliberately almost nothing: it copies bytes both ways and does not parse,
+// buffer, validate or log a frame (§5). An editor spawns it, it forwards, and
+// it dies with the editor session while the research continues in the daemon —
+// the asymmetry the daemon/shim split exists for.
 //
-// Because it is spawned by editor configuration and its failures surface as "the
-// MCP server would not start", the one thing it does invest in is saying what
-// went wrong and what to do about it.
+// Its failures surface as "the MCP server would not start", so the one thing it
+// invests in is saying what went wrong and what to do about it.
 //
 //	// .mcp.json — safe to commit; contains no secrets (§5.2)
 //	{

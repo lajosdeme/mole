@@ -26,25 +26,21 @@ const HoldoutColumn = "holdout"
 
 // RenderHoldout renders the group comparison split into deterministic windows.
 //
-// # The splitting rule
+// The split is `rowid % n`, for two reasons.
 //
-// `rowid % n`. Two properties decide it.
+// Deterministic: the same table gives the same windows every run, so a
+// stability result is reproducible and a replayed session sees the same
+// evidence. A random split would make §4's fourth column a coin toss.
 //
-// It is DETERMINISTIC: the same table gives the same windows on every run, so a
-// stability result is reproducible and a replayed session gets the same evidence.
-// A random split would make the fourth column of §4's row a coin toss.
+// Interleaved rather than sliced: contiguous thirds of a file sorted by date
+// turn the stability check into a comparison of three time periods, which fails
+// for a seasonal measure that is perfectly stable. Every third row spans the
+// whole table.
 //
-// It INTERLEAVES rather than slicing. Taking the first third, then the second,
-// would make each window a contiguous block of the file — and an export sorted by
-// date would turn the stability check into a comparison of three time periods,
-// which is a different question and one that fails for a seasonal measure that is
-// perfectly stable. Every third row spans the whole table.
-//
-// What it is not: independent of insertion order. A file whose rows repeat with a
-// period of three would put the same phase in every window. No local file has been
-// seen doing that, and the alternative — a hash of the row's values — needs a hash
-// function the sqlguard allowlist does not include, for a threat that is a
-// pathological export rather than an adversary.
+// It is not independent of insertion order — a file whose rows repeat with
+// period three puts one phase in every window. The alternative, hashing the
+// row's values, needs a function the sqlguard allowlist does not include, for a
+// threat that is a pathological export rather than an adversary.
 func RenderHoldout(c connector.Connector, p Plan, windows int) (string, error) {
 	if p.Template != KindGroupCompare {
 		return "", invalid("the holdout statement applies to %s, not %q",

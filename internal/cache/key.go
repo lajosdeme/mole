@@ -110,22 +110,19 @@ func defaultPort(scheme, port string) bool {
 // QueryKey is the key for a research query.
 //
 // Folds casing, punctuation and whitespace. It does NOT fold word order, which
-// an earlier version did on the reasoning that "MambaByte PG-19 results" and
-// "PG-19 results MambaByte" are the same search. They are — but so, under a
-// sorted key, are these:
+// carries the direction of a relation — and a research question is mostly
+// relations:
 //
 //	"did Acme acquire Beta"        /  "did Beta acquire Acme"
 //	"is drug A safer than drug B"  /  "is drug B safer than drug A"
 //	"does smoking cause cancer"    /  "does cancer cause smoking"
 //
-// Word order carries the direction of a relation, and a research question is
-// mostly relations. The consequence was not a missed saving: the second question
-// was completed as skipped_cache and never researched, while the digest was
-// credited with the first one's claims — so the planner could mark it answered
-// and the report would never address it.
+// A sorted key makes each pair identical, and the cost is not a missed saving:
+// the second question completes as skipped_cache, is credited with the first
+// one's claims, and the report never addresses it.
 //
-// Keeping word order costs only the occasional missed hit on a genuinely
-// reordered query, which is the cheap direction to be wrong in.
+// Keeping word order costs the occasional missed hit on a genuinely reordered
+// query, which is the cheap direction to be wrong in.
 func QueryKey(query string) string {
 	raw := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-'

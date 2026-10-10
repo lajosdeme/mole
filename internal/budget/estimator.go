@@ -152,24 +152,18 @@ const WarmLimit = 200
 
 // Warm seeds the estimator from finished leads on this install.
 //
-// This was "deliberately not implemented" because attributing a settled cost to
-// (actor_type, depth) needs the join to leads, and leads were not populated until
-// M3. M3 populated them; the note outlived the blocker, which is the failure mode
-// this project keeps finding in its own comments.
+// Nothing is guessed: a sample carries the actor type and depth its lead
+// recorded, and leads that never finished are not read. Guessing an actor type
+// would poison the distribution.
 //
-// Guessing an actor type would still poison the distribution — so nothing is
-// guessed: a sample carries the actor type and depth its lead recorded, and leads
-// that never finished are not read at all.
+// A cold start is not an error — Warm returns how many samples it took, and an
+// empty history leaves the seeds in place.
 //
-// A cold start is not an error. Warm returns how many samples it took so a caller
-// can log the difference, and an empty history simply leaves the seeds in place.
-//
-// What this cannot know: which model produced those costs. A user who switches
-// from a cheap tier to an expensive one gets reservations sized for the old one
-// until the window turns over. That is an accuracy cost rather than a correctness
-// one — an under-reservation surfaces as a flagged overshoot in SettleResult,
-// never as a budget breach — and it is the same property the rolling window has
-// had since it was written.
+// It cannot know which model produced those costs, so switching from a cheap
+// tier to an expensive one gets reservations sized for the old one until the
+// window turns over. An accuracy cost, not a correctness one: an
+// under-reservation surfaces as a flagged overshoot in SettleResult, never as a
+// budget breach.
 func (e *Estimator) Warm(samples []core.LeadCost) int {
 	var n int
 	for _, s := range samples {

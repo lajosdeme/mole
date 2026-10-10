@@ -21,21 +21,16 @@ import (
 
 // mole dev academic-coverage
 //
-// Answers one question with data instead of intuition: how much of the
-// literature mole would actually cite is behind a PDF it cannot read?
+// How much of the literature mole would cite is behind a PDF it cannot read.
+// The decision gate for building tier 2 of the escalation ladder: metadata APIs
+// answer it now, where waiting for `unsupported_type` to accumulate from real
+// runs would answer it slowly.
 //
-// Tier 2 of the escalation ladder — PDF extraction — is deliberately unbuilt,
-// and this is the decision gate for building it, in the same shape §17.1 uses
-// for the headless-browser question. Waiting for `unsupported_type` to
-// accumulate from real runs would work eventually and answer slowly; the
-// metadata APIs answer it now, because every provider reports which formats
-// exist without any document being downloaded.
-//
-// Three buckets, not two. Only ONE of them is a PDF extractor's job:
+// Three buckets, only one of which a PDF extractor serves:
 //
 //	html      readable today, through the existing fetcher and extractor
-//	pdf_only  open access that mole cannot read — the only bucket a parser serves
-//	closed    no legal copy at all; no amount of parsing helps
+//	pdf_only  open access mole cannot read — the bucket a parser serves
+//	closed    no legal copy at all; parsing does not help
 //
 // Two skews are reported rather than smoothed away. arXiv has only served HTML
 // since late 2023, so back-catalogue coverage understates what current research

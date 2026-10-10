@@ -261,24 +261,17 @@ func (l *Ledger) reserveWith(ctx context.Context, sessionID string, amount int64
 		}
 		delta := store.BudgetDelta{Held: amount}
 		if countLead {
-			// Count the lead HERE, in the same transaction that just checked
-			// MaxLeads against the count.
+			// Count the lead HERE, in the same transaction that checked
+			// MaxLeads against the count. Counting after the lead finishes is
+			// exact only when running sequentially: K workers all reserve while
+			// the counter reads N, all pass the check, and the session
+			// dispatches up to K-1 leads past the ceiling.
 			//
-			// It used to be counted by the executor after the lead finished
-			// running. Sequentially that is exact. Concurrently it is not: K
-			// workers all reserve while the counter still reads N, all pass the
-			// ceiling check, and the session dispatches up to K-1 leads past
-			// MaxLeads. Money is unaffected — Available() subtracts Held, which
-			// this same transaction writes — but §8.5's lead ceiling is a
-			// separate counter and it lagged the work it was counting.
-			//
-			// The order within the transaction is what makes this safe, and it
-			// is the reason counting-before-reserving was originally rejected:
-			// HitCeiling reads the count first and the increment lands after, so
-			// the lead that brings the total UP TO MaxLeads still runs, and the
-			// next one is refused. Counting before the check would fail the last
-			// permitted lead on its own reservation — "we did the work we were
-			// allowed" reported as "the last lead errored".
+			// The order inside the transaction is what makes it safe, and is why
+			// counting before reserving is wrong. HitCeiling reads the count
+			// first and the increment lands after, so the lead that brings the
+			// total UP TO MaxLeads runs and the next is refused; counting first
+			// would fail the last permitted lead on its own reservation.
 			delta.LeadCount = 1
 		}
 		return tx.ApplyBudgetDelta(ctx, sessionID, delta)
