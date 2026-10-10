@@ -762,7 +762,7 @@ func isUniqueViolation(err error) bool {
 // ---------------------------------------------------------------------------
 
 const leadCols = `id, session_id, actor_type, query, parent_id, depth, priority,
-	status, lease_owner, lease_expires, root_claim_id, verify_depth,
+	status, deferred, lease_owner, lease_expires, root_claim_id, verify_depth,
 	created_at, updated_at`
 
 func (t *queries) InsertLead(ctx context.Context, l *core.Lead) error {
@@ -779,9 +779,9 @@ func (t *queries) InsertLead(ctx context.Context, l *core.Lead) error {
 	}
 
 	_, err := t.q.ExecContext(ctx, `
-		INSERT INTO leads (`+leadCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO leads (`+leadCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		l.ID, l.SessionID, string(l.ActorType), l.Query, nullStr(l.ParentID),
-		l.Depth, l.Priority, string(l.Status),
+		l.Depth, l.Priority, string(l.Status), l.Deferred,
 		nullStr(l.LeaseOwner), nullMicros(l.LeaseExpires),
 		nullStr(l.RootClaimID), l.VerifyDepth,
 		toMicros(l.CreatedAt), toMicros(l.UpdatedAt))
@@ -804,7 +804,7 @@ func scanLead(sc interface{ Scan(...any) error }) (*core.Lead, error) {
 		updated   int64
 	)
 	err := sc.Scan(&l.ID, &l.SessionID, &actorType, &l.Query, &parentID,
-		&l.Depth, &l.Priority, &status, &owner, &expires,
+		&l.Depth, &l.Priority, &status, &l.Deferred, &owner, &expires,
 		&rootClaim, &l.VerifyDepth, &created, &updated)
 	if err != nil {
 		return nil, err
@@ -907,7 +907,7 @@ func (t *queries) LeaseNextLead(ctx context.Context, sessionID, owner string, ex
 		   SET status = ?, lease_owner = ?, lease_expires = ?, updated_at = ?
 		 WHERE id = (
 		       SELECT id FROM leads
-		        WHERE session_id = ? AND status = ?
+		        WHERE session_id = ? AND status = ? AND deferred = 0
 		        ORDER BY priority DESC, created_at ASC
 		        LIMIT 1
 		 )
@@ -1012,9 +1012,16 @@ func (t *queries) SweepExpiredLeases(ctx context.Context, sessionID string, now 
 }
 
 // CountLeadsByStatus is how the loop knows whether work remains.
+//
+// Deferred leads are counted SEPARATELY, under core.LeadDeferred, not under
+// their real status of queued. The loop treats a positive queued count as "work
+// I can lease", and a deferred lead cannot be leased — so folding the two
+// together makes the drain branch spin on work it will never be handed. Two
+// executor tests hung on exactly that before this split existed.
 func (t *queries) CountLeadsByStatus(ctx context.Context, sessionID string) (map[core.LeadStatus]int, error) {
 	rows, err := t.q.QueryContext(ctx,
-		`SELECT status, COUNT(*) FROM leads WHERE session_id = ? GROUP BY status`, sessionID)
+		`SELECT CASE WHEN deferred = 1 THEN 'deferred' ELSE status END, COUNT(*)
+		   FROM leads WHERE session_id = ? GROUP BY 1`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: count leads: %w", err)
 	}

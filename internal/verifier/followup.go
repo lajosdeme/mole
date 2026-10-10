@@ -67,7 +67,36 @@ type FollowUpOptions struct {
 //
 // Deterministic: verdicts are considered in canonical pair order and the output is
 // sorted, so a cassette replays and two runs of one session queue the same work.
+// Callers that enforce a per-pass budget want FollowUpsWithDeferred: this
+// returns only what fits and says nothing about the rest, which is how 28 of
+// one session's 32 contradictions came to be dropped without a trace.
 func FollowUps(verdicts []Judged, opts FollowUpOptions) []FollowUp {
+	queued, _ := FollowUpsWithDeferred(verdicts, opts)
+	return queued
+}
+
+// FollowUpsWithDeferred proposes leads and says which of them the pass's budget
+// could not take.
+//
+// Two returns because the difference matters to the caller. The first set is
+// queued now. The second is OWED: contradictions that earned a follow-up and
+// lost the per-pass cap.
+//
+// They used to be dropped. FollowUps was called with one pass's verdicts,
+// returned the first MaxTotal in canonical order, and said nothing about the
+// rest — and a later pass never saw them again, because Verifier.Run judges
+// only unverified claims and skips any pair that already carries an edge. The
+// cap's own comment said follow-ups "accumulate across passes anyway". Nothing
+// accumulated. One Deep run found 32 contradictions, followed up 4, discarded
+// 28, and then reported that the planner had nothing left to add — which was
+// true, and was the problem.
+//
+// Deferring is not queueing later by another name: a deferred lead is real
+// work the session still owes, and §11.4's caps apply to it exactly as they do
+// to a queued one. A contradiction excluded by depth, staleness or the
+// per-root cap is excluded from BOTH, because those rules say it should not be
+// researched at all.
+func FollowUpsWithDeferred(verdicts []Judged, opts FollowUpOptions) (queued, deferred []FollowUp) {
 	maxDepth := opts.MaxDepth
 	if maxDepth <= 0 {
 		maxDepth = DefaultMaxVerifyDepth
@@ -116,10 +145,6 @@ func FollowUps(verdicts []Judged, opts FollowUpOptions) []FollowUp {
 		if perRoot[root] >= maxPerRoot {
 			continue
 		}
-		if opts.MaxTotal > 0 && len(out) >= opts.MaxTotal {
-			break
-		}
-
 		query := disambiguationQuery(v.Pair)
 		// One lead per root per pass. Two contradictions about the same claim would
 		// otherwise produce two nearly identical searches.
@@ -144,7 +169,13 @@ func FollowUps(verdicts []Judged, opts FollowUpOptions) []FollowUp {
 			Because: fmt.Sprintf("%.60q contradicts %.60q", v.A.Text, v.B.Text),
 		})
 	}
-	return out
+	// The budget cuts the list; it does not decide the list. Everything above
+	// this line is a question of whether a contradiction DESERVES a follow-up,
+	// and everything below is a question of how many fit now.
+	if opts.MaxTotal > 0 && len(out) > opts.MaxTotal {
+		return out[:opts.MaxTotal], out[opts.MaxTotal:]
+	}
+	return out, nil
 }
 
 // chainOf picks the lineage a follow-up should join.

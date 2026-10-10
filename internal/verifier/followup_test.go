@@ -258,3 +258,51 @@ func TestFollowUpsOutrankOrdinaryLeads(t *testing.T) {
 		t.Errorf("follow-up priority = %d, no higher than an ordinary lead", got[0].Lead.Priority)
 	}
 }
+
+// TestContradictionsOverTheCapAreDeferred, which is step 0's finding turned
+// round: the ones that do not fit come back as deferred work rather than
+// vanishing.
+//
+// Two returns rather than one longer list, because the difference matters to
+// the caller. The first is queued now and runs now. The second is owed, and
+// the run must not be allowed to end while it is outstanding.
+func TestContradictionsOverTheCapAreDeferred(t *testing.T) {
+	var verdicts []Judged
+	for i := 0; i < 10; i++ {
+		a := &core.Claim{ID: fmt.Sprintf("c_a%02d", i), Text: fmt.Sprintf("Finding %d is large.", i)}
+		b := &core.Claim{ID: fmt.Sprintf("c_b%02d", i), Text: fmt.Sprintf("Finding %d is absent.", i)}
+		verdicts = append(verdicts, contradiction(a, b))
+	}
+
+	queued, deferred := FollowUpsWithDeferred(verdicts, FollowUpOptions{SessionID: "s_1", MaxTotal: 2})
+	if len(queued) != 2 {
+		t.Fatalf("queued %d, want the cap of 2", len(queued))
+	}
+	if len(deferred) != 8 {
+		t.Fatalf("deferred %d, want the 8 that did not fit", len(deferred))
+	}
+
+	// Every contradiction is accounted for exactly once.
+	seen := map[string]bool{}
+	for _, f := range append(append([]FollowUp{}, queued...), deferred...) {
+		id := *f.Lead.RootClaimID
+		if seen[id] {
+			t.Errorf("%s is both queued and deferred", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != 10 {
+		t.Errorf("%d contradictions accounted for, want 10", len(seen))
+	}
+
+	// A rule that disqualifies a contradiction disqualifies it from BOTH. A
+	// duplicate is settled; deferring it would be queueing it later rather than
+	// not at all.
+	a := &core.Claim{ID: "c_x", Text: "One phrasing."}
+	b := &core.Claim{ID: "c_y", Text: "Another phrasing."}
+	q2, d2 := FollowUpsWithDeferred([]Judged{{Pair: newPair(a, b), Relation: RelDuplicate}},
+		FollowUpOptions{SessionID: "s_1", MaxTotal: 2})
+	if len(q2) != 0 || len(d2) != 0 {
+		t.Errorf("a duplicate produced %d queued and %d deferred", len(q2), len(d2))
+	}
+}

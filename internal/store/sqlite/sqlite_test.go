@@ -824,3 +824,73 @@ func TestAnOrdinaryEndingNamesNoCeiling(t *testing.T) {
 		t.Errorf("a completed session claims it stopped because %q", got.StoppedBecause)
 	}
 }
+
+// TestDeferredLeadsAreNeitherLeasableNorCountedAsQueued.
+//
+// Both halves matter and the second one is the trap.
+//
+// A deferred lead must not be leased: it is work the session owes, paced
+// deliberately, and handing it out immediately would defeat the per-pass budget
+// it was held back by.
+//
+// It must also not be COUNTED as queued. The executor reads a positive queued
+// count as "there is work I can take", and after the planner reports done it
+// keeps looping while that holds. A deferred lead that looks queued and cannot
+// be leased makes that loop spin forever — which it did, hanging two executor
+// tests, before the count was split.
+func TestDeferredLeadsAreNeitherLeasableNorCountedAsQueued(t *testing.T) {
+	ctx := context.Background()
+	db, _ := open(t)
+	insertSession(t, db, "s_def", 1_000_000)
+
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		for _, l := range []core.Lead{
+			{ID: "l_now", SessionID: "s_def", ActorType: core.ActorWeb, Query: "runnable"},
+			{ID: "l_owed", SessionID: "s_def", ActorType: core.ActorWeb, Query: "owed", Deferred: true},
+		} {
+			lead := l
+			if err := tx.InsertLead(ctx, &lead); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Leasing hands out the runnable one and then nothing.
+	var first, second *core.Lead
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		var err error
+		if first, err = tx.LeaseNextLead(ctx, "s_def", "w1", time.Now().Add(time.Minute)); err != nil {
+			return err
+		}
+		second, err = tx.LeaseNextLead(ctx, "s_def", "w1", time.Now().Add(time.Minute))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if first == nil || first.ID != "l_now" {
+		t.Fatalf("first lease = %v, want l_now", first)
+	}
+	if second != nil {
+		t.Errorf("a deferred lead was leased: %s", second.ID)
+	}
+
+	// And the count keeps them apart.
+	var counts map[core.LeadStatus]int
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		var err error
+		counts, err = tx.CountLeadsByStatus(ctx, "s_def")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if counts[core.LeadQueued] != 0 {
+		t.Errorf("queued = %d, want 0 — the deferred lead is being counted as "+
+			"takeable work and the loop will spin on it", counts[core.LeadQueued])
+	}
+	if counts[core.LeadDeferred] != 1 {
+		t.Errorf("deferred = %d, want 1", counts[core.LeadDeferred])
+	}
+}

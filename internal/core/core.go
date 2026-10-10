@@ -96,6 +96,10 @@ const (
 	LeadDone         LeadStatus = "done"
 	LeadFailed       LeadStatus = "failed"
 	LeadSkippedCache LeadStatus = "skipped_cached"
+	// LeadDeferred is not a column value. It is how a count reports work the
+	// session owes and has not made eligible to lease — see the `deferred`
+	// column, and CountLeadsByStatus for why the two are counted apart.
+	LeadDeferred LeadStatus = "deferred"
 )
 
 // Role records which stage of the loop spent a tool call. It is what makes
@@ -384,6 +388,13 @@ type Lead struct {
 	RootClaimID *string
 	// VerifyDepth is how many follow-ups deep this lead sits. Claims inherit it.
 	VerifyDepth int
+	// Deferred marks work the session owes but has not made eligible to run.
+	//
+	// A verification pass proposes a follow-up for every contradiction worth
+	// settling and queues only what its budget takes. The rest used to be
+	// dropped; they are deferred now, which is the same queue, the same
+	// ceilings, and the admission that the work is still owed.
+	Deferred bool
 
 	LeaseOwner   *string
 	LeaseExpires *time.Time

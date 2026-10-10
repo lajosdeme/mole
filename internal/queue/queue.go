@@ -167,6 +167,13 @@ func (q *Queue) Sweep(ctx context.Context, sessionID string) (int, error) {
 // Stats reports the lead counts by status.
 type Stats struct {
 	Queued, Leased, Done, Failed, Cached int
+	// Deferred is work the session owes that cannot be leased yet: follow-ups a
+	// verification pass judged worth running and its budget could not take.
+	//
+	// Apart from Queued deliberately. The loop reads Queued as "work I can take
+	// now", and counting deferred there makes it spin on leads the queue will
+	// never hand out.
+	Deferred int
 }
 
 // Pending reports work that is not finished — queued plus in flight.
@@ -185,11 +192,12 @@ func (q *Queue) Stats(ctx context.Context, sessionID string) (Stats, error) {
 			return err
 		}
 		out = Stats{
-			Queued: counts[core.LeadQueued],
-			Leased: counts[core.LeadLeased],
-			Done:   counts[core.LeadDone],
-			Failed: counts[core.LeadFailed],
-			Cached: counts[core.LeadSkippedCache],
+			Queued:   counts[core.LeadQueued],
+			Leased:   counts[core.LeadLeased],
+			Done:     counts[core.LeadDone],
+			Failed:   counts[core.LeadFailed],
+			Cached:   counts[core.LeadSkippedCache],
+			Deferred: counts[core.LeadDeferred],
 		}
 		return nil
 	})

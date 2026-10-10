@@ -136,6 +136,15 @@ type Result struct {
 	// queues them — the Verifier does not own the lead queue, and one that did
 	// could not be replayed against a cassette.
 	FollowUps []FollowUp
+	// Deferred are follow-ups this pass judged worth running and its budget
+	// could not take. Queued work the session owes, not a wish list: every §11.4
+	// rule has already been applied to them, and the only thing between them and
+	// FollowUps is MaxTotal.
+	//
+	// They used to be dropped here, silently, and no later pass could find them
+	// again — Run judges only unverified claims and skips pairs that already
+	// carry an edge.
+	Deferred []FollowUp
 
 	// priorEdges is the graph as it stood before this pass, kept so confidence is
 	// derived over the whole of it rather than only what this pass added.
@@ -285,7 +294,7 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 			"skipping lead generation rather than uncapping it", "err", err)
 		return res, nil
 	}
-	res.FollowUps = FollowUps(verdicts, FollowUpOptions{
+	res.FollowUps, res.Deferred = FollowUpsWithDeferred(verdicts, FollowUpOptions{
 		SessionID:       sessionID,
 		StalenessGap:    v.StalenessGap,
 		ActorType:       followUpActor(),

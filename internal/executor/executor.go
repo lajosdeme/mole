@@ -137,6 +137,9 @@ type Result struct {
 	EdgesWritten    int
 	Contradictions  int
 	FollowUpsQueued int
+	// FollowUpsDeferred counts contradictions worth settling that a pass's
+	// budget could not take. Work the session owes.
+	FollowUpsDeferred int
 	// VerifyDegraded is the last reason a pass could not finish, if any.
 	VerifyDegraded string
 
@@ -1307,6 +1310,40 @@ func (e *Executor) verify(ctx context.Context, digest *planner.Digest, res *Resu
 	}
 
 	e.queueFollowUps(ctx, out.FollowUps, res)
+	// What the pass could not take. Persisted deferred: not eligible to lease,
+	// and not lost either — which is what used to happen to every contradiction
+	// past the per-pass cap.
+	e.deferFollowUps(ctx, out.Deferred, res)
+}
+
+// deferFollowUps records work the pass judged worth doing and could not take.
+//
+// Deferred rather than queued, so the running session's spend is still paced by
+// MaxTotal — and recorded rather than dropped, so the run cannot end believing
+// there is nothing left while contradictions sit unexamined.
+func (e *Executor) deferFollowUps(ctx context.Context, ups []verifier.FollowUp, res *Result) {
+	if len(ups) == 0 {
+		return
+	}
+	leads := make([]core.Lead, 0, len(ups))
+	for _, up := range ups {
+		lead := up.Lead
+		if lead.ID == "" {
+			lead.ID = core.NewLeadID()
+		}
+		lead.Deferred = true
+		leads = append(leads, lead)
+	}
+	if err := e.Queue.Push(ctx, leads); err != nil {
+		// Same reasoning as a failed queue push: the contradiction is already in
+		// the graph and will be reported. Failing to record the follow-up is a
+		// worse answer, not a broken one.
+		e.logger().WarnContext(ctx, "could not defer follow-up leads", "err", err)
+		return
+	}
+	res.FollowUpsDeferred += len(leads)
+	e.logger().InfoContext(ctx, "deferred follow-up leads past this pass's budget",
+		"leads", len(leads))
 }
 
 // queueFollowUps pushes the Verifier's proposed leads (§11.4).
