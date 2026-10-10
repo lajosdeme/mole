@@ -1806,3 +1806,100 @@ func TestThePlannerLearnsAboutContradictions(t *testing.T) {
 		t.Errorf("the planner's view does not mention contradictions:\n%s", res.Digest.String())
 	}
 }
+
+// manyOpposingClaims emits THREE contradicting pairs per lead, over three
+// unrelated topics so they pair with their own opposite rather than each other.
+//
+// opposingClaims gives one pair, so one pass can never produce more follow-ups
+// than any sane budget takes — which makes it useless for testing what happens
+// to the ones a budget turns away.
+func manyOpposingClaims(n int, lead core.Lead) (*actors.Result, error) {
+	root := ""
+	if lead.RootClaimID != nil {
+		root = *lead.RootClaimID
+	}
+	topics := []struct{ subject, pro, con string }{
+		{"tokenization", "Subword tokenization improves accuracy", "Subword tokenization does not improve accuracy"},
+		{"quantization", "Four-bit quantization preserves quality", "Four-bit quantization degrades quality"},
+		{"distillation", "Distillation retains reasoning ability", "Distillation destroys reasoning ability"},
+	}
+	out := &actors.Result{
+		Summary: "a summary",
+		Costs: []core.ToolCall{{
+			Role: core.RoleExecutor, Type: core.CallLLM, Model: "fake-model",
+			Cost: core.Cost{USDMicros: 8_000, InputTokens: 800, OutputTokens: 80},
+		}},
+	}
+	for _, t := range topics {
+		out.Claims = append(out.Claims,
+			core.Claim{
+				Text:        fmt.Sprintf("%s, reading %d.", t.pro, n),
+				Source:      fmt.Sprintf("https://pro-%s%d.example/p", t.subject, n),
+				Quote:       "a quote long enough to constitute real evidence",
+				RootClaimID: root, VerifyDepth: lead.VerifyDepth,
+			},
+			core.Claim{
+				Text:        fmt.Sprintf("%s, reading %d.", t.con, n),
+				Source:      fmt.Sprintf("https://con-%s%d.example/p", t.subject, n),
+				Quote:       "another quote long enough to constitute real evidence",
+				RootClaimID: root, VerifyDepth: lead.VerifyDepth,
+			})
+	}
+	return out, nil
+}
+
+// TestDeferredFollowUpsRunBeforeTheRunEnds.
+//
+// The sibling of TestAFollowUpRunsWhenThePlannerIsDone, one level along. That
+// one fixed the loop ending with follow-ups sitting QUEUED. This is the loop
+// ending with follow-ups sitting DEFERRED — contradictions a verification pass
+// judged worth settling and its own budget could not take.
+//
+// With MaxFollowUpsPerPass at 1 and several contradictions on the table, every
+// pass queues one and defers the rest. A run that stops when the planner says
+// done leaves those owed and reports itself finished, which is what a Deep run
+// did: 32 contradictions found, 4 followed up, 28 never looked at, and the
+// session ended at 13 of its 25 allowed minutes.
+//
+// Draining is not overruling the planner. It never answered this question —
+// §11.4's work is the verifier's, and the planner has no view of it.
+func TestDeferredFollowUpsRunBeforeTheRunEnds(t *testing.T) {
+	fl := &verifierLLM{
+		plans:    []string{planJSON("the question")},
+		relation: "contradicts",
+	}
+	r := newRig(t, 20*core.MicrosPerUSD, nil, manyOpposingClaims)
+	r.exec.Planner = &planner.Planner{LLM: fl, MaxInitialLeads: 1, ReplanEvery: 3, MaxDepth: 2}
+	v := r.withVerifier(fl)
+	v.MaxFollowUpsPerRoot = 5
+	v.MaxVerifyDepth = 4
+	// One per pass, so anything else a pass finds is deferred.
+	v.MaxFollowUpsPerPass = 1
+
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var deferred, ran int
+	for _, l := range leadsOf(t, r) {
+		if l.RootClaimID == nil {
+			continue
+		}
+		if l.Deferred {
+			deferred++
+			continue
+		}
+		if l.Status == core.LeadDone || l.Status == core.LeadSkippedCache {
+			ran++
+		}
+	}
+	if ran == 0 {
+		t.Errorf("no follow-up ran (deferred=%d, queued=%d, owed=%d)",
+			deferred, res.FollowUpsQueued, res.FollowUpsDeferred)
+	}
+	if deferred > 0 {
+		t.Errorf("the run ended owing %d follow-up(s); a contradiction it judged "+
+			"worth settling was recorded and never researched", deferred)
+	}
+}

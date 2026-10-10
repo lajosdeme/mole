@@ -271,6 +271,15 @@ type Tx interface {
 	RecordFetchOutcome(ctx context.Context, o *FetchOutcome) error
 
 	InsertLead(ctx context.Context, l *core.Lead) error
+
+	// PromoteDeferredLeads makes owed follow-up work eligible to lease, oldest
+	// and highest priority first, and reports how many it moved.
+	//
+	// limit <= 0 promotes all of them. The pacing that held them back was one
+	// verification pass's budget; what bounds the session is §8.5's ceilings,
+	// and they are checked on every turn of the loop whether a lead was
+	// promoted or not.
+	PromoteDeferredLeads(ctx context.Context, sessionID string, limit int) (int, error)
 	// SetLeadStatus moves a lead to a terminal state. owner must match the
 	// lease holder; an empty owner skips the check, for callers that legitimately
 	// have no lease. Without it a worker that lost its lease could terminalize a

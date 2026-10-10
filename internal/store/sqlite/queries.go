@@ -1011,6 +1011,29 @@ func (t *queries) SweepExpiredLeases(ctx context.Context, sessionID string, now 
 	return int(n), err
 }
 
+// PromoteDeferredLeads makes owed follow-up work leasable.
+//
+// Ordered the way the queue dispatches — priority then insertion — so promoting
+// a subset promotes the ones that would have run first had the pass's budget
+// been larger, rather than an arbitrary slice.
+func (t *queries) PromoteDeferredLeads(ctx context.Context, sessionID string, limit int) (int, error) {
+	q := `UPDATE leads SET deferred = 0, updated_at = ?
+	       WHERE session_id = ? AND deferred = 1 AND status = ?`
+	args := []any{toMicros(time.Now()), sessionID, string(core.LeadQueued)}
+	if limit > 0 {
+		q += ` AND id IN (SELECT id FROM leads
+		                   WHERE session_id = ? AND deferred = 1 AND status = ?
+		                   ORDER BY priority DESC, created_at ASC LIMIT ?)`
+		args = append(args, sessionID, string(core.LeadQueued), limit)
+	}
+	res, err := t.q.ExecContext(ctx, q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: promote deferred leads: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // CountLeadsByStatus is how the loop knows whether work remains.
 //
 // Deferred leads are counted SEPARATELY, under core.LeadDeferred, not under

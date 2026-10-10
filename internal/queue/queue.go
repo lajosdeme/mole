@@ -183,6 +183,26 @@ type Stats struct {
 // Pending is for reporting.
 func (s Stats) Pending() int { return s.Queued + s.Leased }
 
+// PromoteDeferred makes owed follow-up work eligible to lease.
+//
+// Deferred leads are contradictions a verification pass judged worth settling
+// and its own budget could not take. They are not a wish list: §11.4's rules
+// have already been applied, and the only thing between them and the queue was
+// MaxTotal.
+//
+// limit <= 0 promotes all of them. What bounds the session is §8.5's ceilings,
+// checked on every turn of the loop; this only decides when work the session
+// already owes becomes takeable.
+func (q *Queue) PromoteDeferred(ctx context.Context, sessionID string, limit int) (int, error) {
+	var n int
+	err := q.st.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		var err error
+		n, err = tx.PromoteDeferredLeads(ctx, sessionID, limit)
+		return err
+	})
+	return n, err
+}
+
 // Stats counts the session's leads by status.
 func (q *Queue) Stats(ctx context.Context, sessionID string) (Stats, error) {
 	var out Stats

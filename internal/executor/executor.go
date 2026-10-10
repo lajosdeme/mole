@@ -312,8 +312,12 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 
 		if len(batch) == 0 {
 			// Queue drained. One last replan can add work; if it does not, the
-			// session is done.
+			// session is done — unless it still owes follow-ups, which are work
+			// the planner has no view of and never agreed to stop.
 			if !e.Planner.ShouldReplan(completedSinceReplan, true) {
+				if e.hasWorkLeft(ctx, sessionID) {
+					continue
+				}
 				break
 			}
 			// Last chance to verify: after this the queue is empty and, if the
@@ -323,13 +327,15 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			e.verify(ctx, digest, res)
 
 			// That verification may have queued work, and it is the work this
-			// engine exists to do (§11.4). Go and run it.
-			if e.hasQueuedLeads(ctx, sessionID) {
+			// engine exists to do (§11.4). Go and run it — including anything it
+			// judged worth doing and had no budget for this pass.
+			if e.hasWorkLeft(ctx, sessionID) {
 				continue
 			}
 
 			if plannerDone {
-				// Asked once, answered. Everything queued since has now drained.
+				// Asked once, answered. Everything queued since has now drained,
+				// and nothing is owed.
 				break
 			}
 
@@ -355,7 +361,7 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 				// work the verification above created and this pass has not yet
 				// seen. Checked again because replan can take long enough for a
 				// concurrent worker to finish a lead.
-				if e.hasQueuedLeads(ctx, sessionID) {
+				if e.hasWorkLeft(ctx, sessionID) {
 					plannerDone = true
 					continue
 				}
@@ -462,7 +468,7 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 				// queued leads to settle a contradiction, and the planner has no
 				// view of them. Draining them is not overruling it — it never
 				// answered this question.
-				if e.hasQueuedLeads(ctx, sessionID) {
+				if e.hasWorkLeft(ctx, sessionID) {
 					plannerDone = true
 					continue
 				}
@@ -601,6 +607,42 @@ func (e *Executor) hasQueuedLeads(ctx context.Context, sessionID string) bool {
 		return false
 	}
 	return st.Queued > 0
+}
+
+// hasWorkLeft reports whether the session can still do something, promoting
+// work it owes when nothing is immediately takeable.
+//
+// The two are checked in that order because they are different things. Queued
+// leads are takeable now. Deferred leads are contradictions a verification pass
+// judged worth settling and its own budget could not take — owed work, held
+// back for pacing, and the pacing has no claim on a loop that is otherwise
+// about to stop.
+//
+// This is the sibling of the check above, one level along. That one stopped the
+// loop ending with follow-ups sitting QUEUED while the planner said done. This
+// stops it ending with follow-ups sitting DEFERRED, which is how a run came to
+// report itself finished holding 28 contradictions it had already judged worth
+// researching.
+//
+// Promotion is not a way around §8.5. The ceilings are checked at the top of
+// every turn, so a promoted lead faces exactly the limits an ordinary one does;
+// what changes is only whether the session admits the work exists.
+func (e *Executor) hasWorkLeft(ctx context.Context, sessionID string) bool {
+	if e.hasQueuedLeads(ctx, sessionID) {
+		return true
+	}
+	n, err := e.Queue.PromoteDeferred(ctx, sessionID, 0)
+	if err != nil {
+		e.logger().WarnContext(ctx, "could not promote deferred follow-ups; ending the run",
+			"session", sessionID, "err", err)
+		return false
+	}
+	if n == 0 {
+		return false
+	}
+	e.logger().InfoContext(ctx, "promoted follow-ups the session still owed",
+		"session", sessionID, "leads", n)
+	return true
 }
 
 // leaseBatch takes up to max leads off the queue.
