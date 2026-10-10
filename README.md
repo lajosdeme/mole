@@ -135,6 +135,44 @@ mole config set llm.model deepseek-chat
 A model served from `localhost` is priced at zero and still counted in tokens, so
 `--tokens` bounds a self-hosted run that costs no money at all.
 
+#### Model rates
+
+`--usd` is enforced from a rate table, so mole has to know what a call costs.
+It ships rates for the models it can select itself — Anthropic's, DeepSeek's,
+`gpt-4o` and `gpt-4o-mini` — and refuses a dollar budget for a model it cannot
+price, rather than metering it at zero and letting the ceiling silently not
+bind.
+
+Declare anything else, in dollars per **million** tokens, straight off the
+vendor's pricing page:
+
+```json
+{
+  "pricing": {
+    "anthropic/claude-sonnet-4.6": { "input": 3.00, "output": 15.00 },
+    "some/model-v3": { "input": 1.00, "output": 3.00, "cache_read": 0.50 }
+  }
+}
+```
+
+Cache rates are optional and default to the usual contract — a read at a tenth
+of input, writes at 1.25x and 2x. A declared rate overrides a built-in one, so a
+price that changes is correctable without waiting for a release.
+
+This is also what makes an aggregator like OpenRouter work: point `base_url` and
+`model` at it, declare the rates for the models you use, and `--usd` behaves as
+it does anywhere else. `mole doctor` reports whether every configured model has
+a rate before you try to run anything.
+
+#### Session limits
+
+```bash
+mole config set max-wallclock 20m    # default clock; --timeout overrides per run
+```
+
+`max_wallclock` is how long a session may run when `--timeout` says nothing. Not
+to be confused with `llm.timeout`, which bounds a single model call.
+
 ---
 
 ## Usage
@@ -145,12 +183,20 @@ A model served from `localhost` is priced at zero and still counted in tokens, s
 mole research "how much electricity does the bitcoin network use?" --usd 0.50
 mole research "..." --tokens 200000            # token budget instead of dollars
 mole research "..." --max-sources 8 --max-depth 3
+mole research "..." --timeout 20m               # wall-clock ceiling for the session
+mole research "..." --max-tool-calls 2000       # backstop; 0 sizes one from --max-depth
 mole research "..." --json                      # machine-readable result
 ```
 
 Budget is required, and the two units are mutually exclusive. Only dollar mode can
 price a search call; only token mode can bound a model whose rates mole does not
 know.
+
+What stops a run is the clock and the money. `--max-tool-calls` is a backstop for
+when neither can — a budget estimate that is wrong, a unit that cannot price a
+provider — so it is sized far above what a healthy run needs. The export says
+which limit ended the session in `session.stopped_because`: `max_wallclock`,
+`max_leads`, `max_tool_calls`, or empty when the planner simply finished.
 
 ### Ask a follow-up
 
@@ -246,7 +292,14 @@ flag adds a surface rather than replacing one:
 mole sessions                # recent sessions and what they cost
 mole trace <session-id>      # per-call cost and timing breakdown
 mole stats --fetch           # why fetches failed, across sessions
+mole export <session-id>     # the whole session as one JSON document
 ```
+
+`export` is the machine-readable form: the sub-questions and what became of
+each, every claim with the sentence it was mined from, the disagreements, the
+coverage and the citation receipt. A sub-question spawned to settle a
+contradiction carries `verify_depth` and `root_claim_id`, naming the claim it
+came from.
 
 ---
 
