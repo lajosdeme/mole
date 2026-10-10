@@ -15,11 +15,10 @@ import (
 
 // Derived confidence (§11.3).
 //
-// Rev 1 asked the model for a confidence number. §11.3 rejects that: self-reported
-// confidence is uncalibrated and mostly encodes fluency, and M4 slice 0 measured
-// the consequence — a fluent claim from one anonymous page outranked a claim three
-// publishers agreed on. So confidence is computed from graph structure instead:
-// deterministic, reproducible, and explainable line by line in a trace.
+// Computed from graph structure, not asked of the model: self-reported
+// confidence is uncalibrated and mostly encodes fluency, and a fluent claim
+// from one anonymous page outranked a claim three publishers agreed on.
+// Deterministic, reproducible, explainable line by line in a trace.
 //
 // §11.3 names five inputs. Four are implemented:
 //

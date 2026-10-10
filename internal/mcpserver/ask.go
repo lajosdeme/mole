@@ -64,26 +64,18 @@ type Citation struct {
 
 // ask answers a new question from a finished session's graph (§13).
 //
-// The ask runs as its OWN session, with mode "ask" and a small budget of its
-// own, reading the source session's claims. That is not indirection for its own
-// sake — it is forced, and the reason is worth stating.
+// The ask runs as its OWN session, mode "ask", with a small budget, reading the
+// source session's claims. That is forced rather than chosen: §8 refuses a
+// reservation against a terminal session, because a finished ledger is settled
+// and reconciled and adding cost rows later rewrites a closed account.
 //
-// §8 refuses a reservation against a terminal session, and rightly: a finished
-// session's ledger is settled and reconciled, and adding cost rows to it later
-// rewrites a closed account. So an ask cannot be charged to the research it
-// queries. Giving it a session of its own keeps every §8 invariant intact —
-// every model call belongs to a live session, every cost row has a reservation,
-// the source session's accounts stay closed — and has the side benefit that an
-// ask shows up in sessions.list with its own cost, which is what a person
-// wondering where the money went needs to see.
+// A session of its own keeps every §8 invariant — each model call belongs to a
+// live session, each cost row has a reservation — and makes the ask appear in
+// sessions.list with its own cost.
 //
-// This is also what core.ModeAsk was reserved for. §13 describes it as "listed
-// in rev 1's Session.Mode but never defined"; this defines it.
-//
-// Exported because `mole ask` is the same operation from a terminal instead of
-// an MCP client, and the budgeting above is the part that must not be written
-// twice. The CLI builds a Deps with no Supervisor — an ask never starts one —
-// and calls this directly.
+// Exported because `mole ask` is the same operation from a terminal, and the
+// budgeting is the part that must not be written twice. The CLI builds a Deps
+// with no Supervisor and calls this directly.
 func (d Deps) Ask(ctx context.Context, in AskIn) (AskOut, error) {
 	if d.Log == nil {
 		// New() fills this in; a caller constructing Deps by hand (the CLI) may

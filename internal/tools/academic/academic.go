@@ -3,21 +3,19 @@
 // arXiv and PubMed/PMC are the keyless defaults; Unpaywall turns a DOI into a
 // legal open-access copy.
 //
-// §10.2 calls Unpaywall "the single highest-leverage call in the package", and
-// measurement does not bear that out for how mole uses it. Over a 97-paper sweep
-// of the contradiction corpus, 46 papers carried no DOI at all, and of the 28
-// unreadable ones that did, Unpaywall placed none — leaving it worth about 5%.
-// The binding constraint on academic coverage is missing identifiers, not
-// unresolved ones. It is kept because that 5% is real and because a DOI is what
-// the other providers hand around; the claim about leverage is not. Semantic Scholar and OpenAlex are deliberately absent — they
-// serve citation-graph queries, which is a different capability from finding
-// papers about a question. So is ScienceDirect/Elsevier, for a harder reason:
-// full text there needs an institutional entitlement the API does not grant.
+// Unpaywall is worth about 5%, not the "single highest-leverage call" §10.2
+// calls it: over a 97-paper sweep, 46 papers carried no DOI at all, and of the
+// 28 unreadable ones that did, Unpaywall placed none. The binding constraint on
+// academic coverage is missing identifiers, not unresolved ones.
 //
-// The API surface is the easy part. §10.3 is the milestone: every provider is
-// rate-limited and identifies itself, because a worker pool without that gets
-// the user banned in week one. Both are enforced here rather than left to each
-// implementation, so a new provider cannot forget.
+// Semantic Scholar and OpenAlex are absent deliberately — they serve
+// citation-graph queries, a different capability from finding papers about a
+// question. So is ScienceDirect/Elsevier, whose full text needs an
+// institutional entitlement the API does not grant.
+//
+// Rate limiting and identification (§10.3) are enforced here rather than in
+// each provider, so a new one cannot forget. A worker pool without them gets
+// the user banned in week one.
 package academic
 
 import (

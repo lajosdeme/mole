@@ -15,20 +15,16 @@ import (
 
 // Running code inside the sandbox (§3.6).
 //
-// This is the half of §3.6 that executes rather than reports. It runs one
-// container with the flags Limits.Flags renders, feeds it a script on stdin,
-// and returns what the script printed — bounded in size, bounded in time, and
-// with no route out except stdout.
+// Runs one container with the flags Limits.Flags renders, feeds it a script on
+// stdin, and returns what the script printed — bounded in size, bounded in
+// time, with no route out except stdout.
 //
-// # What the caller is trusting
+// The caller does not trust the script: it is model-authored code over real
+// data, which is the reason for the container. What it trusts is that the
+// runtime applies the flags, and slice 6's container test establishes that — no
+// network, read-only rootfs, no capabilities, non-root uid, noexec scratch.
 //
-// Not the script. The script is model-authored code over real data, which is
-// the entire reason for the container. What the caller trusts is that the
-// runtime applies the flags, and slice 6's container test is what establishes
-// that: no network, read-only rootfs, no capabilities, non-root uid, noexec
-// scratch.
-//
-// # What crosses out
+// What crosses out:
 //
 // stdout, capped. That is a channel and it is the caller's job to constrain what
 // may travel down it — see internal/compute/coderunner, which accepts only

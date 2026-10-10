@@ -6,25 +6,19 @@ import (
 	"sort"
 )
 
-// Comparing more than two groups (§4, and the k-group gap M8 named).
+// Comparing more than two groups (§4).
 //
-// The gate compared the two largest buckets and nothing else, with the argument
-// written into the code: "comparing every pair of k buckets is k(k−1)/2 tests
-// against the same alpha, which manufactures a significant result out of noise".
-// That argument is right about the danger and wrong about the remedy. Ten groups
-// at alpha = 0.05 give a 90% chance of at least one spurious "significant" —
-// which is exactly why multiple-comparison corrections exist, and why refusing to
-// look at eight of ten groups is not the only alternative.
+// Every pair is tested and every p adjusted by Holm-Bonferroni before a verdict
+// is derived. Ten groups at alpha = 0.05 give a 90% chance of at least one
+// spurious "significant", which is what corrections exist for — comparing only
+// the two largest buckets is not the only alternative.
 //
-// So: every pair is tested, and every p is adjusted by Holm–Bonferroni before any
-// verdict is derived from it. Holm rather than plain Bonferroni because it is
-// uniformly more powerful at the same family-wise error rate — it is not an
-// approximation of Bonferroni, it dominates it — and rather than
-// Benjamini–Hochberg because BH controls the false-discovery RATE, which is the
-// right target when a hundred hypotheses are being screened and the wrong one
-// when a research tool is about to state a difference as a finding. A user reading
-// "spend differs between north and south" wants the probability that ANY of the
-// stated differences is spurious to be small.
+// Holm rather than plain Bonferroni because it dominates it: uniformly more
+// powerful at the same family-wise error rate. Not Benjamini-Hochberg, which
+// controls the false-discovery RATE — right for screening a hundred hypotheses,
+// wrong when a research tool is about to state a difference as a finding. A
+// reader wants the probability that ANY stated difference is spurious to be
+// small.
 //
 // The unadjusted p is kept beside the adjusted one, because a reader who knows
 // statistics will want to see both and one who does not should see the number the

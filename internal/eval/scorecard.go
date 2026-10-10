@@ -258,6 +258,7 @@ func holdsReleased(v budget.VerifyResult) Metric {
 // RetrievedAt is deliberately not checked: InsertClaims defaults it, so a
 // persisted claim cannot have a zero one. A check that can never fire implies
 // coverage this does not have.
+
 // resolvableSource reports whether a claim's source identifies where it came
 // from.
 //
