@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/lajosdeme/mole/internal/core"
+	"github.com/lajosdeme/mole/internal/llm"
 	"github.com/lajosdeme/mole/internal/pricing"
 )
 
@@ -264,5 +265,117 @@ func TestAFallbackNobodyRegisteredIsRefusedAtOnce(t *testing.T) {
 	tbl := pricing.NewTable()
 	if err := tbl.SetFallbackModel("not-a-model"); err == nil {
 		t.Error("an unpriced fallback was accepted")
+	}
+}
+
+// TestEveryModelMoleCanChooseIsPriced.
+//
+// internal/llm/detect.go selects a model when the user names none — gpt-4o from
+// an OPENAI_API_KEY, deepseek-chat from a DEEPSEEK_API_KEY, and so on. A model
+// mole picks FOR you and then cannot price is a configuration mole built and
+// then refuses to budget: checkUSDIsEnforceable rejects the run, and --usd is
+// unavailable to a user who never chose anything.
+//
+// The rule this pins is narrow on purpose. Not "price every model in the
+// world" — this table's job is never to under-bill, and a list nobody can
+// maintain goes stale in the direction of billing too little. Only: mole prices
+// what mole itself selects.
+func TestEveryModelMoleCanChooseIsPriced(t *testing.T) {
+	tbl := pricing.NewTable()
+	for _, m := range llm.AutoSelectedModels() {
+		if _, ok := tbl.Lookup(m); !ok {
+			t.Errorf("detect.go can select %q and the table cannot price it", m)
+		}
+	}
+}
+
+// TestRatesComeFromThePageTheVendorPublishes.
+//
+// Internally a rate is nano-dollars per token, which nobody should have to know
+// to configure one. The config takes dollars per MILLION tokens — the number
+// printed on the vendor's own pricing page, copied across without arithmetic.
+func TestRatesComeFromThePageTheVendorPublishes(t *testing.T) {
+	// $2.50/MTok in, $10.00/MTok out, the way OpenAI prints it.
+	got := pricing.RateConfig{Input: 2.50, Output: 10.00}.Rates()
+
+	want, _ := pricing.NewTable().Lookup("gpt-4o")
+	if got.Input != want.Input || got.Output != want.Output {
+		t.Errorf("declared %+v, built-in %+v — the same page should give the same rate",
+			got, want)
+	}
+}
+
+// TestDeclaredCacheRatesDefaultToTheContract, so two numbers are enough for a
+// provider that bills cache the ordinary way.
+func TestDeclaredCacheRatesDefaultToTheContract(t *testing.T) {
+	r := pricing.RateConfig{Input: 3, Output: 15}.Rates()
+	if r.CacheRead != 300 {
+		t.Errorf("CacheRead = %d, want a tenth of input", r.CacheRead)
+	}
+	if r.CacheWrite != 3750 || r.CacheWrite1h != 6000 {
+		t.Errorf("cache writes = %d/%d, want 1.25x and 2x input", r.CacheWrite, r.CacheWrite1h)
+	}
+
+	// And a provider that bills differently says so.
+	ex := pricing.RateConfig{Input: 3, Output: 15, CacheRead: 1.5}.Rates()
+	if ex.CacheRead != 1500 {
+		t.Errorf("an explicit cache read was overridden: %d", ex.CacheRead)
+	}
+}
+
+// TestADeclaredRateBeatsTheBuiltIn.
+//
+// A vendor changing a price must be correctable without waiting for a release —
+// which is the situation that started all this, when a rename left every call
+// priced at zero and nobody could fix it from outside the binary.
+func TestADeclaredRateBeatsTheBuiltIn(t *testing.T) {
+	tbl := pricing.NewTable()
+	if err := tbl.Declare(map[string]pricing.RateConfig{
+		"gpt-4o": {Input: 99, Output: 99},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := tbl.Lookup("gpt-4o")
+	if r.Input != 99_000 {
+		t.Errorf("Input = %d, want the declared rate to win", r.Input)
+	}
+}
+
+// TestANonsenseRateIsRefusedAtLoad, not at the first call: discovering it
+// mid-run means discovering it after the run has started spending.
+func TestANonsenseRateIsRefusedAtLoad(t *testing.T) {
+	for name, rc := range map[string]pricing.RateConfig{
+		"negative input":  {Input: -1, Output: 1},
+		"negative output": {Input: 1, Output: -1},
+		"no input rate":   {Output: 1},
+	} {
+		if err := pricing.NewTable().Declare(map[string]pricing.RateConfig{"m": rc}); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+// TestDeclaringAPriceMakesUsdUsable, which is the point of the whole feature: an
+// exotic provider is budgetable because its rates were declared, and the
+// fallback then covers a response naming something unexpected.
+func TestDeclaringAPriceMakesUsdUsable(t *testing.T) {
+	tbl := pricing.NewTable()
+	const model = "some-vendor/some-model-v3"
+
+	if _, ok := tbl.Lookup(model); ok {
+		t.Fatal("the premise is wrong; that model is registered")
+	}
+	if err := tbl.Declare(map[string]pricing.RateConfig{model: {Input: 1, Output: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tbl.SetFallbackModel(model); err != nil {
+		t.Fatalf("a declared model cannot be a fallback: %v", err)
+	}
+	c, err := tbl.Cost("whatever-the-api-actually-answered", pricing.Usage{InputTokens: 1_000_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.USDMicros == 0 {
+		t.Error("priced at zero; --usd would not bind")
 	}
 }

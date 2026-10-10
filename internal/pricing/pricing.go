@@ -11,6 +11,7 @@
 package pricing
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -32,6 +33,63 @@ type Rates struct {
 	CacheWrite   int64 // 5-minute TTL
 	CacheWrite1h int64
 }
+
+// RateConfig is a rate as somebody writes it down: dollars per MILLION tokens,
+// the number printed on the vendor's own pricing page.
+//
+// Rates internally are nano-dollars per token, and nobody should have to know
+// that to configure one. The conversion is this type's whole job.
+type RateConfig struct {
+	Input  float64 `json:"input"`
+	Output float64 `json:"output"`
+
+	// Cache rates, when a provider bills them other than by the usual contract.
+	// Zero takes the same multipliers the built-in table assumes: a read at a
+	// tenth of input, a write at 1.25x for the short TTL and 2x for the long
+	// one.
+	//
+	// A write rate of zero would mean free, which is the one value that must not
+	// be the default: a provider that starts reporting cache-creation tokens
+	// would get them for nothing.
+	CacheRead    float64 `json:"cache_read,omitempty"`
+	CacheWrite   float64 `json:"cache_write,omitempty"`
+	CacheWrite1h float64 `json:"cache_write_1h,omitempty"`
+}
+
+// Rates converts to the internal form.
+func (rc RateConfig) Rates() Rates {
+	r := perMTok(rc.Input, rc.Output)
+	if rc.CacheRead > 0 {
+		r.CacheRead = perToken(rc.CacheRead)
+	}
+	if rc.CacheWrite > 0 {
+		r.CacheWrite = perToken(rc.CacheWrite)
+	}
+	if rc.CacheWrite1h > 0 {
+		r.CacheWrite1h = perToken(rc.CacheWrite1h)
+	}
+	return r
+}
+
+// validate refuses a rate that cannot bill correctly.
+//
+// At load rather than at the first call, for the same reason SetFallbackModel
+// refuses an unpriced fallback: finding out during a run means finding out
+// after it has started spending.
+func (rc RateConfig) validate() error {
+	switch {
+	case rc.Input <= 0:
+		return fmt.Errorf("pricing: input rate must be above zero, got %v", rc.Input)
+	case rc.Output < 0:
+		return fmt.Errorf("pricing: output rate cannot be negative, got %v", rc.Output)
+	case rc.CacheRead < 0 || rc.CacheWrite < 0 || rc.CacheWrite1h < 0:
+		return errors.New("pricing: a cache rate cannot be negative")
+	}
+	return nil
+}
+
+// perToken converts dollars per million tokens to nano-dollars per token.
+func perToken(usdPerMTok float64) int64 { return int64(usdPerMTok * 1000) }
 
 // Usage is the raw token count returned by a provider.
 type Usage struct {
@@ -123,7 +181,44 @@ func defaultTable() map[string]Rates {
 		"claude-sonnet-4-6": perMTok(3, 15),
 
 		"claude-haiku-4-5": perMTok(1, 5),
+
+		// OpenAI, which detect.go selects from an OPENAI_API_KEY. Rates are the
+		// published dollars-per-MTok as of 2026-10; an operator who finds them
+		// stale overrides them in config rather than waiting for a release.
+		//
+		// Not perMTok: that helper encodes Anthropic's cache contract, and
+		// OpenAI's is different. A cached input token bills at half, not a
+		// tenth, and there is no separate charge to CREATE the cache — a miss is
+		// billed as ordinary input, so CacheWrite equals Input rather than being
+		// zero. Zero would hand free tokens to a provider that starts reporting
+		// cache-creation counts.
+		"gpt-4o":      {Input: 2500, Output: 10_000, CacheRead: 1250, CacheWrite: 2500, CacheWrite1h: 2500},
+		"gpt-4o-mini": {Input: 150, Output: 600, CacheRead: 75, CacheWrite: 150, CacheWrite1h: 150},
 	}
+}
+
+// Declare registers operator-supplied rates, overriding anything built in.
+//
+// Overriding on purpose. A vendor changing a price — or renaming a model, which
+// is how this whole area came apart — must be correctable the same afternoon
+// rather than at the next release. The risk is that somebody under-bills
+// themselves, and it is their money and their declaration.
+//
+// All or nothing: one bad rate rejects the batch, so a typo cannot leave half a
+// configuration applied.
+func (t *Table) Declare(rates map[string]RateConfig) error {
+	for model, rc := range rates {
+		if model == "" {
+			return errors.New("pricing: a declared rate names no model")
+		}
+		if err := rc.validate(); err != nil {
+			return fmt.Errorf("%s: %w", model, err)
+		}
+	}
+	for model, rc := range rates {
+		t.Register(model, rc.Rates())
+	}
+	return nil
 }
 
 // Table maps model IDs to rates. Safe for concurrent use.

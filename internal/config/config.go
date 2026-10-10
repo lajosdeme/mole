@@ -23,6 +23,8 @@ import (
 
 	"github.com/lajosdeme/mole/internal/core"
 	"time"
+
+	"github.com/lajosdeme/mole/internal/pricing"
 )
 
 // Config is the on-disk settings file.
@@ -31,6 +33,23 @@ type Config struct {
 	Search SearchConfig `json:"search"`
 	// LLM selects and authenticates the model provider.
 	LLM LLMConfig `json:"llm"`
+
+	// Pricing declares model rates, in dollars per MILLION tokens — the figure
+	// on the vendor's own pricing page.
+	//
+	// mole ships rates for the models it can select itself, which is a rule it
+	// can keep: a list of every model on the internet would go stale in the
+	// direction of billing too little, and this table's job is never to
+	// under-bill. Anything else is declared here.
+	//
+	// Declared rates WIN over built-in ones, so a price that changes — or a
+	// model a provider renames — is correctable without waiting for a release.
+	//
+	//	"pricing": {
+	//	  "gpt-4o":        {"input": 2.50, "output": 10.00},
+	//	  "some/model-v3": {"input": 1.00, "output": 3.00, "cache_read": 0.50}
+	//	}
+	Pricing map[string]pricing.RateConfig `json:"pricing,omitempty"`
 
 	// ContactEmail is sent to academic providers that require identification
 	// (Unpaywall requires it; NCBI requires tool+email). Checked at startup
@@ -190,6 +209,12 @@ func Load() (*Config, error) {
 
 	if err := json.Unmarshal(b, c); err != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", Path(), err)
+	}
+	// Declared rates are checked HERE, while the file is still the thing being
+	// talked about, so a typo names the file it is in rather than surfacing
+	// later as a model that mysteriously bills nothing.
+	if err := pricing.NewTable().Declare(c.Pricing); err != nil {
+		return nil, fmt.Errorf("config: %s: %w", Path(), err)
 	}
 	c.applyEnv()
 	return c, nil

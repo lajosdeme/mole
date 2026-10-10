@@ -119,6 +119,23 @@ func hasAnthropicProfile() bool {
 	return err == nil && len(entries) > 0
 }
 
+// AutoSelectedModels is every model Detect can choose when the user names none.
+//
+// Exported so the pricing table can be held to a rule: mole prices what mole
+// itself selects. A model picked FOR somebody that cannot then be priced is a
+// configuration mole built and then refuses to budget — checkUSDIsEnforceable
+// rejects the run, and --usd is unavailable to a user who chose nothing.
+//
+// Local runtimes are absent on purpose: Detect names no model for them and
+// registers them free, because a model on your own machine is.
+func AutoSelectedModels() []string {
+	return []string{
+		DefaultAnthropicStrong, DefaultAnthropicCheap,
+		"deepseek-chat",
+		"gpt-4o", "gpt-4o-mini",
+	}
+}
+
 // detectLocal probes localhost runtimes.
 func detectLocal(ctx context.Context, client *http.Client) (*Detected, bool) {
 	if client == nil {

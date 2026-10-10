@@ -322,3 +322,37 @@ func TestTheSlowModelKnobsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestADeclaredRateIsCheckedAgainstTheFileItIsIn.
+//
+// Validated at load, while the file is still the thing being talked about, so a
+// typo names the file rather than surfacing much later as a model that
+// mysteriously bills nothing.
+func TestADeclaredRateIsCheckedAgainstTheFileItIsIn(t *testing.T) {
+	dir := isolate(t)
+	write := func(t *testing.T, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(t, `{"search":{"provider":"tavily"},"pricing":{"some/model":{"input":-1,"output":2}}}`)
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("a negative rate loaded without complaint")
+	}
+	if !strings.Contains(err.Error(), "config.json") {
+		t.Errorf("the error does not name the file it is in: %v", err)
+	}
+
+	// And a good one loads, in the units a vendor publishes.
+	write(t, `{"search":{"provider":"tavily"},"pricing":{"some/model":{"input":2.5,"output":10}}}`)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("a valid rate was refused: %v", err)
+	}
+	if got := cfg.Pricing["some/model"].Input; got != 2.5 {
+		t.Errorf("input rate = %v, want 2.5 dollars per MTok", got)
+	}
+}

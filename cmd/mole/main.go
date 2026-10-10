@@ -506,6 +506,47 @@ func reportConfig(r *checks) {
 	} else {
 		r.note(true, "contact email", cfg.ContactEmail)
 	}
+
+	reportPricing(r, cfg)
+}
+
+// reportPricing says whether the configured models can be billed, BEFORE a run
+// is refused for it.
+//
+// unpricedModelList already existed and only ever fired as a refusal: you
+// learned your model had no rates by typing --usd and being told no. Which
+// models are priced is a fact about the installation, so doctor is where it
+// belongs.
+//
+// note rather than require: a token-mode install is not broken for want of a
+// rate, and neither is one using a local model that really is free.
+func reportPricing(r *checks, cfg *config.Config) {
+	tbl := pricing.NewTable()
+	if err := tbl.Declare(cfg.Pricing); err != nil {
+		r.note(false, "pricing", "a declared rate is unusable: "+err.Error())
+		return
+	}
+
+	var missing []string
+	for _, m := range []string{cfg.LLM.Model, cfg.LLM.CheapModel, cfg.LLM.VerifierModel} {
+		if m == "" {
+			continue
+		}
+		if _, ok := tbl.Lookup(m); !ok {
+			missing = append(missing, m)
+		}
+	}
+	if len(missing) == 0 {
+		r.note(true, "pricing", "every configured model has a rate")
+		return
+	}
+	if pricing.IsLocalEndpoint(cfg.LLM.BaseURL) {
+		r.note(true, "pricing", "local endpoint; models are billed at zero because they are free")
+		return
+	}
+	r.note(false, "pricing",
+		"no rate for "+strings.Join(missing, ", ")+
+			" — --usd will be refused (declare one under \"pricing\" in "+config.Path()+")")
 }
 
 // ---------------------------------------------------------------------------

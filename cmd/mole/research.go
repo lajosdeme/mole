@@ -500,6 +500,14 @@ func pricingFor(cfg *config.Config) *pricing.Table {
 	// --usd stopped binding. checkUSDIsEnforceable could not catch it — it
 	// validates the configured name, and the ledger prices the returned one.
 	//
+	// Declared rates before the fallback is chosen, so declaring a price for an
+	// exotic model is what makes it usable as one.
+	if err := t.Declare(cfg.Pricing); err != nil {
+		// Not fatal here. Config load already validated these; reaching this
+		// means something changed underneath, and a warning beats refusing to
+		// run a token-mode session over a rate it will never consult.
+		slog.Default().Warn("ignoring a declared rate", "err", err)
+	}
 	// Best effort. A configured model with no rates of its own leaves the table
 	// strict, which is the state checkUSDIsEnforceable already refuses to start
 	// a USD run in.
