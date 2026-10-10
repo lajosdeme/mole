@@ -306,12 +306,8 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 	return res, nil
 }
 
-// DefaultMaxFollowUpsPerPass bounds how many leads one verification pass may
-// propose.
-//
-// Small on purpose. A pass runs on the replan cadence, so follow-ups accumulate
-// across passes anyway, and a graph full of disagreement could otherwise queue more
-// verification work in one go than the session has budget to run.
+// DefaultMaxFollowUpsPerPass bounds how many leads one pass QUEUES. What does
+// not fit is deferred rather than dropped, so this paces work, it does not cap it.
 const DefaultMaxFollowUpsPerPass = 2
 
 func (v *Verifier) maxFollowUpsPerPass() int {
