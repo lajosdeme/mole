@@ -161,8 +161,12 @@ func (g *Generator) Generate(ctx context.Context, st store.Store, sessionID stri
 	// capping findings counts distinct assertions.
 	findings := Findings(claims, edges, gen.MaxClaims)
 	if n := len(Findings(claims, edges, 0)); n > len(findings) {
-		rep.Degraded = fmt.Sprintf("%d of %d findings included; the rest did not fit the report budget",
-			len(findings), n)
+		// What the prose was written from, not what was left out. The rest are
+		// not missing: they are in the session, and a consumer rendering it
+		// shows them. Saying they "did not fit" described a shortfall that had
+		// not happened.
+		rep.Degraded = fmt.Sprintf("written from the %d highest-confidence findings",
+			len(findings))
 	}
 	rep.Findings = findings
 	rep.Citations = citeFindings(findings)
