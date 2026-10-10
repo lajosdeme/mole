@@ -323,3 +323,81 @@ func TestUnknownProviderRejected(t *testing.T) {
 		t.Error("unknown provider accepted")
 	}
 }
+
+// TestHiddenReasoningTokensAreCharged. Reported as issue #1, confirmed against
+// Gemini's OpenAI-compatible endpoint.
+//
+// A call came back {"prompt_tokens":21,"completion_tokens":5,"total_tokens":139}.
+// The 113 tokens between the parts and the total are Gemini's internal
+// thinking: billed by the provider, and invisible to mole, which read the two
+// parts and never looked at the total. The ledger charged 26 tokens for a call
+// that cost 139 — a fivefold undercount, every call, in the direction of
+// overspending.
+//
+// It cannot be reached through the reasoning_tokens path either. That field is
+// how OpenAI's o-series reports it, and there reasoning is already INSIDE
+// completion_tokens, so the parts and the total agree. Gemini reports neither,
+// returning an opaque thought_signature this struct has no field for.
+//
+// The gap between the parts and the total is what the provider billed and did
+// not explain. The OpenAI spec makes total_tokens authoritative, so it is
+// charged — as output, because that is where every provider bills reasoning and
+// because output is the dearer rate of the two. A table whose job is never to
+// under-bill rounds this way on purpose.
+func TestHiddenReasoningTokensAreCharged(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		usage                 string
+		wantInput, wantOutput int64
+	}{
+		{
+			// The reported case.
+			name:  "gemini hides thinking in the total",
+			usage: `{"prompt_tokens":21,"completion_tokens":5,"total_tokens":139}`,
+			// 5 written + 113 thought about.
+			wantInput: 21, wantOutput: 118,
+		},
+		{
+			// OpenAI's shape: reasoning is inside completion_tokens already, so
+			// the parts and the total agree and nothing is added.
+			name: "openai reports reasoning inside the completion",
+			usage: `{"prompt_tokens":21,"completion_tokens":118,"total_tokens":139,
+			         "completion_tokens_details":{"reasoning_tokens":113}}`,
+			wantInput: 21, wantOutput: 118,
+		},
+		{
+			name:      "no total reported",
+			usage:     `{"prompt_tokens":21,"completion_tokens":5}`,
+			wantInput: 21, wantOutput: 5,
+		},
+		{
+			// Never downward: a total below the parts is a provider that cannot
+			// add up, and believing it would under-bill.
+			name:      "a total smaller than its parts is ignored",
+			usage:     `{"prompt_tokens":21,"completion_tokens":5,"total_tokens":10}`,
+			wantInput: 21, wantOutput: 5,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"m","choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],` +
+				`"usage":` + tc.usage + `}`
+			srv := serve(t, 200, body, nil)
+
+			p, _ := llm.New(llm.Config{
+				Kind: llm.KindOpenAICompatible, APIKey: "k", BaseURL: srv.URL, StrongModel: "m",
+			}, srv.Client())
+
+			resp, err := p.Complete(context.Background(), llm.Request{Messages: []llm.Message{llm.User("x")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.Usage.InputTokens != tc.wantInput {
+				t.Errorf("input = %d, want %d", resp.Usage.InputTokens, tc.wantInput)
+			}
+			if resp.Usage.OutputTokens != tc.wantOutput {
+				t.Errorf("output = %d, want %d — the provider billed for tokens mole did not count",
+					resp.Usage.OutputTokens, tc.wantOutput)
+			}
+		})
+	}
+}
