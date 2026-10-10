@@ -1022,16 +1022,23 @@ func TestLeaseIsHeartbeatedWhileALeadRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Short TTL, a lead that takes several TTLs, and a sweeper running
-	// throughout — which is what turns a lost lease into an observable
+	// A TTL short enough that a lead outlasts several of them, and a sweeper
+	// running throughout — which is what turns a lost lease into an observable
 	// re-dispatch.
-	q := queue.New(db, 90*time.Millisecond)
-	sweeper := queue.New(db, 90*time.Millisecond)
+	//
+	// Not as short as it could be. The heartbeat renews every TTL/3, so the
+	// margin is how long the runtime may stall that goroutine before the lease
+	// is gone; at 90ms that was 90ms, and a shared 2-core CI runner missed it
+	// often enough to fail a release. 450ms tests the same property with a
+	// margin the scheduler cannot casually exceed.
+	const ttl = 450 * time.Millisecond
+	q := queue.New(db, ttl)
+	sweeper := queue.New(db, ttl)
 
 	stop := make(chan struct{})
 	var swept atomic.Int64
 	go func() {
-		tick := time.NewTicker(40 * time.Millisecond)
+		tick := time.NewTicker(ttl / 4)
 		defer tick.Stop()
 		for {
 			select {
@@ -1047,7 +1054,8 @@ func TestLeaseIsHeartbeatedWhileALeadRuns(t *testing.T) {
 
 	fl := &scriptedLLM{replies: []string{planJSON("slow"), `{"done":true}`}}
 	slow := &scriptedActor{outcome: func(int, core.Lead) (*actors.Result, error) {
-		time.Sleep(400 * time.Millisecond)
+		// Several TTLs, so the lease must be renewed more than once.
+		time.Sleep(3 * ttl)
 		return okResult(1, 1_000), nil
 	}}
 
