@@ -74,6 +74,7 @@ type researchOpts struct {
 	maxSources   int
 	maxToolCalls int64
 	timeout      time.Duration
+	timeoutSet   bool
 	asJSON       bool
 	quiet        bool
 	alwaysFetch  bool
@@ -113,6 +114,10 @@ func newResearchCmd() *cobra.Command {
 		Args:  minArgs(1, `mole research "<question>" (--usd N | --tokens N)`),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o.dbPath = dbPath(cmd)
+			// Whether --timeout was TYPED, not what it holds. An untouched flag
+			// takes the config default; a typed one wins, because on a command
+			// line the number is one a person chose for this run.
+			o.timeoutSet = cmd.Flags().Changed("timeout")
 			return cmdResearch(cmd.Context(), strings.Join(args, " "), o)
 		},
 	}
@@ -133,7 +138,7 @@ func newResearchCmd() *cobra.Command {
 			"(academic needs contact-email; local_compute needs `mole connect add`)")
 	f.IntVar(&o.workers, "workers", executor.DefaultWorkers,
 		"leads to run at once; 1 is required when recording or replaying a cassette")
-	f.DurationVar(&o.timeout, "timeout", 5*time.Minute, "wall-clock ceiling for the whole session")
+	f.DurationVar(&o.timeout, "timeout", 5*time.Minute, "wall-clock ceiling for the whole session (default: max_wallclock in config, else 5m)")
 	// Empty default so "was it passed" is answerable. The mode's real default
 	// is both, applied in resolveConfirmMode, and stated in the usage below —
 	// with the flag defaulting to "both" there is no way to tell an explicit
@@ -165,6 +170,13 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 	cfg, err := config.Load()
 	if err != nil && !errors.Is(err, config.ErrNotConfigured) {
 		return err
+	}
+
+	// config supplies the default clock; --timeout overrides it. Reported as #2
+	// by somebody who went looking for exactly this and found llm.timeout,
+	// which bounds one model call rather than the session.
+	if !o.timeoutSet && cfg != nil && cfg.MaxWallClock > 0 {
+		o.timeout = cfg.MaxWallClock.Duration()
 	}
 
 	unit, amount, err := resolveBudget(o.usd, o.tokens, cfg)

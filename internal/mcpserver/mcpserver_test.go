@@ -925,3 +925,61 @@ func TestCallerFanOutIsClamped(t *testing.T) {
 		t.Errorf("MaxToolCalls = %d — a caller disabled §8.5's ceiling", sess.MaxToolCalls)
 	}
 }
+
+// TestACallerMayAskForTimeButNotUnlimitedTime.
+//
+// The second half of #2: an agent calling over MCP could not say how long a
+// session may run, and took whatever the daemon was configured with.
+//
+// Clamped, like max_sources and max_depth and for the stronger version of the
+// same reason. On a command line the number is one a person typed. Over MCP it
+// is one an agent chose, and MaxSessionUSD exists in this file precisely
+// because "a coding agent that misreads its own instructions can ask for a
+// thousand dollars as easily as three" — an agent that asks for a thousand
+// hours is the same mistake in the other unit.
+func TestACallerMayAskForTimeButNotUnlimitedTime(t *testing.T) {
+	r := connect(t, 0)
+
+	var out mcpserver.ReportOut
+	if res := r.call(t, "research.report", map[string]any{
+		"prompt":  "a question",
+		"budget":  map[string]any{"unit": "usd", "amount": "0.50"},
+		"timeout": "1000h",
+	}, &out); res.IsError {
+		t.Fatalf("report: %s", errText(res))
+	}
+
+	var sess *core.Session
+	if err := r.db.Read(context.Background(), func(ctx context.Context, q store.Queries) error {
+		var err error
+		sess, err = q.GetSession(ctx, out.SessionID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if sess.MaxWallClock > mcpserver.MaxWallClockCeiling {
+		t.Errorf("MaxWallClock = %s, over the daemon's ceiling of %s",
+			sess.MaxWallClock, mcpserver.MaxWallClockCeiling)
+	}
+
+	// And a reasonable ask is honoured rather than clamped to a default.
+	var out2 mcpserver.ReportOut
+	if res := r.call(t, "research.report", map[string]any{
+		"prompt":  "another question",
+		"budget":  map[string]any{"unit": "usd", "amount": "0.50"},
+		"timeout": "90s",
+	}, &out2); res.IsError {
+		t.Fatalf("report: %s", errText(res))
+	}
+	var sess2 *core.Session
+	if err := r.db.Read(context.Background(), func(ctx context.Context, q store.Queries) error {
+		var err error
+		sess2, err = q.GetSession(ctx, out2.SessionID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if sess2.MaxWallClock != 90*time.Second {
+		t.Errorf("MaxWallClock = %s, want the 90s the caller asked for", sess2.MaxWallClock)
+	}
+}

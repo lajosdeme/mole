@@ -356,3 +356,29 @@ func TestADeclaredRateIsCheckedAgainstTheFileItIsIn(t *testing.T) {
 		t.Errorf("input rate = %v, want 2.5 dollars per MTok", got)
 	}
 }
+
+// TestTheSessionClockHasAConfigDefault.
+//
+// Reported as #2. --timeout already set a session's wall clock, but only per
+// run: there was no way to say "my questions want twenty minutes" once. The
+// field that LOOKS like it should is llm.timeout, which bounds a single model
+// call — a different thing, and the likely reason the reporter concluded there
+// was no option at all.
+func TestTheSessionClockHasAConfigDefault(t *testing.T) {
+	dir := isolate(t)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"),
+		[]byte(`{"search":{"provider":"tavily"},"max_wallclock":"20m"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxWallClock.Duration() != 20*time.Minute {
+		t.Errorf("MaxWallClock = %s, want 20m", cfg.MaxWallClock.Duration())
+	}
+	// And it is not the per-call timeout, which is a different ceiling.
+	if cfg.LLM.Timeout == cfg.MaxWallClock.Duration() {
+		t.Error("the session clock and the per-call timeout are the same field")
+	}
+}

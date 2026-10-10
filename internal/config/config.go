@@ -28,11 +28,64 @@ import (
 )
 
 // Config is the on-disk settings file.
+// Duration is a time.Duration that reads either way round in JSON.
+//
+// encoding/json gives time.Duration no special treatment: it marshals as an
+// integer count of nanoseconds and refuses to unmarshal a string. So a field
+// typed time.Duration is settable through `mole config set`, which parses the
+// text itself, and NOT by opening the file and writing what a human would
+// write. "20m" is an error; 1200000000000 is the only accepted spelling.
+//
+// This type accepts both and writes the readable one.
+//
+// llm.timeout predates it and still stores nanoseconds. Changing that would
+// rewrite the representation of a field already in people's config files, and
+// a file written by a new binary would then be unreadable by an old one —
+// which is a bigger thing to do than this fixes.
+type Duration time.Duration
+
+func (d Duration) Duration() time.Duration { return time.Duration(d) }
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		parsed, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("not a duration (try 20m): %w", err)
+		}
+		*d = Duration(parsed)
+		return nil
+	}
+	var n int64
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("not a duration: %s", b)
+	}
+	*d = Duration(n)
+	return nil
+}
+
 type Config struct {
 	// Search selects and authenticates the search backend.
 	Search SearchConfig `json:"search"`
 	// LLM selects and authenticates the model provider.
 	LLM LLMConfig `json:"llm"`
+
+	// MaxWallClock is how long a session may run when --timeout says nothing.
+	// Zero takes the command's own default.
+	//
+	// The SESSION's clock, not a model call's — llm.timeout is that one, and the
+	// two are easy to confuse because only one of them used to exist here.
+	// Reported as #2 by somebody who looked for exactly this field, found
+	// llm.timeout, and concluded mole had no option for it.
+	//
+	// A default rather than a ceiling: --timeout still overrides it, because on
+	// the command line the number is one a person typed. The ceiling that a
+	// caller cannot raise is the daemon's, and it lives in mcpserver.
+	MaxWallClock Duration `json:"max_wallclock,omitempty"`
 
 	// Pricing declares model rates, in dollars per MILLION tokens — the figure
 	// on the vendor's own pricing page.
@@ -420,6 +473,32 @@ func Fields() []Field {
 					return errors.New("a ceiling cannot be negative")
 				}
 				c.MaxSessionTokens = n
+				return nil
+			},
+		},
+		{
+			Name: "max-wallclock",
+			Help: "default wall-clock ceiling for a session, e.g. 20m; --timeout overrides it per run",
+			get: func(c *Config) string {
+				if c.MaxWallClock == 0 {
+					return ""
+				}
+				return c.MaxWallClock.Duration().String()
+			},
+			set: func(c *Config, v string) error {
+				v = strings.TrimSpace(v)
+				if v == "" {
+					c.MaxWallClock = 0
+					return nil
+				}
+				d, err := time.ParseDuration(v)
+				if err != nil {
+					return fmt.Errorf("not a duration (try 20m): %w", err)
+				}
+				if d <= 0 {
+					return errors.New("a session clock must be above zero")
+				}
+				c.MaxWallClock = Duration(d)
 				return nil
 			},
 		},

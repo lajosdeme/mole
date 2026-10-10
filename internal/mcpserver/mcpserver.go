@@ -196,8 +196,9 @@ type ReportIn struct {
 	Prompt string `json:"prompt" jsonschema:"the research question"`
 	Budget Budget `json:"budget" jsonschema:"what this session may spend"`
 
-	MaxSources int `json:"max_sources,omitempty" jsonschema:"sources to read per lead; omit for the daemon default"`
-	MaxDepth   int `json:"max_depth,omitempty" jsonschema:"rounds of follow-up questions the planner may add; omit for the daemon default"`
+	MaxSources int    `json:"max_sources,omitempty" jsonschema:"sources to read per lead; omit for the daemon default"`
+	MaxDepth   int    `json:"max_depth,omitempty" jsonschema:"rounds of follow-up questions the planner may add; omit for the daemon default"`
+	Timeout    string `json:"timeout,omitempty" jsonschema:"wall-clock ceiling for the session, e.g. 20m; omit for the daemon default. Clamped to the daemon's ceiling"`
 }
 
 type ReportOut struct {
@@ -237,7 +238,7 @@ func (d Deps) report(ctx context.Context, _ *mcp.CallToolRequest, in ReportIn) (
 		MaxSources: clampToDefault(in.MaxSources, d.MaxSources, MaxSourcesCeiling),
 		MaxDepth:   clampToDefault(in.MaxDepth, d.MaxDepth, MaxDepthCeiling),
 		MaxLeads:   d.MaxLeads,
-		Timeout:    d.Timeout,
+		Timeout:    clampDuration(in.Timeout, d.Timeout, MaxWallClockCeiling),
 		Workers:    d.Workers,
 	}
 
@@ -674,6 +675,14 @@ func parseBudget(b Budget) (core.BudgetUnit, int64, error) {
 const (
 	MaxSourcesCeiling = 25
 	MaxDepthCeiling   = 5
+	// MaxWallClockCeiling bounds how long a caller may ask a session to run.
+	//
+	// An hour is far past any legitimate ask — the longest tier a caller would
+	// configure is measured in tens of minutes — and finite, which is the
+	// point. On a command line a timeout is a number a person typed; here it is
+	// one an agent chose, and the ceiling is the daemon's for the same reason
+	// MaxSessionUSD is: it is the limit the caller cannot raise.
+	MaxWallClockCeiling = time.Hour
 )
 
 // checkCeiling enforces the daemon's per-session budget ceiling.
@@ -716,6 +725,26 @@ func (d Deps) checkCeiling(unit core.BudgetUnit, amount int64) error {
 
 // clampToDefault takes the caller's value when it is set and sane, the daemon's
 // default when it is not, and never more than max.
+// clampDuration parses a caller's timeout and holds it under the ceiling.
+//
+// An unparseable value takes the default rather than failing the call: the
+// caller asked for research, and refusing the whole request over a malformed
+// duration serves nobody. A value over the ceiling is clamped, not refused, for
+// the same reason clampToDefault clamps.
+func clampDuration(v string, def, max time.Duration) time.Duration {
+	d, err := time.ParseDuration(strings.TrimSpace(v))
+	if err != nil || d <= 0 {
+		d = def
+	}
+	if d <= 0 || d > max {
+		if def > 0 && def < max {
+			return def
+		}
+		return max
+	}
+	return d
+}
+
 func clampToDefault(v, def, max int) int {
 	if v <= 0 {
 		v = def
