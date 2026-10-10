@@ -19,7 +19,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/lajosdeme/mole/internal/session"
@@ -149,18 +148,7 @@ func checkPrivateDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("daemon: socket directory %s: %w", dir, err)
 	}
-	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-		return fmt.Errorf("daemon: socket directory %s is mode %#o — group or other "+
-			"can reach the socket\nuse a private directory, e.g. --socket $XDG_RUNTIME_DIR/mole.sock",
-			dir, perm)
-	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		if self := uint32(os.Getuid()); st.Uid != self {
-			return fmt.Errorf("daemon: socket directory %s is owned by uid %d, not %d",
-				dir, st.Uid, self)
-		}
-	}
-	return nil
+	return checkDirPrivate(dir, fi)
 }
 
 // clearStaleSocket removes a socket file left by a dead daemon, and refuses if
@@ -413,10 +401,7 @@ func InspectSocket(path string) SocketState {
 	dir := filepath.Dir(path)
 	if fi, err := os.Stat(dir); err == nil {
 		st.DirMode = fi.Mode().Perm()
-		st.DirOwned = true
-		if s, ok := fi.Sys().(*syscall.Stat_t); ok {
-			st.DirOwned = s.Uid == uint32(os.Getuid())
-		}
+		st.DirOwned, _ = dirOwnedBySelf(fi)
 		if err := checkPrivateDir(dir); err != nil {
 			st.Problems = append(st.Problems, err.Error())
 		} else {
@@ -442,7 +427,7 @@ func InspectSocket(path string) SocketState {
 	}
 	st.Present = true
 	st.Mode = info.Mode().Perm()
-	if st.Mode&0o077 != 0 {
+	if modeBitsMeaningful && st.Mode&0o077 != 0 {
 		st.Problems = append(st.Problems, fmt.Sprintf(
 			"the socket is mode %#o — group or other can connect", st.Mode))
 	}
