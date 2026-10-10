@@ -97,12 +97,12 @@ func TestIdenticalTextIsFreeButOnlyOnRawBytes(t *testing.T) {
 func TestSameSpanIsFree(t *testing.T) {
 	base := func() (*core.Claim, *core.Claim) {
 		return &core.Claim{
-				ID: "c_a", Text: "One phrasing of the finding.",
-				Source: "https://x.example/p", Quote: "the shared span", QuoteOffset: 400,
-			}, &core.Claim{
-				ID: "c_b", Text: "Another phrasing of the finding.",
-				Source: "https://x.example/p", Quote: "the shared span", QuoteOffset: 400,
-			}
+			ID: "c_a", Text: "One phrasing of the finding.",
+			Source: "https://x.example/p", Quote: "the shared span", QuoteOffset: 400,
+		}, &core.Claim{
+			ID: "c_b", Text: "Another phrasing of the finding.",
+			Source: "https://x.example/p", Quote: "the shared span", QuoteOffset: 400,
+		}
 	}
 
 	a, b := base()

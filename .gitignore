@@ -20,3 +20,10 @@
 *.bak
 zz_*_test.go
 dist/
+
+# The exhaustive pair labellings. Every pair from two corpus questions judged by
+# hand, kept out of the repository on purpose: they are a measurement input, not
+# a fixture any test reads, and the labelled sets that DO feed tests
+# (contradictions.json, batch-size-arms.json) are tracked beside them.
+testdata/pairs/mmlu-exhaustive.json
+testdata/pairs/population-exhaustive.json
