@@ -261,9 +261,8 @@ func cmdServe(ctx context.Context, o serveOpts) error {
 	fmt.Printf("mole daemon listening on %s\n", o.socket)
 	fmt.Printf("  database  %s\n", o.dbPath)
 	// Both numbers and their product, because the product is what leaves this
-	// machine. Printed from EffectiveWorkers rather than the configured value:
-	// the banner used to print the raw default and overstate the real ceiling by
-	// a third, since the pool is also bounded by the replan cadence.
+	// machine. EffectiveWorkers rather than the configured value: the pool is
+	// also bounded by the replan cadence.
 	perSession := executor.EffectiveWorkers(o.workers)
 	fmt.Printf("  sessions  up to %d at once, %d lead(s) each (up to %d concurrent leads)\n",
 		o.maxSessions, perSession, o.maxSessions*perSession)

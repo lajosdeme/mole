@@ -114,9 +114,7 @@ func cmdDataset(ctx context.Context, cmd *cobra.Command, sessionID string, o dat
 	// qualifies a dataset — how much was corroborated, how much is contested — is
 	// the part a reader most needs and the part a redirect would silently discard.
 	//
-	// Unconditional. It used to branch on `o.out != "" || w != cmd.OutOrStdout()`,
-	// whose two halves are the same condition, and both arms printed the same
-	// thing to the same place.
+	// Unconditional: stderr either way, so a redirect cannot discard it.
 	fmt.Fprintln(cmd.ErrOrStderr(), strings.TrimSpace(d.Summary()))
 	return nil
 }

@@ -154,16 +154,9 @@ func (m *Miner) Mine(ctx context.Context, in MineInput) (MineOutput, error) {
 
 // toolCallFor prices one model call into a ledger row.
 //
-// One implementation, and it used to be two. Miner was extracted from WebActor
-// to stop the quote check existing twice; the cost path was left duplicated —
-// same pricing lookup, same fallback, same warning string — which is the defect
-// the extraction's own comment says it existed to prevent, sitting thirty lines
-// below it.
-//
 // Package-level because neither receiver contributed anything but a session id
-// and a pricing table. The role parameter went with the duplication: both callers
-// passed RoleExecutor, so it was a parameter with one value, which is an
-// invitation to pass the wrong one later.
+// and a pricing table, and both callers passed RoleExecutor — a parameter with
+// one value is an invitation to pass the wrong one later.
 func toolCallFor(
 	sessionID string,
 	lead core.Lead,

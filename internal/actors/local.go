@@ -161,9 +161,8 @@ func (a *LocalComputeActor) Run(ctx context.Context, lead core.Lead) (*Result, e
 			res.Stats.ChunksSkipped++
 			continue
 		}
-		// Chunks only. SearchResults used to be incremented too, for a run that
-		// performs no search — the sibling AcademicActor never touches that field
-		// and the two lines counted one event twice.
+		// Chunks only. This run performs no search, so SearchResults is not
+		// touched — the sibling AcademicActor does the same.
 		res.Stats.Chunks++
 
 		inputUsed += llm.EstimateTokens(len(text))
@@ -542,13 +541,10 @@ func (a *LocalComputeActor) runCode(
 			"no container runtime is available, so a code hypothesis cannot run " +
 				"(mole doctor reports what is missing)")
 	}
-	// Rendered and checked, or not sent at all.
-	//
-	// The error used to be discarded, so a code plan whose template slots were
-	// unfilled ran a container with MOLE_QUERY="" and its table and columns were
-	// never validated. The query is only a hint to the script — the container is
-	// the control — but a hint nobody checked is still a string mole built from a
-	// model's choice.
+	// Rendered and checked, or not sent at all. The query is only a hint to the
+	// script — the container is the control — but an unchecked hint is still a
+	// string mole built from a model's choice, and unfilled template slots would
+	// reach the container as MOLE_QUERY="".
 	var query string
 	if p.Template != "" {
 		rendered, err := hypothesis.Render(c, p)
@@ -833,10 +829,8 @@ func describeFinding(p hypothesis.Plan, env gate.AggregateEnvelope) string {
 // localSummary describes the run for the planner, and names the boundary that
 // actually applied.
 //
-// It used to append "every figure above came through the aggregation gate" to
-// every run — including a sandbox-only one, whose own code says in as many words
-// that "the script never touches the aggregation gate". A false privacy claim in
-// the text the planner and the report both read.
+// The gate claim is appended only when the gate ran. A sandbox-only run never
+// touches it, and the summary is read by both the planner and the report.
 func localSummary(lead core.Lead, findings []string, res *Result, usedGate, usedSandbox bool) string {
 	if len(findings) == 0 {
 		// ChunksSkipped plus ChunksFailed: the first counts hypotheses refused

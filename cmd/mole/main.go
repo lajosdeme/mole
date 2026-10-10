@@ -1104,10 +1104,8 @@ func checkKeyMatchesProvider(cfg *config.Config, kind llm.Kind) error {
 // unpricedModelList returns the configured models the pricing table does not
 // know.
 //
-// One implementation for both callers: checkUSDIsEnforceable used to gate on
-// unpricedModels() being non-empty and then recompute the list itself, so if the
-// two ever disagreed the error rendered as "no price is registered for " with
-// nothing after it.
+// One implementation for both callers, so the error cannot name a list the
+// caller computed differently.
 func unpricedModelList(p llm.Provider) []string {
 	if llm.SourceOf(p) == llm.CredentialNotNeeded {
 		return nil // local model, genuinely free
