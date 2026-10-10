@@ -10,34 +10,23 @@ import (
 
 // Cross-source merge (M9, §13).
 //
-// §15 calls this "the hardest quality problem in this document", and the reason
-// is that every other stage has a right answer available to it. A schema either
-// validates or does not. A row either quotes its source or does not. Whether two
-// rows are the same company is a judgement, and no amount of care in the code
-// turns a judgement into a fact.
+// Whether two rows are the same company is a judgement, not a fact, so the
+// thresholds below are calibrated rather than chosen: merge_test.go builds
+// datasets whose duplicate structure is known and reports pairwise precision
+// and recall, and those numbers are in `mole eval`.
 //
-// So the response is not to be clever, it is to be measurable. merge_test.go
-// builds datasets whose duplicate structure is KNOWN — the same entity written
-// several ways, plus entities that genuinely differ — and reports pairwise
-// precision and recall. Those numbers are in `mole eval`. They are the only
-// quality figure in M9 that needs no model and no labelling, which is exactly
-// why the thresholds below are calibrated against them rather than chosen.
+// Three choices:
 //
-// # Three deliberate choices
+// Multi-pass blocking, because comparing every pair is quadratic over thousands
+// of rows and a single block key loses true matches at its edges.
 //
-// Blocking, because comparing every pair is quadratic and a result set reaches
-// thousands of rows. Multi-pass blocking, because a single block key loses true
-// matches at its edges.
+// Complete linkage, not transitive closure. A row joins a cluster only if it
+// matches EVERY member — union-find would chain "Acme Ltd", "Acme" and "Acme
+// Foods" into one company.
 //
-// Complete linkage, not transitive closure. If A matches B and B matches C, a
-// union-find would put all three together even when A and C are plainly
-// different — "Acme Ltd", "Acme", "Acme Foods" chains a real company into an
-// unrelated one. A row joins a cluster only if it matches EVERY member.
-//
-// Conflicts preserved, never resolved. §11 renders contradiction edges
-// explicitly "rather than silently resolved by whichever claim the model liked",
-// and two sources giving one company two revenues is that problem with a column
-// header. The merge records both.
+// Conflicts preserved, never resolved. Two sources giving one company two
+// revenues is §11's contradiction problem with a column header, and the merge
+// records both.
 
 // Options tune the merge.
 type Options struct {
@@ -547,32 +536,14 @@ func keysMatch(a, b key, threshold float64) bool {
 
 // Similarity scores two normalised key values in [0, 1].
 //
-// Token-level, and that is the third design after two measured failures. The
-// numbers below are from the ground-truth set in merge_test.go.
+// Token-level, calibrated against the ground-truth set in merge_test.go.
+// Jaro-Winkler is not used: its prefix boost is built for short personal names,
+// and on company names the distinguishing word comes second, so "deutschebank"
+// and "deutschetelekom" score 0.88 while being different companies.
 //
-// Attempt one was Jaro-Winkler on the strings plus token overlap divided by the
-// SMALLER token set. Precision 0.583: "Acme" against "Acme Bakery Holdings"
-// scored 1.0 because the whole of the shorter side was covered, and a shared
-// first word is the commonest thing two different companies have.
-//
-// Attempt two divided by the union instead, which fixed that measure and left
-// precision unchanged — because Jaro-Winkler was scoring the same pairs at 0.88
-// on its own. Its prefix boost is designed for short personal names, and on
-// company names the distinguishing word comes second: "deutschebank" against
-// "deutschetelekom" scores 0.89.
-//
-// So string-level similarity is not the right primitive here. What separates
-// these cases is which TOKENS the two sides share, with Jaro-Winkler used only
-// inside a token to absorb a typo:
-//
-//	acme            / acme bakery          1/2 = 0.50   not a match
-//	deutsche bank   / deutsche telekom     1/3 = 0.33   not a match
-//	deutsche bank   / deutsche bnak        2/2 = 1.00   a match, typo absorbed
-//	british airways / airways british      2/2 = 1.00   a match, order absorbed
-//
-// One special case survives: a source that closes up a name the other spaces
-// out. "JP Morgan" and "JPMorgan" share no token at all, and are the same
-// company — so the space-stripped forms are compared for equality first.
+// Token overlap divides by the UNION, not the smaller set — otherwise "Acme"
+// against "Acme Bakery Holdings" scores 1.0, and a shared first word is the
+// commonest thing two different companies have.
 func Similarity(a, b string) float64 {
 	if a == b {
 		return 1

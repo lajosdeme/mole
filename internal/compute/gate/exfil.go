@@ -10,40 +10,24 @@ import (
 // The exfil check (§14.3: "Assert no row-level data crosses the aggregation
 // gate (§12.1)").
 //
-// §14.3 lists it as a metric, which would make it something measured after the
-// fact. It is cheap enough to be an invariant instead: the accumulator still
-// holds every value it read, so before an envelope is returned it is checked
-// against the data it came from, and one that carries a value it should not is
-// withheld rather than reported.
+// An invariant rather than the metric §14.3 describes: the accumulator still
+// holds every value it read, so an envelope is checked against its own source
+// before being returned, and one carrying a value it should not is withheld.
 //
-// # The rule
+// The rule: a text value may appear only as a bucket key that survived the
+// k-anonymity floor, or a range bound the gate chose to report. Numeric values
+// are exempt — an aggregate IS a number, and excluding them would make the
+// check report the answer as the leak.
 //
-// A text value from the result may appear in the envelope only if it is a
-// bucket key that survived the k-anonymity floor, or a range bound the gate
-// decided to report. Everything else is a value the envelope claims not to
-// carry, and the check is the claim being tested rather than trusted.
+// No input currently reaches it: the structural rules refuse or withhold first,
+// every time, so only positive controls cover it. It is a backstop for a rule
+// not yet written, and the day it fires is the day something else broke.
 //
-// Numeric values are not needles. An aggregate is a number, and §12.1 asks for
-// exactly those — a count, a moment, a quantile. Excluding them is what keeps
-// the check from reporting the answer as the leak.
-//
-// # Coverage of the wiring
-//
-// verifyNoLeak's own behaviour is covered by positive controls: it is handed
-// envelopes that definitely carry a value and required to say so. Its CALL from
-// Aggregate is not covered by a failing case, because no input currently
-// produces one — the structural rules refuse or withhold first, every time. So
-// removing the call breaks no test. That is the intended state rather than a
-// gap being papered over: the check is a backstop for a rule that has not been
-// written yet, and the day it starts firing is the day something else broke.
-//
-// # What it cannot catch
-//
-// A column that should have been withheld and was not. If the gate believes a
-// column holds categories, it also believes its values may be reported, and
-// nothing self-referential can tell it otherwise. That case belongs to the
-// profiler, and is why connector.IsFreeText has one implementation rather than
-// two.
+// It cannot catch a column that should have been withheld and was not. If the
+// gate believes a column holds categories, it believes its values are
+// reportable, and nothing self-referential can say otherwise — that case
+// belongs to the profiler, which is why connector.IsFreeText has one
+// implementation.
 
 // ErrLeak is returned when an envelope carries a value it should not.
 //

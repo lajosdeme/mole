@@ -18,21 +18,19 @@ import (
 
 // Budgeted re-fetch grounding (§11.5.2).
 //
-// §11.5 names consistency checking's blind spot: it cannot catch a
-// hallucinated-but-self-consistent claim, which is the dominant failure mode. Two
-// mechanisms answer that. The first, a verbatim quote checked at the actor boundary,
-// has been in place since M1. This is the second.
+// Consistency checking cannot catch a hallucinated-but-self-consistent claim.
+// Two mechanisms answer that: a verbatim quote checked at the actor boundary,
+// and this.
 //
-// It is the ONLY path by which source text re-enters the pipeline, and that makes
-// two properties load-bearing rather than tidy:
+// It is the ONLY path by which source text re-enters the pipeline, which makes
+// two properties load-bearing:
 //
-//   - The text enters a verifier context and is discarded when this function
-//     returns. It is never written to the store, never returned to the caller, and
-//     never reaches the planner digest — which has no field for it, so §9.1's rule
-//     holds structurally rather than by discipline.
-//   - It is bounded twice, by a spend allowance and by a check count. An unbounded
-//     re-fetch loop is free in token mode (§8.5's hole) and the most expensive thing
-//     in the session in USD mode.
+//   - The text lives in a verifier context and is discarded on return. It is
+//     never stored, never returned to the caller, and never reaches the planner
+//     digest — which has no field for it, so §9.1 holds structurally.
+//   - It is bounded twice, by a spend allowance and a check count. An unbounded
+//     re-fetch loop is free in token mode (§8.5's hole) and the most expensive
+//     thing in the session in USD mode.
 //
 // Why "in context" matters more than "present". A quote can appear verbatim and
 // still not support the claim: the sentence before it may read "it is often

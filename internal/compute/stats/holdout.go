@@ -5,34 +5,23 @@ import (
 	"sort"
 )
 
-// §4's last unbuilt column: "stable across 3 holdout windows".
+// Stability across holdout windows (§4).
 //
-// §4's row asks for n, effect size, significance AND stability. The first three
-// were computed and enforced from M8; the fourth was named in the known gaps as
-// needing "three more queries per hypothesis and a splitting rule nobody has
-// chosen". It needs one more query, and the splitting rule is below.
+// A significant result on one sample is one draw, and the failure this tool is
+// most exposed to is a difference driven by a subset — one month, one region,
+// one batch of imports — reported as a property of the data. Re-testing on
+// disjoint subsets catches that; no choice of alpha does.
 //
-// # Why stability rather than more p-values
-//
-// A significant result on one sample is one draw. The failure it does not catch is
-// the one this tool is most exposed to: a difference driven by a subset — one
-// month, one region's worth of rows, one batch of imports — reported as a property
-// of the data. Re-testing on disjoint subsets catches exactly that, and no amount
-// of care with alpha does.
-//
-// # The rule, and what it is not
-//
-// A difference is STABLE when it points the same way in every window that had
+// A difference is STABLE when it points the same way in every window with
 // enough data to test. Direction, not significance: a third of the rows has a
-// third of the power, so requiring each window to clear alpha would mark almost
-// every real effect unstable and would be a statement about sample size dressed
-// as one about the data. The count of windows that were individually significant
-// is reported beside it for a reader who wants the stronger signal.
+// third of the power, so requiring each window to clear alpha would call almost
+// every real effect unstable — a statement about sample size dressed as one
+// about the data. The count of individually significant windows is reported
+// beside it.
 //
-// The per-window tests are NOT Holm-corrected against each other. They are the
-// same hypothesis re-examined on disjoint data rather than three new hypotheses,
-// and correcting them would answer a question nobody asked — see Pairwise for the
-// case where correction is right.
+// The per-window tests are NOT Holm-corrected against each other: they are one
+// hypothesis re-examined on disjoint data, not three hypotheses. See Pairwise
+// for the case where correction is right.
 
 // HoldoutWindows is how many disjoint subsets a comparison is re-tested on.
 //

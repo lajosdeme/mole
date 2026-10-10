@@ -274,34 +274,25 @@ func (d *Digest) find(id string) *SubQuestion {
 // Compaction
 // ---------------------------------------------------------------------------
 
-// compact shrinks the digest until it serializes within MaxChars.
+// compact shrinks the digest until it serializes within MaxChars, dropping
+// what the planner stops needing first:
 //
-// The order is what the planner stops needing first:
-//
-//  1. Dead ends beyond the worst few. They are already collapsed by cause, so
-//     what is left is a long tail of one-offs.
-//  2. Sub-question text, truncated. Losing the tail of a question is worse
-//     than losing the question, so this comes before losing any.
+//  1. Dead ends beyond the worst few — already collapsed by cause, so the rest
+//     is a long tail of one-offs.
+//  2. Sub-question text, truncated. Losing a question's tail beats losing the
+//     question.
 //  3. Open questions, most-attempted first, with a count of what was elided.
 //
-// Answered questions are deliberately NOT dropped. An earlier version dropped
-// them first, which looked like the gentlest step and was in fact a no-op:
-// String() serializes only OPEN questions, so removing an answered one cannot
-// reduce the serialized size. The loop therefore emptied the entire answered set
-// on every compaction without getting under the limit, then moved on to the
-// steps that actually work. They cost memory, bounded by MaxLeads, and nothing
-// else.
+// Answered questions are never dropped: String() serializes only open ones, so
+// removing them cannot reduce the size.
 //
-// Step 3 is a genuine loss and is last for that reason: a planner that cannot
-// see an open question may re-plan it, paying twice. It exists because the
-// alternative is worse. Without it a session where nothing gets answered grows
-// the digest without limit — measured at 43k characters over 500 open
-// questions, ten times the budget — which is exactly the quadratic planner cost
-// §9.1 forbids, arriving by a route the first version of this function missed.
-//
-// Most-attempted-first is the least bad order. A question with leads and no
-// claims is closest to being a dead end, and its failure is already recorded in
-// aggregate; a question never attempted is the actionable one.
+// Step 3 loses real information — a planner that cannot see an open question
+// may re-plan it — and is last for that reason. Without it a session where
+// nothing is answered grows the digest without limit: 43k characters over 500
+// open questions, ten times the budget, which is the quadratic planner cost
+// §9.1 forbids. Most-attempted-first goes because a question with leads and no
+// claims is closest to a dead end, and one never attempted is the actionable
+// one.
 func (d *Digest) compact() {
 	limit := d.MaxChars
 	if limit <= 0 {

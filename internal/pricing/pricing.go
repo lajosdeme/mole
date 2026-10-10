@@ -127,38 +127,17 @@ func defaultTable() map[string]Rates {
 		//	deepseek-v4-flash  $0.14/MTok in   $0.0028/MTok cache hit  $0.28/MTok out
 		//	deepseek-v4-pro    $0.435/MTok in  $0.003625/MTok cache hit $0.87/MTok out
 		//
-		// Four entries for two models, because two different things look up rates
-		// and they are given different names.
+		// Aliases are registered alongside the real names: the ledger prices what
+		// the API answered with, the pre-flight check reads the configured name,
+		// and the two differ. deepseek-reasoner is registered at PRO rates even
+		// though it resolves to flash today — an alias is DeepSeek's to repoint,
+		// and an estimate that is too high costs an under-used budget where one
+		// too low lets work start that cannot be paid for.
 		//
-		// The LEDGER prices what the provider reported. `llm.model = deepseek-chat`
-		// comes back as `model: "deepseek-v4-flash"`, so an install that registered
-		// only the alias would price every real call at zero.
-		//
-		// The PRE-FLIGHT check (checkUSDIsEnforceable) reads the configured name and
-		// refuses `--usd` outright when it is unpriced — correctly, since a ceiling
-		// that cannot bind is worse than no ceiling. So the alias needs an entry too.
-		//
-		// Both aliases resolve to v4-flash today; measured, on 2026-08-11, by making
-		// a call under each and reading the model the API returned. `deepseek-reasoner`
-		// is nonetheless registered at PRO rates, and that asymmetry is deliberate: an
-		// alias is DeepSeek's to repoint without telling anyone, the alias entry only
-		// ever feeds an estimate, and an estimate that is too high costs a briefly
-		// under-used budget while one that is too low lets work start that cannot be
-		// paid for. The ledger keeps charging the real rate from the response either
-		// way.
-		//
-		// Not built with perMTok: its cache multipliers are Anthropic's contract
-		// (read at 0.1x input, write at 1.25x/2x) and DeepSeek's differ by an order of
-		// magnitude — a cache hit on v4-flash is 2% of a miss, not 10%. The helper
-		// would have overcharged cache reads fivefold.
-		//
-		// Cache reads round UP to the nano-dollar: $0.0028/MTok is 2.8 nano per
-		// token and the rate is an int64. 3 over-bills a cache read by 7% and 2 would
-		// under-bill it by 29%, and this table's job is never to under-bill.
-		//
-		// DeepSeek charges nothing to WRITE its cache — a miss is billed as input —
-		// so the write rates equal Input rather than being zero. A zero would mean a
-		// provider that starts reporting cache-creation tokens gets them free.
+		// Not built with perMTok, whose cache multipliers are Anthropic's: a
+		// DeepSeek cache hit is 2% of a miss, not 10%. Cache reads round UP to the
+		// nano-dollar, and the write rates equal Input because a miss is billed as
+		// input — zero would hand cache-creation tokens away free.
 		"deepseek-v4-flash": {Input: 140, Output: 280, CacheRead: 3, CacheWrite: 140, CacheWrite1h: 140},
 		// What the API began answering with in October 2026, where it had said
 		// "deepseek-v4-flash" before. Registered because a rename is theirs to

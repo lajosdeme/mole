@@ -10,23 +10,15 @@ import (
 
 // Body validation.
 //
-// The prompt cannot be the only defence. §13's claim is that a report's citations
-// are trustworthy because the numbers are assigned mechanically before the prompt is
-// built — which is true of NUMBERS and was never true of the brackets around them. A
-// live run emitted
+// Citation NUMBERS are assigned mechanically before the prompt is built, which
+// is what §13 rests on. The brackets around them are not. A live run emitted
 //
 //	[subword tokenizers often need a massive vocabulary to cover diverse scripts…]
 //
-// which reads as a citation, points at nothing, and passed every check because no
-// check looked. A later run's entire body was
-//
-//	source does NOT support this on re-read
-//
-//	[1][4]
-//
-// — a fragment of the instructions plus a bare marker group. Both are model failures
-// rather than pipeline failures, and both produced a report worse than the
-// unsynthesized evidence listing that was already available for free.
+// which reads as a citation and points at nothing; another emitted a fragment
+// of its own instructions followed by a bare "[1][4]". Both are model failures
+// that produced a report worse than the unsynthesized evidence listing already
+// available for free.
 //
 // So the body is checked, and a body that fails falls back to that listing with the
 // reason declared. Rejecting costs readability; accepting costs a reader's trust in

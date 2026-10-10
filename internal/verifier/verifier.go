@@ -384,30 +384,26 @@ func confirms(mode ConfirmMode, e Effect) bool {
 	}
 }
 
-// confirm re-judges the verdicts that would build an edge, and keeps only the ones
-// the model stands behind twice.
+// confirm re-judges the verdicts that would build an edge, keeping only the
+// ones the model stands behind twice.
 //
-// Measured, on 149 hand-labelled pairs from §14.2's contradiction corpus: a single
-// judgement calls "contradicts" correctly 51% of the time. Half the contradiction
-// edges in a graph were wrong, and 50 of the 51 graph-changing errors were the same
-// mistake — "contradicts" on a pair that is merely related. Requiring a second,
+// Measured on 149 hand-labelled pairs from §14.2: a single judgement calls
+// "contradicts" correctly 51% of the time, and 50 of 51 graph-changing errors
+// were the same mistake — "contradicts" on a merely related pair. A second,
 // agreeing judgement raises precision to 70%.
 //
-// It is a trade, not a free win: 53 contradiction edges where one judgement kept
-// 105, recall 98% to 67%, F1 barely moving. Which side is right depends on the
-// reader, so it is a per-edge-kind choice — see ConfirmMode.
+// A trade, not a free win: recall 98% to 67%, F1 barely moving. Which side is
+// right depends on the reader, so it is a per-edge-kind choice — see
+// ConfirmMode. Only named positives are re-judged: 14% more adjudication calls
+// under ConfirmBoth, a tenth of that under ConfirmDuplicates.
 //
-// Only the named positives are re-judged: 14% more adjudication calls under
-// ConfirmBoth, about a tenth of that under ConfirmDuplicates.
+// A pair that cannot be re-judged — allowance gone, provider failing, or a kind
+// this mode skips — KEEPS its first verdict. No edges at all because a second
+// opinion was unaffordable is worse than the graph this replaces.
 //
-// A pair that cannot be re-judged — allowance gone, provider failing, or a kind this
-// mode does not confirm — KEEPS its first verdict. "No edges at all" because the
-// second opinion was unaffordable is worse than the graph this replaces.
-//
-// Rests on one property it cannot check: the model must be able to disagree with
-// itself. Re-judging reproduced the stored verdict 54% of the time, which is where
-// the precision comes from — a provider caching identical requests would make this a
-// no-op that confirmed everything, silently.
+// Rests on one property it cannot check: the model must be able to disagree
+// with itself. Re-judging reproduced the stored verdict 54% of the time, so a
+// provider caching identical requests would make this a silent no-op.
 func (v *Verifier) confirm(ctx context.Context, sessionID string, judged []Judged, res *Result) []Judged {
 	if len(judged) == 0 {
 		return judged

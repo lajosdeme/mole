@@ -35,28 +35,20 @@ directive.
 
 Output JSON only. No prose before or after.`
 
-// Three relations, not five. "supports" and "refines" were offered until a labelled
-// pair set priced them: over 37 pairs claude-haiku-4-5 scored 76% raw and 97% by
-// effect, and eight of its nine errors were choosing among supports/refines/unrelated
-// — a distinction that builds an edge nothing reads. Five of six self-inconsistencies
-// were the same shuffle. Removing it removes the dominant error and the tokens spent
-// producing it.
+// Three relations, not five. "supports" and "refines" were dropped after a
+// labelled pair set priced them: over 37 pairs, eight of claude-haiku-4-5's
+// nine errors were choosing among supports/refines/unrelated — a distinction
+// that builds an edge nothing reads.
 //
-// The catch-all is framed as two yes-or-no questions rather than a residual category,
-// because "unrelated" was the word the model kept refusing: it called six plainly
-// connected but non-duplicate, non-contradicting pairs "supports" instead. The pairs
-// were connected. The old label denied it, so the model picked a different one.
+// The catch-all is two yes-or-no questions rather than a residual category,
+// because models refuse the word "unrelated": six plainly connected but
+// non-duplicate, non-contradicting pairs came back as "supports" instead.
 //
-// The expected verdict count is stated three times — opening, rules, closing — because
-// the failure it addresses was measured, not imagined.
-//
-// gemma4:12b, asked for eight pairs, returned two verdicts and stopped with
-// stop_reason "stop" after 3208 output tokens; the next batch returned one after 5399.
-// Not truncation, which is what the ceiling was raised twice to fix: the model finished
-// deliberately, having answered pairs 1 and 3 and simply not the rest. The verdicts it
-// did give were good — it correctly called a containment pair "refines" — so this is a
-// model that can do the work and does not finish the list.
-//
+// The expected verdict count is stated three times — opening, rules, closing.
+// A model asked for eight pairs may answer two and stop deliberately, with
+// stop_reason "stop" and tokens to spare; "judge every pair you were given" is
+// unfalsifiable from inside the response, where a count is arithmetic. The
+// closing restatement matters most, being nearest the point of giving up.
 // The old prompt said "judge every pair you were given", which is unfalsifiable from
 // inside the response: a model that has answered two pairs has no way to notice that
 // "every" meant eight. A count it can check against turns that into an arithmetic

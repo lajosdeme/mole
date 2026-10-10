@@ -80,29 +80,23 @@ func (g Group) Variance() float64 {
 // deviations, before a variance computed from Σx and Σx² is treated as
 // unresolvable.
 //
-// Σx² − (Σx)²/n subtracts two nearly equal large numbers, and what survives
-// depends on the ratio of magnitude to spread. Measured, on 1000-row groups
-// whose true variance is known:
+// Σx² − (Σx)²/n subtracts two nearly equal large numbers, and the surviving
+// precision depends on the ratio of magnitude to spread. Measured on 1000-row
+// groups of known variance:
 //
 //	spread 1    mean 1e6    relative error 1.5e-06
 //	spread 10   mean 1e7    relative error 0.026
 //	spread 10   mean 3e7    relative error 0.178
 //	spread 100  mean 3e8    relative error 0.099
 //
-// A first-order estimate of that error cannot be used as the test: eps·Σx²/ss
-// comes out at 3.4e-4 for both the 1.5e-06 row and the 0.026 row, so no
-// threshold on it separates an accurate variance from a 2% wrong one. That was
-// the first attempt, and it accepted variances up to 18% wrong.
+// The ratio separates them; a first-order error estimate does not — eps·Σx²/ss
+// is 3.4e-4 for both the 1.5e-06 and the 0.026 row. A million is four orders
+// inside float64's ~16 digits, and every row above 1% error exceeds it.
 //
-// The ratio does separate them. A million is four orders of magnitude inside
-// float64's ~16 digits, and every row above with an error over 1% exceeds it
-// while the accurate ones do not.
-//
-// It over-refuses the spread-1/mean-1e6 case, which is accurate. That is the
-// right way to be wrong: the fix is one line in the query — subtract a constant,
-// which the group-comparison template does — and a refusal naming it costs a
-// retry, where a variance ten times too small costs a fabricated p-value of
-// 6e-10.
+// It over-refuses the accurate spread-1/mean-1e6 case. That is the right way to
+// be wrong: the fix is subtracting a constant in the query, and a refusal
+// naming it costs a retry, where a variance ten times too small costs a
+// fabricated p-value of 6e-10.
 const MaxMagnitudeRatio = 1e6
 
 // variance reports the SAMPLE variance (n−1) and whether float64 could resolve

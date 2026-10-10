@@ -246,33 +246,22 @@ func (a *LocalComputeActor) recordCrossings(ctx context.Context, crossings []cor
 	}
 }
 
-// widenToQualifiedLine extends a quote that landed inside a statistical sentence to
-// the whole sentence.
+// widenToQualifiedLine extends a quote that landed inside a statistical sentence
+// to the whole sentence.
 //
-// Found on the first live DeepSeek run, and it defeats the design as written. The
-// passage said:
+// A model asked to quote verbatim may stop at the first clause — "...higher by
+// 63.67 (means 141.97 and 78.30; n = 100 and 100); statistically significant
+// (p = <0.001)" — dropping the Holm correction, the effect size and the holdout
+// stability that follow it. §11.5 passes, because a prefix is a verbatim
+// substring, and the qualification never reaches the claim or the report.
 //
-//	the mean in "west" is higher than in "south" by 63.67 (means 141.97 and 78.30;
-//	n = 100 and 100); statistically significant (p = <0.001), Welch t = 20.13,
-//	effect size 2.85 (large), 95% CI 57.41 to 69.93, unadjusted p = <0.001 over 6
-//	pairwise comparisons; the difference points the same way in all 3 holdout windows
+// The quote is widened rather than the claim refused: the widened text is still
+// verbatim, which is the property §11.5 protects, and refusing would discard a
+// true claim over its packaging. The claim's own Text is left alone — that is
+// the model's assertion, and rewriting it would put words in its mouth.
 //
-// and the model quoted it verbatim up to "(p = <0.001)" and stopped. §11.5 passed —
-// a prefix IS a verbatim substring — and the Holm correction, the effect size and
-// the holdout stability all vanished from the claim, from the citation, and from the
-// synthesized report. Every comment in stats/ claiming the qualification is safe
-// "because it is in the sentence a claim must quote" was resting on the assumption
-// that a quote covers the whole sentence. It does not.
-//
-// So the quote is widened rather than the claim refused. Refusing would throw away
-// a true claim over its packaging, and the widened text is still verbatim from the
-// passage — which is the property §11.5 exists to protect. The claim's own TEXT is
-// left alone: it is the model's assertion, and rewriting that would be mole putting
-// words in its mouth.
-//
-// Only lines carrying a verdict are widened. Widening every quote to its line would
-// change nothing about the bucket lines a reader is meant to check figure by figure,
-// and would make a short quote look like a long one for no gain.
+// Only lines carrying a verdict are widened. Widening a bucket line a reader
+// checks figure by figure would make a short quote look long for no gain.
 func widenToQualifiedLine(passage string, claims []core.Claim) []core.Claim {
 	if len(claims) == 0 {
 		return claims
