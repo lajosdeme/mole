@@ -75,27 +75,12 @@ func FollowUps(verdicts []Judged, opts FollowUpOptions) []FollowUp {
 	return queued
 }
 
-// FollowUpsWithDeferred proposes leads and says which of them the pass's budget
-// could not take.
+// FollowUpsWithDeferred proposes leads and says which the pass's budget could
+// not take: the first set is queued now, the second is owed.
 //
-// Two returns because the difference matters to the caller. The first set is
-// queued now. The second is OWED: contradictions that earned a follow-up and
-// lost the per-pass cap.
-//
-// They used to be dropped. FollowUps was called with one pass's verdicts,
-// returned the first MaxTotal in canonical order, and said nothing about the
-// rest — and a later pass never saw them again, because Verifier.Run judges
-// only unverified claims and skips any pair that already carries an edge. The
-// cap's own comment said follow-ups "accumulate across passes anyway". Nothing
-// accumulated. One Deep run found 32 contradictions, followed up 4, discarded
-// 28, and then reported that the planner had nothing left to add — which was
-// true, and was the problem.
-//
-// Deferring is not queueing later by another name: a deferred lead is real
-// work the session still owes, and §11.4's caps apply to it exactly as they do
-// to a queued one. A contradiction excluded by depth, staleness or the
-// per-root cap is excluded from BOTH, because those rules say it should not be
-// researched at all.
+// Every §11.4 rule — depth, staleness, the per-root cap — disqualifies a
+// contradiction from BOTH, because those say it should not be researched at
+// all. Only MaxTotal separates the two.
 func FollowUpsWithDeferred(verdicts []Judged, opts FollowUpOptions) (queued, deferred []FollowUp) {
 	maxDepth := opts.MaxDepth
 	if maxDepth <= 0 {

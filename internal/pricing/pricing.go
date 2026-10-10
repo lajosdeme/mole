@@ -197,15 +197,10 @@ func defaultTable() map[string]Rates {
 	}
 }
 
-// Declare registers operator-supplied rates, overriding anything built in.
+// Declare registers operator-supplied rates, overriding anything built in — so
+// a price that changes is correctable without waiting for a release.
 //
-// Overriding on purpose. A vendor changing a price — or renaming a model, which
-// is how this whole area came apart — must be correctable the same afternoon
-// rather than at the next release. The risk is that somebody under-bills
-// themselves, and it is their money and their declaration.
-//
-// All or nothing: one bad rate rejects the batch, so a typo cannot leave half a
-// configuration applied.
+// All or nothing: one bad rate rejects the batch.
 func (t *Table) Declare(rates map[string]RateConfig) error {
 	for model, rc := range rates {
 		if model == "" {
@@ -229,18 +224,12 @@ type Table struct {
 	// true: silently pricing an unknown model at zero would make the budget
 	// ceiling unenforceable for exactly the model you forgot to register.
 	strict bool
-	// fallback is the model whose rates price a response naming a model nobody
-	// registered. Empty leaves an unknown model an error.
+	// fallback prices a response naming a model nobody registered; empty leaves
+	// that an error.
 	//
-	// It exists because the name a provider ANSWERS with is not the name you
-	// configured, and it is theirs to repoint without telling anyone. A
-	// configured "deepseek-chat" began coming back as "deepseek-flash", which no
-	// table knew, so every call priced at zero and a --usd ceiling stopped
-	// binding — silently, in the direction of spending more.
-	//
-	// Charging the configured model's rate makes the ledger an estimate. A
-	// budget enforced on an estimate is a budget; a budget enforced on zero is
-	// not one at all.
+	// The name a provider answers with is theirs to repoint without telling
+	// anyone, and an unpriced call ledgers at zero, which stops --usd binding at
+	// all. An estimated rate is still a budget; zero is not.
 	fallback string
 }
 
@@ -248,14 +237,8 @@ func NewTable() *Table {
 	return &Table{rates: defaultTable(), strict: true}
 }
 
-// SetFallbackModel names the model whose rates price a response that names a
-// model nobody registered.
-//
-// Refused up front when the fallback itself has no rates: a fallback that
-// cannot price anything is not a fallback, and discovering that at the first
-// call means discovering it after the run has started spending.
-//
-// Empty clears it, returning the table to strict.
+// SetFallbackModel names the model whose rates price an unregistered one.
+// Refused when the fallback itself has no rates. Empty clears it.
 func (t *Table) SetFallbackModel(model string) error {
 	if model == "" {
 		t.mu.Lock()

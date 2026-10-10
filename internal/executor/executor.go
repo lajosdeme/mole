@@ -610,23 +610,11 @@ func (e *Executor) hasQueuedLeads(ctx context.Context, sessionID string) bool {
 }
 
 // hasWorkLeft reports whether the session can still do something, promoting
-// work it owes when nothing is immediately takeable.
+// work it owes when nothing is takeable now.
 //
-// The two are checked in that order because they are different things. Queued
-// leads are takeable now. Deferred leads are contradictions a verification pass
-// judged worth settling and its own budget could not take — owed work, held
-// back for pacing, and the pacing has no claim on a loop that is otherwise
-// about to stop.
-//
-// This is the sibling of the check above, one level along. That one stopped the
-// loop ending with follow-ups sitting QUEUED while the planner said done. This
-// stops it ending with follow-ups sitting DEFERRED, which is how a run came to
-// report itself finished holding 28 contradictions it had already judged worth
-// researching.
-//
-// Promotion is not a way around §8.5. The ceilings are checked at the top of
-// every turn, so a promoted lead faces exactly the limits an ordinary one does;
-// what changes is only whether the session admits the work exists.
+// A run must not end holding contradictions it already judged worth settling.
+// Promotion is not a way around §8.5: the ceilings are checked at the top of
+// every turn, so a promoted lead meets the same limits as any other.
 func (e *Executor) hasWorkLeft(ctx context.Context, sessionID string) bool {
 	if e.hasQueuedLeads(ctx, sessionID) {
 		return true

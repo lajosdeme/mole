@@ -122,12 +122,8 @@ func hasAnthropicProfile() bool {
 // AutoSelectedModels is every model Detect can choose when the user names none.
 //
 // Exported so the pricing table can be held to a rule: mole prices what mole
-// itself selects. A model picked FOR somebody that cannot then be priced is a
-// configuration mole built and then refuses to budget — checkUSDIsEnforceable
-// rejects the run, and --usd is unavailable to a user who chose nothing.
-//
-// Local runtimes are absent on purpose: Detect names no model for them and
-// registers them free, because a model on your own machine is.
+// itself selects, or --usd is refused for a choice the user never made. Local
+// runtimes are absent — Detect names no model for them, and registers them free.
 func AutoSelectedModels() []string {
 	return []string{
 		DefaultAnthropicStrong, DefaultAnthropicCheap,

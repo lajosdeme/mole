@@ -490,28 +490,11 @@ func (p *openAIProvider) usageOf(parsed openAIResponse) Usage {
 		// fields do not overlap when the ledger sums them.
 		inputTokens -= cacheRead
 	}
-	// Tokens the provider billed for and did not break out.
-	//
-	// total_tokens is authoritative in the OpenAI spec, and some backends spend
-	// tokens that appear in NEITHER part. Gemini's OpenAI-compatible endpoint
-	// does it with internal thinking: a call reporting prompt 21 and completion
-	// 5 reported a total of 139, and the 113 in between were billed and
-	// invisible. mole read the two parts, never looked at the total, and
-	// charged a fifth of what the call cost — on a budget whose whole claim is
-	// that it is enforced rather than estimated.
-	//
-	// Not reachable through completion_tokens_details.reasoning_tokens: that is
-	// how OpenAI's o-series reports it, and there the reasoning is already
-	// inside completion_tokens, so the parts and the total agree and nothing is
-	// added here. Gemini reports neither, returning an opaque
-	// thought_signature this struct has no field for.
-	//
-	// Charged as OUTPUT. It is where every provider bills reasoning, and it is
-	// the dearer of the two rates — a table whose job is never to under-bill
-	// rounds this way deliberately.
-	//
-	// Only ever upward. A total below the sum of its parts is a provider that
-	// cannot add up, and believing it would under-bill.
+	// Tokens the provider billed for and did not break out — Gemini's internal
+	// thinking, for one, which appears in neither part. total_tokens is
+	// authoritative in the OpenAI spec, so the gap is charged, as output: that
+	// is where reasoning bills and it is the dearer rate. Only ever upward; a
+	// total below its parts would under-bill.
 	outputTokens := parsed.Usage.CompletionTokens
 	if reported := parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens; parsed.Usage.TotalTokens > reported {
 		outputTokens += parsed.Usage.TotalTokens - reported

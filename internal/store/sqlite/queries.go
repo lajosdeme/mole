@@ -1113,10 +1113,8 @@ func (t *queries) InsertClaims(ctx context.Context, claims []core.Claim) error {
 	return nil
 }
 
-// allRowsIfUnset turns "no limit asked for" into SQLite's no-limit.
-//
-// LIMIT 0 is zero rows, not every row, so a caller that passes 0 cannot simply
-// have it forwarded. -1 is SQLite's "all of them".
+// allRowsIfUnset turns "no limit asked for" into SQLite's no-limit. LIMIT 0 is
+// zero rows, not every row; -1 is all of them.
 func allRowsIfUnset(limit int) int {
 	if limit <= 0 {
 		return -1
@@ -1124,28 +1122,12 @@ func allRowsIfUnset(limit int) int {
 	return limit
 }
 
-// A limit of zero means every row, in this query and in the four others whose
-// callers ask for everything that way: ListLeads, ListUnverifiedClaims,
-// ListFetchOutcomes and ListEdges.
+// A limit of zero means every row, here and in ListLeads, ListUnverifiedClaims,
+// ListFetchOutcomes, ListEdges and ListToolCalls. It used to mean a default
+// nobody chose — 500 claims, 200 leads — so a call that read as "give me
+// everything" silently returned the first 500.
 //
-// It used to mean "the default", and the default was finite — 500 claims, 200
-// leads, 1000 fetch outcomes, 5000 edges. So a call that read as "give me
-// everything" returned the first 500, with no error and nothing saying there
-// had been more. Four call sites made that mistake; three others passed 10_000
-// instead, which is the same bug spotted and worked around.
-//
-// Unreachable while sessions produced 130-290 claims. Then follow-ups stopped
-// being discarded, a Deep run produced 661, and the export began shipping 500
-// of them while the verifier's pairing pool silently excluded the newest 161
-// from being compared against anything — ORDER BY created_at drops the newest,
-// which on such a session are exactly what the follow-up research found.
-//
-// ListToolCalls joins them: its one caller wants every call a session made, and
-// the largest session measured made 945 against a default of 200.
-//
-// ListSessions keeps its default. Every caller passes a real bound — 1, 1000,
-// or whatever a person typed — and the default guards a listing somebody asked
-// to be bounded rather than standing in for "all of them".
+// ListSessions keeps its default: every caller passes a real bound there.
 func (t *queries) ListClaims(ctx context.Context, sessionID string, limit int) ([]*core.Claim, error) {
 	limit = allRowsIfUnset(limit)
 	rows, err := t.q.QueryContext(ctx,

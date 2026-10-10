@@ -283,22 +283,11 @@ func (r *Runner) PurgeDocuments(ctx context.Context) (int64, error) {
 // Separate from Run so a daemon can hand a session id back to its caller before
 // any research happens. Nothing is spent here beyond the escrow reserved at
 // creation (§8.3).
-// defaultCallsPerLead sizes the tool-call backstop when a caller names no
-// ceiling of its own.
+// defaultCallsPerLead sizes the tool-call backstop when a caller names none.
 //
-// It is NOT a model of what a lead costs. It used to be: the ceiling was
-// maxLeads * maxSources * 4, an assertion that a lead spends four calls per
-// source. Measured across fourteen recorded sessions the real figure is a
-// median of 42.6 calls per lead and a maximum of 62 — so the ceiling sat at
-// roughly half of what a healthy run needed, and cut runs in half without
-// saying so. One measured session wanted 431 calls, was stopped at 240, and
-// returned 134 claims where the same question uncapped returned 272.
-//
-// What is supposed to stop a run is the clock (§8.5) and the money (§8.3).
-// This exists for the case those cannot cover — a budget estimate that is
-// wrong, a unit that cannot price a provider — so it belongs far above what a
-// healthy run needs, not inside it. A backstop that binds first is not a
-// backstop; it is a budget nobody set.
+// NOT a model of what a lead costs — measured, that is a median of 43 and a
+// maximum of 62. The clock and the money stop a run; this covers the case they
+// cannot, so it sits far above a healthy run rather than inside it.
 const defaultCallsPerLead = 150
 
 // toolCallCeiling takes the caller's ceiling, or sizes a backstop.

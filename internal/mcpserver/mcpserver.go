@@ -676,12 +676,8 @@ const (
 	MaxSourcesCeiling = 25
 	MaxDepthCeiling   = 5
 	// MaxWallClockCeiling bounds how long a caller may ask a session to run.
-	//
-	// An hour is far past any legitimate ask — the longest tier a caller would
-	// configure is measured in tens of minutes — and finite, which is the
-	// point. On a command line a timeout is a number a person typed; here it is
-	// one an agent chose, and the ceiling is the daemon's for the same reason
-	// MaxSessionUSD is: it is the limit the caller cannot raise.
+	// Generous and finite: here the number is one an agent chose, so the
+	// ceiling is the daemon's, like MaxSessionUSD.
 	MaxWallClockCeiling = time.Hour
 )
 
@@ -725,12 +721,9 @@ func (d Deps) checkCeiling(unit core.BudgetUnit, amount int64) error {
 
 // clampToDefault takes the caller's value when it is set and sane, the daemon's
 // default when it is not, and never more than max.
-// clampDuration parses a caller's timeout and holds it under the ceiling.
-//
-// An unparseable value takes the default rather than failing the call: the
-// caller asked for research, and refusing the whole request over a malformed
-// duration serves nobody. A value over the ceiling is clamped, not refused, for
-// the same reason clampToDefault clamps.
+// clampDuration parses a caller's timeout and holds it under the ceiling. An
+// unparseable or oversized value takes the default rather than failing the
+// call — the caller asked for research.
 func clampDuration(v string, def, max time.Duration) time.Duration {
 	d, err := time.ParseDuration(strings.TrimSpace(v))
 	if err != nil || d <= 0 {

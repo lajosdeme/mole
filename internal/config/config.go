@@ -28,20 +28,12 @@ import (
 )
 
 // Config is the on-disk settings file.
-// Duration is a time.Duration that reads either way round in JSON.
+// Duration reads "20m" or a count of nanoseconds, and writes the readable one.
+// A plain time.Duration accepts only the latter, so such a field is settable
+// through `mole config set` and not by editing the file.
 //
-// encoding/json gives time.Duration no special treatment: it marshals as an
-// integer count of nanoseconds and refuses to unmarshal a string. So a field
-// typed time.Duration is settable through `mole config set`, which parses the
-// text itself, and NOT by opening the file and writing what a human would
-// write. "20m" is an error; 1200000000000 is the only accepted spelling.
-//
-// This type accepts both and writes the readable one.
-//
-// llm.timeout predates it and still stores nanoseconds. Changing that would
-// rewrite the representation of a field already in people's config files, and
-// a file written by a new binary would then be unreadable by an old one —
-// which is a bigger thing to do than this fixes.
+// llm.timeout predates this and still stores nanoseconds: changing it would
+// make files written by a new binary unreadable by an old one.
 type Duration time.Duration
 
 func (d Duration) Duration() time.Duration { return time.Duration(d) }
@@ -75,28 +67,15 @@ type Config struct {
 	LLM LLMConfig `json:"llm"`
 
 	// MaxWallClock is how long a session may run when --timeout says nothing.
-	// Zero takes the command's own default.
+	// The SESSION's clock, not a model call's — llm.timeout is that one.
 	//
-	// The SESSION's clock, not a model call's — llm.timeout is that one, and the
-	// two are easy to confuse because only one of them used to exist here.
-	// Reported as #2 by somebody who looked for exactly this field, found
-	// llm.timeout, and concluded mole had no option for it.
-	//
-	// A default rather than a ceiling: --timeout still overrides it, because on
-	// the command line the number is one a person typed. The ceiling that a
-	// caller cannot raise is the daemon's, and it lives in mcpserver.
+	// A default, not a ceiling: --timeout overrides it. The ceiling a caller
+	// cannot raise is the daemon's, in mcpserver.
 	MaxWallClock Duration `json:"max_wallclock,omitempty"`
 
-	// Pricing declares model rates, in dollars per MILLION tokens — the figure
-	// on the vendor's own pricing page.
-	//
-	// mole ships rates for the models it can select itself, which is a rule it
-	// can keep: a list of every model on the internet would go stale in the
-	// direction of billing too little, and this table's job is never to
-	// under-bill. Anything else is declared here.
-	//
-	// Declared rates WIN over built-in ones, so a price that changes — or a
-	// model a provider renames — is correctable without waiting for a release.
+	// Pricing declares model rates, in dollars per MILLION tokens. mole ships
+	// rates only for the models it can select itself; declare anything else
+	// here, and a declared rate wins over a built-in one.
 	//
 	//	"pricing": {
 	//	  "gpt-4o":        {"input": 2.50, "output": 10.00},
