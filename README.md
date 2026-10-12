@@ -143,6 +143,11 @@ It ships rates for the models it can select itself — Anthropic's, DeepSeek's,
 price, rather than metering it at zero and letting the ceiling silently not
 bind.
 
+Every call is priced as it settles, whichever part of mole made it — the
+planner, the executor, the verifier and the report writer all meter the same
+way. Verification makes most of the calls on a typical run and is a quarter of
+the bill, so a ceiling that missed it would not bind on the phase that matters.
+
 Declare anything else, in dollars per **million** tokens, straight off the
 vendor's pricing page:
 

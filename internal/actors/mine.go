@@ -179,24 +179,14 @@ func toolCallFor(
 		tc.Err = callErr.Error()
 	}
 
-	if table == nil {
-		table = pricing.NewTable()
-	}
-	cost, err := table.Cost(resp.Model, pricing.Usage{
+	// Tokens only. The ledger prices every call as it settles — see
+	// budget.Ledger.price — because pricing done by whoever happened to build
+	// the call is pricing two callers forgot.
+	tc.Cost = core.Cost{
 		InputTokens:      resp.Usage.InputTokens,
 		OutputTokens:     resp.Usage.OutputTokens,
 		CacheReadTokens:  resp.Usage.CacheReadTokens,
 		CacheWriteTokens: resp.Usage.CacheWriteTokens,
-	})
-	if err != nil {
-		// An unpriced model still spent tokens. Zero dollars with real token
-		// counts keeps token-mode budgets correct; doctor surfaces the gap.
-		if log == nil {
-			log = slog.Default()
-		}
-		log.Warn("model not in pricing table; USD cost recorded as zero",
-			"model", resp.Model, "tokens", resp.Usage.Total())
 	}
-	tc.Cost = cost
 	return tc
 }

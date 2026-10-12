@@ -198,7 +198,15 @@ func (r *Runner) logger() *slog.Logger {
 }
 
 func (r *Runner) ledger() *budget.Ledger {
-	return budget.New(r.Store, budget.DefaultConfig())
+	cfg := budget.DefaultConfig()
+	// The ledger prices every call as it settles, so it needs the same table the
+	// actors were configured with — otherwise a rate declared in the config file
+	// applies to the executor and to nothing else.
+	if r.Actor != nil {
+		cfg.Pricing = r.Actor.Pricing
+	}
+	cfg.Log = r.logger()
+	return budget.New(r.Store, cfg)
 }
 
 // Recovery reports what boot recovery reclaimed.

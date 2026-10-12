@@ -101,7 +101,11 @@ func (d Deps) Ask(ctx context.Context, in AskIn) (AskOut, error) {
 		allowance = d.MaxSessionUSD
 	}
 
-	led := budget.New(d.Store, budget.DefaultConfig())
+	// The ledger prices what it settles, so it takes the same table the ask's
+	// own cost is read against.
+	ledCfg := budget.DefaultConfig()
+	ledCfg.Pricing = d.Pricing
+	led := budget.New(d.Store, ledCfg)
 	gen := &output.Generator{LLM: d.LLM}
 
 	var (

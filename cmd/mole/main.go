@@ -767,7 +767,9 @@ func cmdDevSeed(ctx context.Context, path string) error {
 	log := obs.NewLogger(obs.LogOptions{Level: "info", Format: "text"})
 	tracer := obs.NewTracer(db, log)
 	table := pricing.NewTable()
-	led := budget.New(db, budget.DefaultConfig())
+	ledCfg := budget.DefaultConfig()
+	ledCfg.Pricing = table
+	led := budget.New(db, ledCfg)
 
 	sess, err := led.CreateSession(ctx, budget.SessionSpec{
 		Prompt:       "seed: what is the current consensus on byte-level LLMs?",

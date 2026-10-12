@@ -447,24 +447,15 @@ func truncate(s string, max int) string {
 
 func fenceToken() string { return core.PromptFence() }
 
-// Price turns a report's token usage into a ledger cost.
+// Price returns a report's token usage as a ledger cost.
 //
-// Lives here rather than beside either caller because both the session runner
-// and research.ask need exactly this, and they had a copy each — identical down
-// to the comment, which is how two copies stay in step right up until one of
-// them does not. A nil table takes the default.
-func Price(table *pricing.Table, rep *Report) core.Cost {
-	if table == nil {
-		table = pricing.NewTable()
-	}
-	cost, err := table.Cost(rep.Model, pricing.Usage{
+// It no longer converts anything: the ledger prices every call as it settles,
+// so a caller that priced here would be the one place able to disagree with it.
+// Kept as a named function because both the session runner and research.ask go
+// through it, and a shape this load-bearing is worth one name.
+func Price(_ *pricing.Table, rep *Report) core.Cost {
+	return core.Cost{
 		InputTokens:  rep.Cost.InputTokens,
 		OutputTokens: rep.Cost.OutputTokens,
-	})
-	if err != nil {
-		// Unknown model: record the tokens, price them at zero. A row with real
-		// token counts and no money still reconciles; a missing row does not.
-		return rep.Cost
 	}
-	return cost
 }

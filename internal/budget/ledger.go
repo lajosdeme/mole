@@ -16,9 +16,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/lajosdeme/mole/internal/core"
+	"github.com/lajosdeme/mole/internal/pricing"
 	"github.com/lajosdeme/mole/internal/store"
 )
 
@@ -66,6 +68,17 @@ type Config struct {
 	// carried a real timestamp and the cutoff did not.
 	AbandonedSessionIdle time.Duration
 
+	// Log is where an unpriced model is reported. Nil uses the default logger.
+	Log *slog.Logger
+
+	// Pricing converts a call's tokens into money. Nil means the built-in table.
+	//
+	// It lives on the LEDGER rather than on each caller because the ledger is
+	// the one place every tool call passes through, and leaving the conversion
+	// to whoever built the call meant two of the four parts of mole that spend
+	// money never did it. See Settle.
+	Pricing *pricing.Table
+
 	// MaxOvershootFactor caps how far actual cost may exceed the reservation
 	// before Settle flags it. Exceeding it does not reject the settle — the
 	// money was spent and the ledger records what happened — but it is the
@@ -97,6 +110,9 @@ func New(st store.Store, cfg Config) *Ledger {
 	if cfg.MaxOvershootFactor <= 0 {
 		cfg.MaxOvershootFactor = DefaultConfig().MaxOvershootFactor
 	}
+	if cfg.Pricing == nil {
+		cfg.Pricing = pricing.NewTable()
+	}
 	return &Ledger{st: st, cfg: cfg, now: func() time.Time { return time.Now().UTC() }}
 }
 
@@ -104,6 +120,13 @@ func New(st store.Store, cfg Config) *Ledger {
 func (l *Ledger) SetClock(fn func() time.Time) { l.now = fn }
 
 func (l *Ledger) Config() Config { return l.cfg }
+
+func (l *Ledger) logger() *slog.Logger {
+	if l.cfg.Log != nil {
+		return l.cfg.Log
+	}
+	return slog.Default()
+}
 
 // ---------------------------------------------------------------------------
 // Session creation
@@ -328,6 +351,43 @@ type SettleResult struct {
 	Cost      core.Cost
 }
 
+// price converts a call's tokens into money, if nobody has already.
+//
+// Here, and not in the callers, because this is the single point every tool
+// call crosses on its way to the database. It used to be each caller's job: the
+// executor's miner and the report writer looked the rate up, the planner and
+// the verifier did not, and so 143 calls of one measured Quick run — 127,054
+// tokens the provider billed — were recorded at $0.00. A quarter of that run's
+// real cost was invisible, and --usd could not bind on the phase making most of
+// the calls.
+//
+// Three things are left alone. A call that already carries dollars has been
+// priced by somebody who knew better: a search is billed per query and arrives
+// with its charge and no tokens, and re-pricing it from zero tokens would erase
+// the largest single line on a run. A call with no tokens has nothing to
+// convert. A call with no model cannot be looked up.
+//
+// An unpriced model keeps its tokens and gets no dollars, which is what
+// token-mode budgets need and what `mole doctor` reports before a run.
+func (l *Ledger) price(ctx context.Context, tc *core.ToolCall) {
+	if tc.Cost.USDMicros != 0 || tc.Cost.TotalTokens() == 0 || tc.Model == "" {
+		return
+	}
+	cost, err := l.cfg.Pricing.Cost(tc.Model, pricing.Usage{
+		InputTokens:      tc.Cost.InputTokens,
+		OutputTokens:     tc.Cost.OutputTokens,
+		CacheReadTokens:  tc.Cost.CacheReadTokens,
+		CacheWriteTokens: tc.Cost.CacheWriteTokens,
+	})
+	if err != nil {
+		// Strict mode asked to be told. The tokens still stand.
+		l.logger().WarnContext(ctx, "model not in pricing table; USD cost recorded as zero",
+			"model", tc.Model, "role", tc.Role, "tokens", tc.Cost.TotalTokens())
+		return
+	}
+	tc.Cost.USDMicros = cost.USDMicros
+}
+
 // Settle writes the actual cost rows and releases the hold, in one transaction.
 //
 // Partial cost is settled on failure too — the money was spent whether or not
@@ -360,6 +420,7 @@ func (l *Ledger) Settle(ctx context.Context, r *core.Reservation, calls []core.T
 			if tc.LeadID == nil {
 				tc.LeadID = r.LeadID
 			}
+			l.price(ctx, tc)
 			if err := tx.InsertToolCall(ctx, tc); err != nil {
 				return err
 			}

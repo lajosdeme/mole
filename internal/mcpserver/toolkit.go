@@ -349,7 +349,9 @@ func (d Deps) spend(
 	sessionID string,
 	call func(context.Context) (core.ToolCall, error),
 ) error {
-	ledger := budget.New(d.Store, budget.DefaultConfig())
+	ledCfg := budget.DefaultConfig()
+	ledCfg.Pricing = d.Pricing
+	ledger := budget.New(d.Store, ledCfg)
 	res, err := ledger.Reserve(ctx, sessionID, 1)
 	if err != nil {
 		return err
