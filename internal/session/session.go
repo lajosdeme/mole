@@ -124,6 +124,16 @@ type Runner struct {
 	// VerifierBatchSize caps pairs per adjudication call. Zero takes the default.
 	VerifierBatchSize int
 
+	// MaxFindings bounds how many findings the report is written from, and with
+	// it how long the document runs. Zero takes output.DefaultMaxClaims.
+	//
+	// One cap for every depth meant the shallowest run decided the length of
+	// the deepest. Measured on one question: five minutes returned 192 claims
+	// and twenty-five returned 609, and both wrote twelve pages, because both
+	// drew on the first sixty findings. The research scaled; the document did
+	// not.
+	MaxFindings int
+
 	// Confirm chooses which edge kinds need a second agreeing judgement. The zero
 	// value confirms both, the measured default — the opposite of a bare Verifier's,
 	// which confirms nothing. See confirmMode.
@@ -589,7 +599,7 @@ func (r *Runner) finish(
 		return r.finishDataset(ctx, sess.ID, *schema), ground
 	}
 
-	gen := &output.Generator{LLM: actor.LLM}
+	gen := &output.Generator{LLM: actor.LLM, MaxClaims: r.MaxFindings}
 	var reservation *core.Reservation
 	if cancelled {
 		// Cancel means stop spending. Escrow is still released and every hold

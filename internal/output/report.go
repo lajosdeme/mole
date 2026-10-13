@@ -116,7 +116,14 @@ func (g *Generator) withDefaults() *Generator {
 		out.MaxClaims = DefaultMaxClaims
 	}
 	if out.MaxTokens <= 0 {
-		out.MaxTokens = DefaultMaxTokens
+		// Scaled with the findings, because the two bound the same document
+		// from opposite ends: raising the findings alone buys a report that
+		// draws on more evidence and then runs out of room to say it. The
+		// ratio is the default pair, so an unset generator is unchanged.
+		out.MaxTokens = DefaultMaxTokens * out.MaxClaims / DefaultMaxClaims
+		if out.MaxTokens < DefaultMaxTokens {
+			out.MaxTokens = DefaultMaxTokens
+		}
 	}
 	return &out
 }

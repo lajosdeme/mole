@@ -81,6 +81,7 @@ type researchOpts struct {
 	noConfirm    bool
 	confirmMode  string
 	maxDepth     int
+	maxFindings  int
 	workers      int
 	actorList    string
 	schemaSpec   string
@@ -156,6 +157,8 @@ func newResearchCmd() *cobra.Command {
 	f.BoolVar(&o.quiet, "quiet", false, "suppress progress; print only the result")
 	f.IntVar(&o.maxDepth, "max-depth", planner.DefaultMaxDepth,
 		"rounds of follow-up leads the planner may add (0 for none)")
+	f.IntVar(&o.maxFindings, "max-findings", 0,
+		"findings the report is written from, which is what sets its length (0 for the default)")
 	f.BoolVar(&o.alwaysFetch, "always-fetch", false,
 		"fetch every page even when the search provider supplied its text (slower; required for citation accuracy and the §17.1 gate)")
 	return c
@@ -287,6 +290,7 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 		Local:             localActor,
 		VerifierModel:     cfg.LLM.VerifierModel,
 		VerifierBatchSize: cfg.LLM.VerifierBatchSize,
+		MaxFindings:       o.maxFindings,
 		Confirm:           confirmMode,
 		Owner:             "cli",
 		Notice:            func(msg string) { fmt.Fprintf(os.Stderr, "warning: %s\n", msg) },
