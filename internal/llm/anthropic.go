@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -28,18 +29,30 @@ type anthropicProvider struct {
 	cfg    Config
 	source CredentialSource
 
-	// thinkingMu guards thinkingCache and thinkingInFlight, the per-model
-	// answer to whether the model accepts {"type":"disabled"} thinking.
-	thinkingMu       sync.Mutex
-	thinkingCache    map[string]bool
-	thinkingInFlight map[string]*thinkingLookup
+	// capsMu guards capsCache and capsInFlight, the per-model thinking and
+	// effort capabilities.
+	capsMu       sync.Mutex
+	capsCache    map[string]modelCaps
+	capsInFlight map[string]*capsLookup
 }
 
-// thinkingLookup is one in-progress Models API call, shared by every caller
+// modelCaps is what a model accepts for disabled thinking and effort.
+type modelCaps struct {
+	disabledThinking bool
+	effort           effortSupport
+}
+
+// effortSupport is the set of effort levels a model accepts; all means any level.
+type effortSupport struct {
+	all    bool
+	levels map[string]bool
+}
+
+// capsLookup is one in-progress Models API call, shared by every caller
 // that asks about the same model while it is outstanding.
-type thinkingLookup struct {
+type capsLookup struct {
 	done   chan struct{}
-	result bool
+	result modelCaps
 }
 
 // newAnthropic builds the client.
@@ -68,11 +81,11 @@ func newAnthropic(cfg Config, httpClient *http.Client) (*anthropicProvider, erro
 	}
 
 	return &anthropicProvider{
-		client:           anthropic.NewClient(opts...),
-		cfg:              cfg,
-		source:           source,
-		thinkingCache:    make(map[string]bool),
-		thinkingInFlight: make(map[string]*thinkingLookup),
+		client:       anthropic.NewClient(opts...),
+		cfg:          cfg,
+		source:       source,
+		capsCache:    make(map[string]modelCaps),
+		capsInFlight: make(map[string]*capsLookup),
 	}, nil
 }
 
@@ -129,28 +142,31 @@ func (p *anthropicProvider) Complete(ctx context.Context, req Request) (*Respons
 	if req.System != "" {
 		params.System = []anthropic.TextBlockParam{{Text: req.System}}
 	}
-	if req.Effort != "" {
-		params.OutputConfig = anthropic.OutputConfigParam{
-			Effort: anthropic.OutputConfigEffort(req.Effort),
-		}
+	var caps modelCaps
+	if !req.Thinking || req.Effort != "" {
+		caps = p.capabilities(ctx, model)
 	}
+	effort := req.Effort
 	switch {
 	case req.Thinking:
 		params.Thinking = anthropic.ThinkingConfigParamUnion{
 			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{},
 		}
-	case p.disabledThinkingSupported(ctx, model):
+	case caps.disabledThinking:
 		// Chunk mining is mechanical extraction. Thinking there adds latency
 		// and tokens without improving the task, and the per-chunk call is the
 		// one that runs most often.
 		params.Thinking = anthropic.ThinkingConfigParamUnion{
 			OfDisabled: &anthropic.ThinkingConfigDisabledParam{},
 		}
-	case req.Effort == "":
+	case effort == "":
 		// This model rejects the disabled type outright, so the field is left
 		// unset entirely and low effort stands in for "don't think hard".
+		effort = string(anthropic.OutputConfigEffortLow)
+	}
+	if effort = caps.effort.clamp(effort); effort != "" {
 		params.OutputConfig = anthropic.OutputConfigParam{
-			Effort: anthropic.OutputConfigEffortLow,
+			Effort: anthropic.OutputConfigEffort(effort),
 		}
 	}
 
@@ -206,35 +222,41 @@ var disabledThinkingPrefixes = []string{
 	"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5", "claude-mythos-5",
 }
 
-// disabledThinkingSupported reports whether model accepts disabled thinking,
-// asking the Models API once per model; concurrent callers share the lookup.
-func (p *anthropicProvider) disabledThinkingSupported(ctx context.Context, model string) bool {
-	p.thinkingMu.Lock()
-	if v, ok := p.thinkingCache[model]; ok {
-		p.thinkingMu.Unlock()
+// capabilities reports what model accepts for thinking and effort, asking the
+// Models API once per model; concurrent callers share the lookup.
+func (p *anthropicProvider) capabilities(ctx context.Context, model string) modelCaps {
+	p.capsMu.Lock()
+	if v, ok := p.capsCache[model]; ok {
+		p.capsMu.Unlock()
 		return v
 	}
-	if lookup, ok := p.thinkingInFlight[model]; ok {
-		p.thinkingMu.Unlock()
+	if lookup, ok := p.capsInFlight[model]; ok {
+		p.capsMu.Unlock()
 		<-lookup.done
 		return lookup.result
 	}
-	lookup := &thinkingLookup{done: make(chan struct{})}
-	p.thinkingInFlight[model] = lookup
-	p.thinkingMu.Unlock()
+	lookup := &capsLookup{done: make(chan struct{})}
+	p.capsInFlight[model] = lookup
+	p.capsMu.Unlock()
 
-	supported := fallbackDisabledThinkingSupported(model)
+	caps := modelCaps{
+		disabledThinking: fallbackDisabledThinkingSupported(model),
+		effort:           fallbackEffortSupport(model),
+	}
 	if info, err := p.client.Models.Get(ctx, model, anthropic.ModelGetParams{}); err == nil {
-		supported = disabledSupportedFromCapabilities(info.Capabilities.Thinking.Types.RawJSON())
+		caps.disabledThinking = disabledSupportedFromCapabilities(info.Capabilities.Thinking.Types.RawJSON())
+		if info.Capabilities.JSON.Effort.Valid() {
+			caps.effort = effortFromCapability(info.Capabilities.Effort)
+		}
 	}
 
-	p.thinkingMu.Lock()
-	p.thinkingCache[model] = supported
-	delete(p.thinkingInFlight, model)
-	p.thinkingMu.Unlock()
-	lookup.result = supported
+	p.capsMu.Lock()
+	p.capsCache[model] = caps
+	delete(p.capsInFlight, model)
+	p.capsMu.Unlock()
+	lookup.result = caps
 	close(lookup.done)
-	return supported
+	return caps
 }
 
 // fallbackDisabledThinkingSupported reports the default answer used when the
@@ -260,6 +282,60 @@ func disabledSupportedFromCapabilities(typesRawJSON string) bool {
 		return false
 	}
 	return types.Disabled.Supported
+}
+
+// effortOrder lists effort levels from lowest to highest.
+var effortOrder = []string{"low", "medium", "high", "xhigh", "max"}
+
+// noEffortPrefixes and threeLevelEffortPrefixes are the effort fallbacks used
+// only when the Models API lookup fails.
+var (
+	noEffortPrefixes = []string{
+		"claude-haiku-4", "claude-sonnet-4", "claude-opus-4-1", "claude-opus-4-0", "claude-3",
+	}
+	threeLevelEffortPrefixes = []string{"claude-opus-4-5", "claude-opus-4-6", "claude-sonnet-4-6"}
+)
+
+// fallbackEffortSupport reports the effort levels assumed for model when the
+// Models API lookup fails.
+func fallbackEffortSupport(model string) effortSupport {
+	for _, prefix := range threeLevelEffortPrefixes {
+		if strings.HasPrefix(model, prefix) {
+			return effortSupport{levels: map[string]bool{"low": true, "medium": true, "high": true}}
+		}
+	}
+	for _, prefix := range noEffortPrefixes {
+		if strings.HasPrefix(model, prefix) {
+			return effortSupport{}
+		}
+	}
+	return effortSupport{all: true}
+}
+
+// effortFromCapability converts the Models API effort capability into the
+// set of accepted levels.
+func effortFromCapability(c anthropic.EffortCapability) effortSupport {
+	if !c.Supported {
+		return effortSupport{}
+	}
+	return effortSupport{levels: map[string]bool{
+		"low": c.Low.Supported, "medium": c.Medium.Supported, "high": c.High.Supported,
+		"xhigh": c.Xhigh.Supported, "max": c.Max.Supported,
+	}}
+}
+
+// clamp returns the highest accepted level not above requested, or "" when
+// none is accepted.
+func (e effortSupport) clamp(requested string) string {
+	if requested == "" || e.all || e.levels[requested] {
+		return requested
+	}
+	for i := slices.Index(effortOrder, requested) - 1; i >= 0; i-- {
+		if e.levels[effortOrder[i]] {
+			return effortOrder[i]
+		}
+	}
+	return ""
 }
 
 // partialResponse projects whatever the accumulator holds into a Response.

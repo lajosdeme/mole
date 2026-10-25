@@ -293,3 +293,182 @@ func TestConcurrentLookupsAreCoalesced(t *testing.T) {
 		t.Errorf("message calls = %d, want %d", got, n)
 	}
 }
+
+// capabilityModelBody is a full Models API object with the given disabled-thinking and effort levels.
+func capabilityModelBody(model string, disabledSupported bool, effortLevels ...string) string {
+	level := func(name string) string {
+		for _, l := range effortLevels {
+			if l == name {
+				return `{"supported": true}`
+			}
+		}
+		return `{"supported": false}`
+	}
+	return fmt.Sprintf(`{
+		"id": %q,
+		"type": "model",
+		"display_name": "d",
+		"created_at": "2025-01-01T00:00:00Z",
+		"max_input_tokens": 200000,
+		"max_tokens": 64000,
+		"capabilities": {
+			"batch": {"supported": true},
+			"citations": {"supported": true},
+			"code_execution": {"supported": true},
+			"context_management": {"supported": false},
+			"image_input": {"supported": true},
+			"pdf_input": {"supported": true},
+			"structured_outputs": {"supported": true},
+			"effort": {
+				"supported": %t,
+				"low": %s, "medium": %s, "high": %s, "xhigh": %s, "max": %s
+			},
+			"thinking": {
+				"supported": true,
+				"types": {
+					"adaptive": {"supported": true},
+					"enabled": {"supported": true},
+					"disabled": {"supported": %t}
+				}
+			}
+		}
+	}`, model, len(effortLevels) > 0, level("low"), level("medium"), level("high"),
+		level("xhigh"), level("max"), disabledSupported)
+}
+
+// sentEffort returns the output_config.effort of a captured body and whether it was present.
+func sentEffort(body map[string]any) (any, bool) {
+	oc, _ := body["output_config"].(map[string]any)
+	v, ok := oc["effort"]
+	return v, ok
+}
+
+// TestEffortUnsupportedSendsNoEffort checks a model without effort gets no output_config.effort.
+func TestEffortUnsupportedSendsNoEffort(t *testing.T) {
+	cases := []struct {
+		name         string
+		disabled     bool
+		effort       string
+		wantThinking any
+	}{
+		{"requested effort, disabled thinking", true, "medium", "disabled"},
+		{"no effort, no disabled thinking", false, "", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeAnthropicServer{modelsStatus: 200, modelsBody: capabilityModelBody("claude-x", c.disabled)}
+			p := anthropicProvider(t, f.start(t), "claude-x")
+
+			_, err := p.Complete(context.Background(), llm.Request{
+				Tier: llm.TierStrong, Messages: []llm.Message{llm.User("hi")}, Effort: c.effort,
+			})
+			if err != nil {
+				t.Fatalf("complete: %v", err)
+			}
+			body := f.firstBody()
+			if v, ok := sentEffort(body); ok {
+				t.Errorf("output_config.effort = %v, want omitted", v)
+			}
+			thinking, _ := body["thinking"].(map[string]any)
+			if got := thinking["type"]; got != c.wantThinking {
+				t.Errorf("thinking.type = %v, want %v", got, c.wantThinking)
+			}
+		})
+	}
+}
+
+// TestEffortClampedToHighestSupported checks an unsupported level drops to the next supported one.
+func TestEffortClampedToHighestSupported(t *testing.T) {
+	for _, req := range []string{"xhigh", "max"} {
+		t.Run(req, func(t *testing.T) {
+			f := &fakeAnthropicServer{modelsStatus: 200,
+				modelsBody: capabilityModelBody("claude-x", true, "low", "medium", "high")}
+			p := anthropicProvider(t, f.start(t), "claude-x")
+
+			_, err := p.Complete(context.Background(), llm.Request{
+				Tier: llm.TierStrong, Messages: []llm.Message{llm.User("hi")}, Effort: req,
+			})
+			if err != nil {
+				t.Fatalf("complete: %v", err)
+			}
+			if v, _ := sentEffort(f.firstBody()); v != "high" {
+				t.Errorf("output_config.effort = %v, want %q", v, "high")
+			}
+		})
+	}
+}
+
+// TestEffortSupportedIsPassed checks a supported level reaches the request unchanged.
+func TestEffortSupportedIsPassed(t *testing.T) {
+	f := &fakeAnthropicServer{modelsStatus: 200,
+		modelsBody: capabilityModelBody("claude-x", false, "low", "medium", "high", "xhigh", "max")}
+	p := anthropicProvider(t, f.start(t), "claude-x")
+
+	for _, req := range []string{"", "medium", "xhigh"} {
+		if _, err := p.Complete(context.Background(), llm.Request{
+			Tier: llm.TierStrong, Messages: []llm.Message{llm.User("hi")}, Effort: req,
+		}); err != nil {
+			t.Fatalf("complete: %v", err)
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, want := range []string{"low", "medium", "xhigh"} {
+		if v, _ := sentEffort(f.bodies[i]); v != want {
+			t.Errorf("call %d: output_config.effort = %v, want %q", i, v, want)
+		}
+	}
+}
+
+// TestEffortLookupFailureFallsBackToKnownModels checks the prefix fallback when the Models API fails.
+func TestEffortLookupFailureFallsBackToKnownModels(t *testing.T) {
+	cases := []struct {
+		model, effort string
+		want          any
+	}{
+		{"claude-sonnet-4-5", "medium", nil},
+		{"claude-haiku-4-5", "medium", nil},
+		{"claude-opus-4-1", "medium", nil},
+		{"claude-3-7-sonnet-latest", "high", nil},
+		{"claude-sonnet-4-6", "xhigh", "high"},
+		{"claude-opus-4-5", "max", "high"},
+		{"claude-opus-4-6", "medium", "medium"},
+		{"claude-opus-5-5", "medium", "medium"},
+		{"claude-opus-5-5", "xhigh", "xhigh"},
+	}
+	for _, c := range cases {
+		t.Run(c.model+"/"+c.effort, func(t *testing.T) {
+			f := &fakeAnthropicServer{modelsStatus: 404, modelsBody: `{"error":{"message":"nope"}}`}
+			p := anthropicProvider(t, f.start(t), c.model)
+
+			_, err := p.Complete(context.Background(), llm.Request{
+				Tier: llm.TierStrong, Messages: []llm.Message{llm.User("hi")}, Effort: c.effort,
+			})
+			if err != nil {
+				t.Fatalf("complete: %v", err)
+			}
+			if v, _ := sentEffort(f.firstBody()); v != c.want {
+				t.Errorf("output_config.effort = %v, want %v", v, c.want)
+			}
+		})
+	}
+}
+
+// TestThinkingAndEffortShareOneLookup checks both capability checks use a single Models API call.
+func TestThinkingAndEffortShareOneLookup(t *testing.T) {
+	f := &fakeAnthropicServer{modelsStatus: 200, modelsBody: capabilityModelBody("claude-x", false, "low", "medium", "high")}
+	p := anthropicProvider(t, f.start(t), "claude-x")
+
+	for _, req := range []llm.Request{
+		{Tier: llm.TierStrong, Messages: []llm.Message{llm.User("hi")}, Effort: "xhigh"},
+		{Tier: llm.TierStrong, Messages: []llm.Message{llm.User("hi")}},
+		{Tier: llm.TierStrong, Messages: []llm.Message{llm.User("hi")}, Thinking: true, Effort: "medium"},
+	} {
+		if _, err := p.Complete(context.Background(), req); err != nil {
+			t.Fatalf("complete: %v", err)
+		}
+	}
+	if got := f.modelsCalls.Load(); got != 1 {
+		t.Errorf("models calls = %d, want 1", got)
+	}
+}
