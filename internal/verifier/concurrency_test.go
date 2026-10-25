@@ -91,6 +91,8 @@ var promptPairRE = regexp.MustCompile(`\{"pair":(\d+),"a":"((?:[^"\\]|\\.)*)","b
 type pairAnswerer struct {
 	mu    sync.Mutex
 	asked map[string]int
+	// prompts is every prompt received, fence removed, in arrival order.
+	prompts []string
 }
 
 var answerRelations = []verifier.Relation{
@@ -99,6 +101,9 @@ var answerRelations = []verifier.Relation{
 }
 
 func (p *pairAnswerer) reply(_ int, prompt string) (string, error) {
+	p.mu.Lock()
+	p.prompts = append(p.prompts, unfenced(prompt))
+	p.mu.Unlock()
 	time.Sleep(time.Duration(rand.IntN(21)) * time.Millisecond)
 
 	var b strings.Builder
@@ -126,6 +131,12 @@ func (p *pairAnswerer) reply(_ int, prompt string) (string, error) {
 	return b.String(), nil
 }
 
+// fenceRE matches core.PromptFence's output: random per call, so two runs'
+// prompts can only be compared with it removed.
+var fenceRE = regexp.MustCompile(`[0-9a-f]{16}`)
+
+func unfenced(prompt string) string { return fenceRE.ReplaceAllString(prompt, "FENCE") }
+
 // idedClaims is distinctClaims with fixed IDs. Pair order and orientation follow
 // claim IDs, so two rigs must share IDs for their batches to match.
 func idedClaims(n int) []core.Claim {
@@ -141,8 +152,9 @@ func idedClaims(n int) []core.Claim {
 // graph exactly.
 func TestConcurrentRunMatchesSerialRun(t *testing.T) {
 	type outcome struct {
-		edges []string
-		res   *verifier.Result
+		edges   []string
+		prompts []string
+		res     *verifier.Result
 	}
 	run := func(concurrency int) outcome {
 		ans := &pairAnswerer{asked: map[string]int{}}
@@ -163,7 +175,9 @@ func TestConcurrentRunMatchesSerialRun(t *testing.T) {
 			edges = append(edges, fmt.Sprintf("%s %s %s", e.Kind, e.FromID, e.ToID))
 		}
 		sort.Strings(edges)
-		return outcome{edges: edges, res: res}
+		prompts := append([]string(nil), ans.prompts...)
+		sort.Strings(prompts)
+		return outcome{edges: edges, prompts: prompts, res: res}
 	}
 
 	serial := run(1)
@@ -180,11 +194,27 @@ func TestConcurrentRunMatchesSerialRun(t *testing.T) {
 		t.Errorf("edge sets differ.\nserial:\n  %s\nconcurrent:\n  %s",
 			strings.Join(serial.edges, "\n  "), strings.Join(concurrent.edges, "\n  "))
 	}
+	// The same prompts, first looks and second looks alike, in any order. A real
+	// model's answer depends on what else shares its batch, so a second look that
+	// mixed pairs from several first-look batches could change the graph even
+	// though this answerer, judging each pair alone, would not show it.
+	if len(serial.prompts) != len(concurrent.prompts) {
+		t.Errorf("%d prompts serially, %d concurrently", len(serial.prompts), len(concurrent.prompts))
+	} else {
+		for i := range serial.prompts {
+			if serial.prompts[i] != concurrent.prompts[i] {
+				t.Errorf("prompt sets differ; first difference:\nserial:\n%s\nconcurrent:\n%s",
+					pairsIn(serial.prompts[i]), pairsIn(concurrent.prompts[i]))
+				break
+			}
+		}
+	}
 	if serial.res.ClaimsVerified != concurrent.res.ClaimsVerified {
 		t.Errorf("claims verified: serial %d, concurrent %d",
 			serial.res.ClaimsVerified, concurrent.res.ClaimsVerified)
 	}
 	for name, pair := range map[string][2]int{
+		"calls":       {serial.res.Calls, concurrent.res.Calls},
 		"judged":      {serial.res.PairsJudged, concurrent.res.PairsJudged},
 		"unjudged":    {serial.res.PairsUnjudged, concurrent.res.PairsUnjudged},
 		"confirmed":   {serial.res.PairsConfirmed, concurrent.res.PairsConfirmed},
@@ -283,4 +313,9 @@ func TestABatchPanicReachesTheCaller(t *testing.T) {
 	if !strings.Contains(fmt.Sprint(recovered), "malformed model output") {
 		t.Errorf("recovered %v, want the original panic carried through", recovered)
 	}
+}
+
+// pairsIn is a prompt's data pairs, for a failure message shorter than the prompt.
+func pairsIn(prompt string) string {
+	return strings.Join(promptPairRE.FindAllString(prompt, -1), "\n")
 }

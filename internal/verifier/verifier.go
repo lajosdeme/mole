@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"time"
 
@@ -271,12 +272,15 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 	// loop confirmed in, batch by batch, when Concurrency is 1.
 	for start := 0; start < len(batches); {
 		end := min(start+v.concurrency(), len(batches))
-		judged, missed, n, stop := v.runBatches(ctx, sessionID, batches[start:end], res)
+		groups, missed, n, stop := v.runBatchGroups(ctx, sessionID, batches[start:end], res)
+		var judged []Judged
 		// A fatal error fails a second look exactly as it failed the first, and the
 		// wave it came from has already spent its round trips; asking again only
 		// adds calls after the stop. The wave's first verdicts are kept unconfirmed.
 		if stop == nil || !isFatal(stop) {
-			judged = v.confirm(ctx, sessionID, judged, res)
+			judged = v.confirm(ctx, sessionID, groups, res)
+		} else {
+			judged = slices.Concat(groups...)
 		}
 		verdicts = append(verdicts, judged...)
 		unjudged = append(unjudged, missed...)
@@ -436,7 +440,8 @@ func confirms(mode ConfirmMode, e Effect) bool {
 }
 
 // confirm re-judges the verdicts that would build an edge, keeping only the
-// ones the model stands behind twice.
+// ones the model stands behind twice. groups holds one first-look batch's
+// verdicts each; the result is them all, in group order.
 //
 // Measured on 149 hand-labelled pairs from §14.2: a single judgement calls
 // "contradicts" correctly 51% of the time, and 50 of 51 graph-changing errors
@@ -455,12 +460,22 @@ func confirms(mode ConfirmMode, e Effect) bool {
 // Rests on one property it cannot check: the model must be able to disagree
 // with itself. Re-judging reproduced the stored verdict 54% of the time, so a
 // provider caching identical requests would make this a silent no-op.
-func (v *Verifier) confirm(ctx context.Context, sessionID string, judged []Judged, res *Result) []Judged {
+func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Judged, res *Result) []Judged {
+	judged := slices.Concat(groups...)
 	if len(judged) == 0 {
 		return judged
 	}
-	positives := positivesOf(judged, v.Confirm)
-	if len(positives) == 0 {
+
+	// Each first-look batch's positives are batched on their own, never merged with
+	// another batch's: a second look's prompt — and so, with a real model, its
+	// answer — is then the one a serial pass sends, whatever the concurrency. All
+	// the groups' second looks still go through one runBatches call, so they run
+	// concurrently, in group order then sub-batch order.
+	var batches [][]Pair
+	for _, g := range groups {
+		batches = append(batches, Batches(positivesOf(g, v.Confirm), v.BatchSize)...)
+	}
+	if len(batches) == 0 {
 		return judged
 	}
 
@@ -468,7 +483,7 @@ func (v *Verifier) confirm(ctx context.Context, sessionID string, judged []Judge
 	// The stop is dropped on purpose: a pair whose second look never happened keeps
 	// its first verdict (see above), and the next first-look wave meets the same
 	// allowance or provider and reports it.
-	again, _, _, _ := v.runBatches(ctx, sessionID, Batches(positives, v.BatchSize), res)
+	again, _, _, _ := v.runBatches(ctx, sessionID, batches, res)
 	for _, j := range again {
 		second[j.Pair.Key()] = j.Relation.Normalize()
 	}
@@ -551,6 +566,15 @@ type batchOutcome struct {
 // and those in batches never launched. consumed counts the pairs in launched
 // batches only.
 func (v *Verifier) runBatches(ctx context.Context, sessionID string, batches [][]Pair, res *Result) (judged []Judged, unjudged []Pair, consumed int, stop error) {
+	groups, unjudged, consumed, stop := v.runBatchGroups(ctx, sessionID, batches, res)
+	return slices.Concat(groups...), unjudged, consumed, stop
+}
+
+// runBatchGroups is runBatches with the verdicts kept per batch: groups[i] is
+// batches[i]'s, empty for a batch that was not launched or not answered. confirm
+// needs the grouping to batch each first-look batch's positives on their own.
+func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches [][]Pair, res *Result) (groups [][]Judged, unjudged []Pair, consumed int, stop error) {
+	groups = make([][]Judged, len(batches))
 	next := 0
 	for next < len(batches) && stop == nil {
 		sess, err := v.session(ctx, sessionID)
@@ -586,7 +610,6 @@ func (v *Verifier) runBatches(ctx context.Context, sessionID string, batches [][
 			}()
 		}
 		wg.Wait()
-		next += k
 		for _, o := range outcomes {
 			if o.panicked != nil {
 				panic(o.panicked)
@@ -594,18 +617,19 @@ func (v *Verifier) runBatches(ctx context.Context, sessionID string, batches [][
 		}
 
 		for i, o := range outcomes {
-			judged = append(judged, o.judged...)
+			groups[next+i] = o.judged
 			unjudged = append(unjudged, o.unjudged...)
 			consumed += len(wave[i])
 			if o.stop != nil && stop == nil {
 				stop = o.stop // the lowest-indexed batch's reason, as a serial pass would report
 			}
 		}
+		next += k
 	}
 	for _, batch := range batches[next:] {
 		unjudged = append(unjudged, batch...)
 	}
-	return judged, unjudged, consumed, stop
+	return groups, unjudged, consumed, stop
 }
 
 // waveSize is how many of the remaining batches the next wave may launch.
