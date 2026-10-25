@@ -37,6 +37,7 @@ answer — see ` + "`mole export`" + ` for the one on record.
 type reportOpts struct {
 	role        string
 	model       string
+	effort      string
 	maxFindings int
 	out         string
 	dbPath      string
@@ -64,6 +65,7 @@ func newReportCmd() *cobra.Command {
 	f.StringVar(&o.role, "role", string(llm.RoleStrong),
 		"role whose provider writes the report: strong, cheap or verifier")
 	f.StringVar(&o.model, "model", "", "override the role's model for this run")
+	f.StringVar(&o.effort, "effort", "", "synthesis effort: low, medium, high, xhigh or max (default medium)")
 	f.IntVar(&o.maxFindings, "max-findings", 0,
 		"findings the report is written from (0 for the session's own default)")
 	f.StringVarP(&o.out, "out", "o", "", "write here instead of stdout")
@@ -74,6 +76,9 @@ func cmdReport(ctx context.Context, sessionID string, o reportOpts, cfg *config.
 	newProvider func(llm.Config, *http.Client) (llm.Provider, error), stdout, stderr io.Writer) error {
 	if cfg == nil {
 		cfg = &config.Config{}
+	}
+	if !validEffort(o.effort) {
+		return fmt.Errorf("--effort %q: want low, medium, high, xhigh or max", o.effort)
 	}
 	role := llm.ModelRole(o.role)
 	provider, model, err := buildReportLLM(cfg, nil, role, o.model, newProvider)
@@ -87,7 +92,7 @@ func cmdReport(ctx context.Context, sessionID string, o reportOpts, cfg *config.
 	}
 	defer db.Close()
 
-	gen := &output.Generator{LLM: provider, MaxClaims: o.maxFindings}
+	gen := &output.Generator{LLM: provider, MaxClaims: o.maxFindings, Effort: o.effort}
 	rep, err := gen.Generate(ctx, db, sessionID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -177,6 +182,15 @@ func validReportRole(r llm.ModelRole) bool {
 		if r == want {
 			return true
 		}
+	}
+	return false
+}
+
+// validEffort reports whether e is empty or an effort level the API accepts.
+func validEffort(e string) bool {
+	switch e {
+	case "", "low", "medium", "high", "xhigh", "max":
+		return true
 	}
 	return false
 }

@@ -17,6 +17,7 @@ type fakeLLM struct {
 	mu      sync.Mutex
 	reply   func(prompt string) string
 	prompts []string
+	efforts []string
 	err     error
 	refused bool
 }
@@ -30,6 +31,7 @@ func (f *fakeLLM) Complete(ctx context.Context, req llm.Request) (*llm.Response,
 		prompt = req.Messages[0].Text
 	}
 	f.prompts = append(f.prompts, prompt)
+	f.efforts = append(f.efforts, req.Effort)
 	f.mu.Unlock()
 
 	resp := &llm.Response{Model: "fake-model", Usage: llm.Usage{InputTokens: 500, OutputTokens: 80}}
@@ -387,5 +389,23 @@ func TestUnsetDepthTakesTheDefault(t *testing.T) {
 	}
 	if got.Done {
 		t.Error("an unset depth stopped immediately instead of taking the default")
+	}
+}
+
+// TestPlannerCallsSendMediumEffort checks both planner calls ask for medium effort.
+func TestPlannerCallsSendMediumEffort(t *testing.T) {
+	f := &fakeLLM{reply: func(string) string { return plan("one") }}
+	p := &planner.Planner{LLM: f}
+	if _, err := p.InitialLeads(context.Background(), session("q")); err != nil {
+		t.Fatal(err)
+	}
+	d := planner.NewDigest("q", planner.DefaultDigestChars)
+	d.AddQuestions([]planner.SubQuestion{{ID: "q1", Text: "one"}})
+	f.reply = func(string) string { return `{"answered":[],"done":true,"questions":[]}` }
+	if _, err := p.Replan(context.Background(), session("q"), d, 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.efforts) != 2 || f.efforts[0] != "medium" || f.efforts[1] != "medium" {
+		t.Errorf("efforts = %q, want two medium", f.efforts)
 	}
 }

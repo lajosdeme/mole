@@ -201,3 +201,52 @@ func TestReportRefusesAnUnknownRole(t *testing.T) {
 		t.Error("a call was made despite the unknown role")
 	}
 }
+
+// TestReportSendsMediumEffortByDefault checks the rewrite asks for the generator's default effort.
+func TestReportSendsMediumEffortByDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.db")
+	sid, _ := seedReportSession(t, path, true)
+	factory, fake := reportFakeFactory("A finding [1].")
+
+	var out, errBuf bytes.Buffer
+	o := reportOpts{role: "strong", dbPath: path}
+	if err := cmdReport(context.Background(), sid, o, reportTestConfig(), factory, &out, &errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.got) != 1 || fake.got[0].Effort != "medium" {
+		t.Errorf("requests = %+v, want one at effort medium", fake.got)
+	}
+}
+
+// TestReportSendsTheEffortFlag checks --effort reaches the request.
+func TestReportSendsTheEffortFlag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.db")
+	sid, _ := seedReportSession(t, path, true)
+	factory, fake := reportFakeFactory("A finding [1].")
+
+	var out, errBuf bytes.Buffer
+	o := reportOpts{role: "strong", effort: "xhigh", dbPath: path}
+	if err := cmdReport(context.Background(), sid, o, reportTestConfig(), factory, &out, &errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.got) != 1 || fake.got[0].Effort != "xhigh" {
+		t.Errorf("requests = %+v, want one at effort xhigh", fake.got)
+	}
+}
+
+// TestReportRefusesAnUnknownEffort checks a bad --effort fails before any call.
+func TestReportRefusesAnUnknownEffort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.db")
+	sid, _ := seedReportSession(t, path, true)
+	factory, fake := reportFakeFactory("x")
+
+	var out, errBuf bytes.Buffer
+	o := reportOpts{role: "strong", effort: "extreme", dbPath: path}
+	err := cmdReport(context.Background(), sid, o, reportTestConfig(), factory, &out, &errBuf)
+	if err == nil || !strings.Contains(err.Error(), "low, medium, high, xhigh or max") {
+		t.Errorf("err = %v, want a refusal naming the valid efforts", err)
+	}
+	if len(fake.got) != 0 {
+		t.Error("a call was made despite the unknown effort")
+	}
+}
