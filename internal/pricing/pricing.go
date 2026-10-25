@@ -151,11 +151,11 @@ func defaultTable() map[string]Rates {
 		"claude-mythos-5":   perMTok(10, 50),
 		"claude-mythos-5-1": {Input: 10000, Output: 50000, CacheRead: 250, CacheWrite: 12500, CacheWrite1h: 20000},
 
-		"claude-opus-5":     perMTok(5, 25),
-		"claude-opus-5-5":   {Input: 4000, Output: 20000, CacheRead: 200, CacheWrite: 5000, CacheWrite1h: 8000},
-		"claude-opus-4-8":   perMTok(5, 25),
-		"claude-opus-4-7":   perMTok(5, 25),
-		"claude-opus-4-6":   perMTok(5, 25),
+		"claude-opus-5":   perMTok(5, 25),
+		"claude-opus-5-5": {Input: 4000, Output: 20000, CacheRead: 200, CacheWrite: 5000, CacheWrite1h: 8000},
+		"claude-opus-4-8": perMTok(5, 25),
+		"claude-opus-4-7": perMTok(5, 25),
+		"claude-opus-4-6": perMTok(5, 25),
 
 		"claude-sonnet-5":   perMTok(2, 10),
 		"claude-sonnet-5-5": {Input: 2000, Output: 10000, CacheRead: 100, CacheWrite: 2500, CacheWrite1h: 4000},
