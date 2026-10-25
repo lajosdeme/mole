@@ -319,3 +319,89 @@ func TestABatchPanicReachesTheCaller(t *testing.T) {
 func pairsIn(prompt string) string {
 	return strings.Join(promptPairRE.FindAllString(prompt, -1), "\n")
 }
+
+// fixedPairRetriever maps a claim ID to the one partner it is ever candidated
+// against, so a test can pin exactly which pairs — and so which batches — form,
+// independent of the lexical retriever's scoring.
+type fixedPairRetriever map[string]string
+
+func (f fixedPairRetriever) Candidates(_ context.Context, target *core.Claim, pool []*core.Claim, _ int) ([]*core.Claim, error) {
+	partner, ok := f[target.ID]
+	if !ok {
+		return nil, nil
+	}
+	for _, c := range pool {
+		if c.ID == partner {
+			return []*core.Claim{c}, nil
+		}
+	}
+	return nil, nil
+}
+
+// TestUnreachedPairsLeaveTheirClaimsUnverified. A pass that stops partway through
+// its batches — allowance, wall clock, or a fatal error — must not mark the claims
+// in a pair it never adjudicated. Marking them anyway would be permanent: the
+// pair has no edge, but persist's old behaviour treated every target as settled,
+// so CandidatePairs would never surface that pair's claims again either (their
+// VerifiedAt disqualifies them as targets) and the comparison that should have
+// happened never does.
+func TestUnreachedPairsLeaveTheirClaimsUnverified(t *testing.T) {
+	ctx := context.Background()
+	claims := idedClaims(6)
+
+	// One reservation's worth of allowance, so exactly one of the three disjoint
+	// pairs below gets adjudicated.
+	est := verifier.EstimateBatch(&verifier.Verifier{}, core.BudgetTokens, 1)
+	r := newRig(t, 4*est, claims, judgeEveryPair(verifier.RelNeither))
+	r.v.BatchSize = 1
+	r.v.MaxShareOfBudget = 0.25 // ceiling = est: room for exactly the first batch
+	r.v.Retriever = fixedPairRetriever{
+		"c_00": "c_01", "c_01": "c_00",
+		"c_02": "c_03", "c_03": "c_02",
+		"c_04": "c_05", "c_05": "c_04",
+	}
+	r.llm.usage = llm.Usage{InputTokens: est}
+
+	res, err := r.v.Run(ctx, r.sess.ID)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.PairsUnjudged != 2 {
+		t.Fatalf("%d pairs unjudged, want 2 — the rig no longer sets up three disjoint "+
+			"batches with room for only one", res.PairsUnjudged)
+	}
+	if res.ClaimsVerified != 2 {
+		t.Errorf("ClaimsVerified = %d, want 2 (only the judged pair's claims)", res.ClaimsVerified)
+	}
+
+	judged := map[string]bool{"c_00": true, "c_01": true}
+	byText := r.claims(t)
+	for i := 0; i < 6; i++ {
+		c := byText[fmt.Sprintf("Subword tokenization affects byte-level scaling in variant %d.", i)]
+		if c == nil {
+			t.Fatalf("claim %d not found", i)
+		}
+		want := judged[c.ID]
+		if got := c.VerifiedAt != nil; got != want {
+			t.Errorf("claim %s: VerifiedAt set = %v, want %v (judged=%v)", c.ID, got, want, want)
+		}
+	}
+
+	// A second pass with an ample allowance re-retrieves exactly the pairs left
+	// unjudged: CandidatePairs only skips a pair that already carries an edge, and
+	// an unjudged pair has none.
+	r.v.MaxShareOfBudget = 1
+	second, err := r.v.Run(ctx, r.sess.ID)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if second.PairsJudged != 2 {
+		t.Errorf("second pass judged %d pairs, want exactly the 2 left over", second.PairsJudged)
+	}
+	if second.PairsUnjudged != 0 {
+		t.Errorf("second pass left %d pairs unjudged", second.PairsUnjudged)
+	}
+	if n := r.unverified(t); n != 0 {
+		t.Errorf("%d claims still unverified after the second pass", n)
+	}
+}

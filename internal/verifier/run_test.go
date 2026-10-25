@@ -299,10 +299,13 @@ func TestVerificationCannotOutspendItsShare(t *testing.T) {
 	if res.PairsUnjudged == 0 {
 		t.Error("degraded but reported every pair judged")
 	}
-	// And the claims are still marked verified, or the work queue never drains and
-	// the next pass pays again for the same pairs.
-	if n := r.unverified(t); n != 0 {
-		t.Errorf("%d claims still unverified after a degraded pass", n)
+	// The pairs that DID get judged still mark their claims — the ceiling does not
+	// erase work already done. But with this little allowance against 20 mutually
+	// related claims, almost every claim has at least one candidate pair the ceiling
+	// never reached, so almost none of them may be marked: see
+	// TestUnreachedPairsLeaveTheirClaimsUnverified for the rule and why.
+	if n := r.unverified(t); n == 0 {
+		t.Error("every claim marked verified despite the ceiling leaving pairs unjudged")
 	}
 }
 
@@ -782,7 +785,14 @@ func TestPastTheStoreLimitClaimsStillGetVerified(t *testing.T) {
 			Source: fmt.Sprintf("https://s%03d.example/p", i),
 		})
 	}
-	r := newRig(t, 40_000_000, claims, judgeEveryPair(verifier.RelNeither))
+	// Unlimited tool calls: 505 claims need 501 batches of 8 to fully adjudicate, one
+	// more than newRig's default max_tool_calls of 500 — a hard, session-wide
+	// ceiling that (unlike the budget share) never has room again once it is hit.
+	// Binding it here would be testing that ceiling, not the store limit this test
+	// is for, and the five claims caught behind it would stay unverified forever
+	// (correctly, per TestUnreachedPairsLeaveTheirClaimsUnverified) rather than
+	// draining over the three passes below.
+	r := newRigWithCeilings(t, 40_000_000, 50, 0, claims, judgeEveryPair(verifier.RelNeither))
 	r.v.BatchSize = 8
 	r.v.MaxShareOfBudget = 0.9
 
@@ -1120,8 +1130,13 @@ func TestHittingMaxLeadsDoesNotBlockVerification(t *testing.T) {
 //
 // Marking is what drains the work queue, and doing it after a pass that could not
 // adjudicate at all records "we compared these and found nothing" when the truth is "we
-// never compared them". Distinct from a pass whose model answered uselessly — that one
-// HAS asked, and re-asking pays again for the same answer.
+// never compared them".
+//
+// A model that ANSWERS uselessly used to be treated as the other case — marked anyway,
+// on the theory that re-asking pays again for the same non-answer. That theory lost to
+// the rule this package now enforces everywhere else: a pair with no usable verdict was
+// never adjudicated, whatever stopped it from being one, so its claims stay unverified
+// and CandidatePairs retrieves the pair again (it has no edge either way).
 func TestAPassThatComparedNothingLeavesClaimsUnverified(t *testing.T) {
 	ctx := context.Background()
 
@@ -1145,16 +1160,26 @@ func TestAPassThatComparedNothingLeavesClaimsUnverified(t *testing.T) {
 		t.Errorf("the reason does not say the claims were left alone: %q", res.Degraded)
 	}
 
-	// A model that ANSWERS uselessly is the other case: the claims are marked, because
-	// re-asking would pay again for the same non-answer.
+	// A model that answers but gives nothing parseable: the call happens (Calls > 0,
+	// Degraded empty — nothing here looks like the ceiling stop above), yet every batch
+	// comes back with no usable verdict, so the claims are left exactly where the
+	// blocked pass left its own.
 	asked := newRig(t, 4_000_000, distinctClaims(6), func(int, string) (string, error) {
 		return "I decline to compare these.", nil
 	})
-	if _, err := asked.v.Run(ctx, asked.sess.ID); err != nil {
+	askedRes, err := asked.v.Run(ctx, asked.sess.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if n := asked.unverified(t); n != 0 {
-		t.Errorf("%d claims left unverified after the model was asked and answered badly", n)
+	if askedRes.Calls == 0 {
+		t.Fatal("the model was never called, so this is not the case under test")
+	}
+	if askedRes.Degraded != "" {
+		t.Fatalf("degraded = %q; this pass should look like one that simply got no answers",
+			askedRes.Degraded)
+	}
+	if n := asked.unverified(t); n != 6 {
+		t.Errorf("%d of 6 claims left unverified after the model was asked and answered uselessly", n)
 	}
 }
 

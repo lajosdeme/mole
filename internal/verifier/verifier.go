@@ -264,15 +264,13 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 
 	verdicts := free
 	var unjudged []Pair
-	// consumed is the pairs in batches actually sent to adjudicate.
-	consumed := 0
 	batches := Batches(pairs, v.BatchSize)
 	// One wave's worth of batches at a time, so each wave's positives are
 	// confirmed before the next wave spends the allowance — the order the serial
 	// loop confirmed in, batch by batch, when Concurrency is 1.
 	for start := 0; start < len(batches); {
 		end := min(start+v.concurrency(), len(batches))
-		groups, missed, n, stop := v.runBatchGroups(ctx, sessionID, batches[start:end], res)
+		groups, missed, _, stop := v.runBatchGroups(ctx, sessionID, batches[start:end], res)
 		var judged []Judged
 		// A fatal error fails a second look exactly as it failed the first, and the
 		// wave it came from has already spent its round trips; asking again only
@@ -284,7 +282,6 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		}
 		verdicts = append(verdicts, judged...)
 		unjudged = append(unjudged, missed...)
-		consumed += n
 
 		if stop != nil {
 			// Out of allowance, out of budget, or a fatal provider error. Keep what
@@ -321,7 +318,31 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		return res, nil
 	}
 
-	if err := v.persist(ctx, sessionID, pool, targets, verdicts, res); err != nil {
+	// A target whose pair was never adjudicated is excluded from marking: the pair
+	// carries no edge, so CandidatePairs retrieves it again next pass (it skips
+	// only a pair that already has one) — but only as long as the target still
+	// reads as unverified. Marking it anyway, as every pass used to, buried the
+	// pair for good: allowance, wall clock and a fatal provider error all stop a
+	// pass mid-batch, and "we marked it" then meant "we never compared it".
+	//
+	// Restricted to targets: the pair's other claim can be an already-verified pool
+	// claim, and nothing here withholds ITS confidence — no new edge touches it
+	// either, so there is nothing to withhold.
+	isTarget := make(map[string]bool, len(targets))
+	for _, c := range targets {
+		isTarget[c.ID] = true
+	}
+	skip := make(map[string]bool, len(unjudged)*2)
+	for _, p := range unjudged {
+		if isTarget[p.A.ID] {
+			skip[p.A.ID] = true
+		}
+		if isTarget[p.B.ID] {
+			skip[p.B.ID] = true
+		}
+	}
+
+	if err := v.persist(ctx, sessionID, pool, targets, verdicts, res, skip); err != nil {
 		return res, err
 	}
 
@@ -778,12 +799,18 @@ func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, batch []P
 	return judged, unjudged, nil
 }
 
-// persist writes the edges and marks every target claim verified.
+// persist writes the edges and marks every target claim verified, except one
+// named in skip.
 //
 // Both in one transaction. A pass that wrote edges but failed to mark the claims
 // would regenerate the same pairs next time and pay for them again; one that
 // marked them without the edges would lose the graph permanently.
-func (v *Verifier) persist(ctx context.Context, sessionID string, pool, targets []*core.Claim, verdicts []Judged, res *Result) error {
+//
+// skip is the targets whose pairs this pass never adjudicated (see Run). They get
+// neither verified_at nor a score row — ScoreClaims sets verified_at on every row
+// it is given, so a skipped claim must not appear in the rows at all, and its
+// existing confidence is left exactly as it was.
+func (v *Verifier) persist(ctx context.Context, sessionID string, pool, targets []*core.Claim, verdicts []Judged, res *Result, skip map[string]bool) error {
 	newEdges := Edges(sessionID, verdicts, v.StalenessGap)
 
 	// Confidence is derived over the WHOLE graph, not just this pass's edges. A new
@@ -796,7 +823,23 @@ func (v *Verifier) persist(ctx context.Context, sessionID string, pool, targets 
 	scores, breakdown := DeriveConfidence(pool, all)
 	res.Scores = breakdown
 
-	// Every target must be marked verified, whether or not the derivation covered it.
+	// A skipped target must not reach ScoreClaims at all: it sets verified_at on
+	// every row it is given, with no way to ask it to touch confidence alone. The
+	// derivation can still have produced a row for it — it is scored as part of
+	// pool regardless of whether this pass could reach its pairs — so it has to be
+	// pulled back out here rather than simply never added.
+	if len(skip) > 0 {
+		kept := scores[:0]
+		for _, sc := range scores {
+			if !skip[sc.ClaimID] {
+				kept = append(kept, sc)
+			}
+		}
+		scores = kept
+	}
+
+	// Every target not skipped must be marked verified, whether or not the
+	// derivation covered it.
 	//
 	// It was covered only as a side effect: scores come from `pool`, and while a session
 	// has fewer claims than the store's default limit, pool is a superset of targets so
@@ -809,7 +852,12 @@ func (v *Verifier) persist(ctx context.Context, sessionID string, pool, targets 
 	for _, sc := range scores {
 		scored[sc.ClaimID] = true
 	}
+	verified := 0
 	for _, c := range targets {
+		if skip[c.ID] {
+			continue
+		}
+		verified++
 		if !scored[c.ID] {
 			// Confidence 0 is correct here: the derivation did not see this claim's
 			// neighbourhood. What matters is that verified_at is set so the work queue
@@ -831,7 +879,7 @@ func (v *Verifier) persist(ctx context.Context, sessionID string, pool, targets 
 
 	res.EdgesWritten = len(newEdges)
 	res.writtenEdges = newEdges
-	res.ClaimsVerified = len(targets)
+	res.ClaimsVerified = verified
 	res.ClaimsScored = len(scores)
 	return nil
 }
