@@ -917,7 +917,7 @@ func newConfigCmd() *cobra.Command {
 		},
 		&cobra.Command{
 			Use: "test-llm", Short: "Make one cheap call and report model + cost", Args: cobra.NoArgs,
-			RunE: func(cmd *cobra.Command, _ []string) error { return cmdConfigTestLLM(cmd.Context()) },
+			RunE: func(cmd *cobra.Command, _ []string) error { return cmdConfigTestLLM(cmd.Context(), cmd.OutOrStdout()) },
 		},
 	)
 	return c
@@ -1373,34 +1373,34 @@ func resolveLLMRoles(cfg *config.Config) ([]llmRole, error) {
 	return out, nil
 }
 
-// buildConfiguredLLM builds one provider per distinct backend, routing roles when there is more than one.
-func buildConfiguredLLM(cfg *config.Config, client *http.Client,
-	newProvider func(llm.Config, *http.Client) (llm.Provider, error)) (llm.Provider, error) {
+// llmGroup is one built backend and the model of each role it serves.
+type llmGroup struct {
+	backend  llmBackend
+	members  map[llm.ModelRole]string
+	provider llm.Provider
+}
+
+// buildLLMGroups builds one provider per distinct backend and returns the resolved roles.
+func buildLLMGroups(cfg *config.Config, client *http.Client,
+	newProvider func(llm.Config, *http.Client) (llm.Provider, error)) ([]*llmGroup, []llmRole, error) {
 	roles, err := resolveLLMRoles(cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	type group struct {
-		backend  llmBackend
-		members  map[llm.ModelRole]string
-		provider llm.Provider
-	}
-	var groups []*group
-	byRole := map[llm.ModelRole]*group{}
+	var groups []*llmGroup
 	topLevel := llmBackend{kindOf(cfg.LLM.Provider), cfg.LLM.APIKey, cfg.LLM.BaseURL}
 	for _, r := range roles {
-		var g *group
+		var g *llmGroup
 		for _, existing := range groups {
 			if existing.backend == r.backend {
 				g = existing
 			}
 		}
 		if g == nil {
-			g = &group{backend: r.backend, members: map[llm.ModelRole]string{}}
+			g = &llmGroup{backend: r.backend, members: map[llm.ModelRole]string{}}
 			groups = append(groups, g)
 		}
 		g.members[r.role] = r.model
-		byRole[r.role] = g
 	}
 
 	for _, g := range groups {
@@ -1422,11 +1422,21 @@ func buildConfiguredLLM(cfg *config.Config, client *http.Client,
 		p, err := newProvider(c, client)
 		if err != nil {
 			if len(groups) > 1 {
-				return nil, fmt.Errorf("%s role: %w", strings.Join(roleNames(g.members), "/"), err)
+				return nil, nil, fmt.Errorf("%s role: %w", strings.Join(roleNames(g.members), "/"), err)
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		g.provider = p
+	}
+	return groups, roles, nil
+}
+
+// buildConfiguredLLM builds one provider per distinct backend, routing roles when there is more than one.
+func buildConfiguredLLM(cfg *config.Config, client *http.Client,
+	newProvider func(llm.Config, *http.Client) (llm.Provider, error)) (llm.Provider, error) {
+	groups, roles, err := buildLLMGroups(cfg, client, newProvider)
+	if err != nil {
+		return nil, err
 	}
 	if len(groups) == 1 {
 		return groups[0].provider, nil
@@ -1435,7 +1445,12 @@ func buildConfiguredLLM(cfg *config.Config, client *http.Client,
 	providers := map[llm.ModelRole]llm.Provider{}
 	models := map[llm.ModelRole]string{}
 	for _, r := range roles {
-		p := byRole[r.role].provider
+		var p llm.Provider
+		for _, g := range groups {
+			if g.backend == r.backend {
+				p = g.provider
+			}
+		}
 		providers[r.role] = p
 		models[r.role] = r.model
 		switch {
@@ -1459,16 +1474,14 @@ func roleNames(members map[llm.ModelRole]string) []string {
 	return names
 }
 
-// cmdConfigTestLLM makes the smallest possible real call.
-//
-// Auth, model name, and endpoint are all things that fail at the first call
-// rather than at configuration time. Discovering that twenty leads into a
-// session wastes the search spend already incurred, so this exists to fail
-// early and cheaply.
-func cmdConfigTestLLM(ctx context.Context) error {
+// cmdConfigTestLLM makes the smallest possible real call to each configured backend.
+func cmdConfigTestLLM(ctx context.Context, w io.Writer) error {
 	cfg, err := loadConfigForEdit()
 	if err != nil {
 		return err
+	}
+	if llmConfigured(cfg) {
+		return testLLMBackends(ctx, w, cfg, nil, llm.New)
 	}
 
 	provider, reason, err := buildLLM(cfg)
@@ -1478,13 +1491,49 @@ func cmdConfigTestLLM(ctx context.Context) error {
 	if provider == nil {
 		return errors.New("no model provider configured or detected (run: mole doctor)")
 	}
+	return pingLLM(ctx, w, cfg, "strong/cheap/verifier", provider, provider.ModelFor(llm.TierCheap), reason)
+}
 
-	model := provider.ModelFor(llm.TierCheap)
+// testLLMBackends pings each distinct backend once, printing a line per backend;
+// it fails when any ping fails.
+func testLLMBackends(ctx context.Context, w io.Writer, cfg *config.Config, client *http.Client,
+	newProvider func(llm.Config, *http.Client) (llm.Provider, error)) error {
+	groups, _, err := buildLLMGroups(cfg, client, newProvider)
+	if err != nil {
+		return err
+	}
+	var failed []string
+	for _, g := range groups {
+		roles := strings.Join(roleNames(g.members), "/")
+		if err := pingLLM(ctx, w, cfg, roles, g.provider, pingModel(g), ""); err != nil {
+			fmt.Fprintf(w, "✗ %s: %v\n", roles, err)
+			failed = append(failed, roles)
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("model check failed for %s", strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+// pingModel picks the cheapest-tier model a backend serves: cheap, then verifier, then strong.
+func pingModel(g *llmGroup) string {
+	for _, role := range []llm.ModelRole{llm.RoleCheap, llm.RoleVerifier} {
+		if m, ok := g.members[role]; ok {
+			return firstNonEmpty(m, g.provider.ModelFor(llm.TierCheap))
+		}
+	}
+	return firstNonEmpty(g.members[llm.RoleStrong], g.provider.ModelFor(llm.TierStrong))
+}
+
+// pingLLM makes one tiny call to model on provider and prints the reply, tokens and cost.
+func pingLLM(ctx context.Context, w io.Writer, cfg *config.Config, roles string, provider llm.Provider,
+	model, reason string) error {
 	src := llm.SourceOf(provider)
 	if reason != "" {
-		fmt.Printf("using %s via %s (%s)\n", model, src, reason)
+		fmt.Fprintf(w, "%s: %s via %s (%s)\n", roles, model, src, reason)
 	} else {
-		fmt.Printf("using %s via %s\n", model, src)
+		fmt.Fprintf(w, "%s: %s via %s\n", roles, model, src)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -1492,12 +1541,11 @@ func cmdConfigTestLLM(ctx context.Context) error {
 
 	resp, err := provider.Complete(ctx, llm.Request{
 		Tier:      llm.TierCheap,
+		Model:     model,
 		MaxTokens: 16,
 		Messages:  []llm.Message{llm.User("Reply with the single word: ok")},
 	})
 	if err != nil {
-		// Distinguish "your credential is wrong" from "the service hiccuped",
-		// because the fix is completely different.
 		switch {
 		case errors.Is(err, llm.ErrUnauthorized):
 			return fmt.Errorf("credential rejected by the provider: %w", err)
@@ -1512,28 +1560,28 @@ func cmdConfigTestLLM(ctx context.Context) error {
 		return fmt.Errorf("provider refused the request (category %q)", resp.RefusalCategory)
 	}
 
-	cost, perr := pricing.NewTable().Cost(resp.Model, pricing.Usage{
+	tbl := pricing.NewTable()
+	_ = tbl.Declare(cfg.Pricing)
+	cost, perr := tbl.Cost(resp.Model, pricing.Usage{
 		InputTokens:      resp.Usage.InputTokens,
 		OutputTokens:     resp.Usage.OutputTokens,
 		CacheReadTokens:  resp.Usage.CacheReadTokens,
 		CacheWriteTokens: resp.Usage.CacheWriteTokens,
 	})
 
-	fmt.Printf("✓ reply: %q\n", strings.TrimSpace(resp.Text))
-	fmt.Printf("  model: %s · %d in / %d out tokens · %v\n",
+	fmt.Fprintf(w, "✓ reply: %q\n", strings.TrimSpace(resp.Text))
+	fmt.Fprintf(w, "  model: %s · %d in / %d out tokens · %v\n",
 		resp.Model, resp.Usage.InputTokens, resp.Usage.OutputTokens,
 		resp.Elapsed.Round(time.Millisecond))
 
 	switch {
 	case perr != nil:
-		// An unpriced model is not a failure, but it does mean USD budgeting
-		// cannot work for it — better said now than discovered mid-session.
-		fmt.Printf("  cost:  unpriced — %v\n", perr)
-		fmt.Printf("         USD budgets will not work with this model; use --tokens\n")
+		fmt.Fprintf(w, "  cost:  unpriced — %v\n", perr)
+		fmt.Fprintf(w, "         USD budgets will not work with this model; use --tokens\n")
 	case cost.USDMicros == 0:
-		fmt.Printf("  cost:  free (local model)\n")
+		fmt.Fprintf(w, "  cost:  free (local model)\n")
 	default:
-		fmt.Printf("  cost:  %s\n", core.FormatUSD(cost.USDMicros))
+		fmt.Fprintf(w, "  cost:  %s\n", core.FormatUSD(cost.USDMicros))
 	}
 	return nil
 }
