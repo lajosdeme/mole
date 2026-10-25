@@ -636,7 +636,7 @@ func JudgePairFile(ctx context.Context, p llm.Provider, ps *PairSet, opts FileJu
 
 	judged, _ := verifier.JudgePairs(ctx, p, opts.Model, pairs, opts.BatchSize, log)
 	if opts.Confirm {
-		judged = confirmOnce(ctx, p, opts.Model, judged, opts.BatchSize, log)
+		judged = confirmOnce(ctx, p, opts.Model, pairs, judged, opts.BatchSize, log)
 	}
 
 	verdict := make(map[string]verifier.Judged, len(judged))
@@ -660,22 +660,31 @@ func JudgePairFile(ctx context.Context, p llm.Provider, ps *PairSet, opts FileJu
 	return out, nil
 }
 
-// confirmOnce re-judges contradicts and duplicate_of verdicts a second time and
-// applies verifier.ApplyConfirmations to the result.
-func confirmOnce(ctx context.Context, p llm.Provider, model string, judged []verifier.Judged, batchSize int, log *slog.Logger) []verifier.Judged {
-	var positives []verifier.Pair
+// confirmOnce re-judges contradicts and duplicate_of verdicts once more, batching each
+// first-look batch's positives on their own, and applies verifier.ApplyConfirmations.
+func confirmOnce(ctx context.Context, p llm.Provider, model string, pairs []verifier.Pair,
+	judged []verifier.Judged, batchSize int, log *slog.Logger) []verifier.Judged {
+	positive := map[string]bool{}
 	for _, j := range judged {
 		if j.Relation.EffectOf() != verifier.EffectInert {
-			positives = append(positives, j.Pair)
+			positive[j.Key()] = true
 		}
 	}
-	if len(positives) == 0 {
-		return judged
-	}
-	second, _ := verifier.JudgePairs(ctx, p, model, positives, batchSize, log)
-	again := make(map[string]verifier.Relation, len(second))
-	for _, j := range second {
-		again[j.Key()] = j.Relation.Normalize()
+	again := map[string]verifier.Relation{}
+	for _, batch := range verifier.Batches(pairs, batchSize) {
+		var group []verifier.Pair
+		for _, pair := range batch {
+			if positive[pair.Key()] {
+				group = append(group, pair)
+			}
+		}
+		if len(group) == 0 {
+			continue
+		}
+		second, _ := verifier.JudgePairs(ctx, p, model, group, batchSize, log)
+		for _, j := range second {
+			again[j.Key()] = j.Relation.Normalize()
+		}
 	}
 
 	out, _, _ := verifier.ApplyConfirmations(judged, again)

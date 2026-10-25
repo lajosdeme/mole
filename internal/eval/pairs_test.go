@@ -270,3 +270,30 @@ func TestRetiredLabelsNormalizeInFileMode(t *testing.T) {
 		t.Errorf("Correct = %d, want 1: scoring must not penalise a renamed verdict", s.Correct)
 	}
 }
+
+// TestConfirmBatchesSecondLooksPerFirstLookBatch checks positives from two first-look batches are not merged.
+func TestConfirmBatchesSecondLooksPerFirstLookBatch(t *testing.T) {
+	ps := &eval.PairSet{Pairs: []eval.LabelledPair{
+		{Pair: "a|b", A: "a", B: "b"}, {Pair: "c|d", A: "c", B: "d"},
+		{Pair: "e|f", A: "e", B: "f"}, {Pair: "g|h", A: "g", B: "h"},
+	}}
+	fake := &seqJudge{relations: [][]string{
+		{"neither", "contradicts", "contradicts"}, {"contradicts"},
+		{"contradicts", "contradicts"}, {"contradicts"},
+	}}
+
+	out, err := eval.JudgePairFile(context.Background(), fake, ps, eval.FileJudgeOptions{
+		Model: "fake", BatchSize: 3, Confirm: true,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.calls != 4 {
+		t.Fatalf("model called %d time(s), want 4 (two first looks, two second looks)", fake.calls)
+	}
+	for _, p := range out.Pairs[1:] {
+		if p.Model != "contradicts" {
+			t.Errorf("%s: Model = %q, want contradicts confirmed", p.Pair, p.Model)
+		}
+	}
+}

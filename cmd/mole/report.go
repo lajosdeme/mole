@@ -119,10 +119,12 @@ func cmdReport(ctx context.Context, sessionID string, o reportOpts, cfg *config.
 	return nil
 }
 
-// printReportCost reports what the run would have cost, priced from the
-// table the CLI already builds for the configured roles.
+// printReportCost reports what the run would have cost from the built-in and declared
+// rates, or "unpriced" for a model neither knows.
 func printReportCost(w io.Writer, cfg *config.Config, model string, cost core.Cost) {
-	c, err := pricingFor(cfg).Cost(model, pricing.Usage{
+	tbl := pricing.NewTable()
+	_ = tbl.Declare(cfg.Pricing)
+	c, err := tbl.Cost(model, pricing.Usage{
 		InputTokens: cost.InputTokens, OutputTokens: cost.OutputTokens,
 		CacheReadTokens: cost.CacheReadTokens, CacheWriteTokens: cost.CacheWriteTokens,
 	})
@@ -134,8 +136,8 @@ func printReportCost(w io.Writer, cfg *config.Config, model string, cost core.Co
 		model, cost.InputTokens, cost.OutputTokens, usd)
 }
 
-// buildReportLLM builds the provider for role, with its strong model set to
-// model when given.
+// buildReportLLM builds role's provider on one model: modelOverride, else the role's
+// model, else the provider's default for the role's tier.
 func buildReportLLM(cfg *config.Config, client *http.Client, role llm.ModelRole, modelOverride string,
 	newProvider func(llm.Config, *http.Client) (llm.Provider, error)) (llm.Provider, string, error) {
 	if !validReportRole(role) {
@@ -157,24 +159,56 @@ func buildReportLLM(cfg *config.Config, client *http.Client, role llm.ModelRole,
 		return nil, "", fmt.Errorf("--role %q: want strong, cheap or verifier", role)
 	}
 
-	model := picked.model
-	if modelOverride != "" {
-		model = modelOverride
+	model := firstNonEmpty(modelOverride, picked.model)
+	if model == "" && role == llm.RoleVerifier && picked.backend == roles[1].backend {
+		model = roles[1].model
 	}
-	if model == "" {
-		return nil, "", fmt.Errorf(
-			"no model configured for the %s role (set llm.%s-model, or pass --model)", role, role)
-	}
-
 	c := llm.Config{
 		Kind: picked.backend.kind, APIKey: picked.backend.key, BaseURL: picked.backend.baseURL,
 		Timeout: cfg.LLM.Timeout, StrongModel: model, CheapModel: model,
 	}
+	noModel := func(err error) error {
+		msg := fmt.Sprintf("no model configured for the %s role (set %s, or pass --model)", role, roleModelKeys(role))
+		if err != nil {
+			return fmt.Errorf("%s: %w", msg, err)
+		}
+		return errors.New(msg)
+	}
 	p, err := newProvider(c, client)
 	if err != nil {
+		if model == "" {
+			return nil, "", noModel(err)
+		}
+		return nil, "", err
+	}
+	if model != "" {
+		return p, model, nil
+	}
+
+	// The provider's default for the role's tier serves every call of this run.
+	tier := llm.TierCheap
+	if role == llm.RoleStrong {
+		tier = llm.TierStrong
+	}
+	if model = p.ModelFor(tier); model == "" {
+		return nil, "", noModel(nil)
+	}
+	c.StrongModel, c.CheapModel = model, model
+	if p, err = newProvider(c, client); err != nil {
 		return nil, "", err
 	}
 	return p, model, nil
+}
+
+// roleModelKeys names the settings that give role a model.
+func roleModelKeys(role llm.ModelRole) string {
+	switch role {
+	case llm.RoleStrong:
+		return "llm.model or llm.strong.model"
+	case llm.RoleCheap:
+		return "llm.cheap-model or llm.cheap.model"
+	}
+	return "llm.verifier-model or llm.verifier.model"
 }
 
 func validReportRole(r llm.ModelRole) bool {

@@ -3,15 +3,21 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/lajosdeme/mole/internal/budget"
+	"github.com/lajosdeme/mole/internal/config"
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/eval"
+	"github.com/lajosdeme/mole/internal/llm"
+	"github.com/lajosdeme/mole/internal/store"
+	"github.com/lajosdeme/mole/internal/store/sqlite"
 )
 
 // TestEvalExitsNonZeroOnARegression. CI runs this command directly, so the exit
@@ -164,7 +170,7 @@ func TestJudgeFromFileNeedsNoSession(t *testing.T) {
 	var stdout bytes.Buffer
 	err := cmdPairsJudgeFile(context.Background(), pairsJudgeFileOpts{
 		from: from, role: "verifier", model: "fake-model", out: out,
-	}, reportTestConfig(), factory, &stdout)
+	}, reportTestConfig(), factory, &stdout, &stdout)
 	if err != nil {
 		t.Fatalf("cmdPairsJudgeFile: %v", err)
 	}
@@ -191,5 +197,130 @@ func TestJudgeFromFileNeedsNoSession(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dir, "session.db")); !os.IsNotExist(err) {
 		t.Error("a database file exists; --from must need no session store")
+	}
+}
+
+// seedPairSession creates a session holding one contradicts edge and returns its id.
+func seedPairSession(t *testing.T, path string) string {
+	t.Helper()
+	ctx := context.Background()
+	sid, _ := seedReportSession(t, path, false)
+	db, err := sqlite.Open(path, sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	lead := core.Lead{ID: core.NewLeadID(), SessionID: sid, ActorType: core.ActorWeb, Query: "q", Status: core.LeadDone}
+	claims := []core.Claim{
+		{SessionID: sid, LeadID: lead.ID, Text: "X is true.", Source: "https://a.example/1", Quote: "x is true here"},
+		{SessionID: sid, LeadID: lead.ID, Text: "X is false.", Source: "https://b.example/1", Quote: "x is false here"},
+	}
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		if err := tx.InsertLead(ctx, &lead); err != nil {
+			return err
+		}
+		if err := tx.InsertClaims(ctx, claims); err != nil {
+			return err
+		}
+		return tx.InsertEdges(ctx, []core.ClaimEdge{
+			{SessionID: sid, FromID: claims[0].ID, ToID: claims[1].ID, Kind: core.EdgeContradicts, Weight: 0.9},
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return sid
+}
+
+const oneContradicts = `{"verdicts":[{"pair":1,"relation":"contradicts","confidence":0.9,"why":"opposite"}]}`
+
+// TestJudgeSessionUsesTheRoleAndModel checks session mode builds the role's provider on --model.
+func TestJudgeSessionUsesTheRoleAndModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.db")
+	sid := seedPairSession(t, path)
+	var built []llm.Config
+	fake := &reportFakeProvider{text: oneContradicts}
+	factory := func(c llm.Config, _ *http.Client) (llm.Provider, error) {
+		built = append(built, c)
+		fake.model = c.StrongModel
+		return fake, nil
+	}
+	cfg := reportTestConfig()
+	cfg.LLM.Cheap = &config.LLMRole{Provider: "openai-compatible", BaseURL: "http://localhost:11434/v1", Model: "qwen3:8b"}
+
+	var stdout, stderr bytes.Buffer
+	err := cmdPairsJudgeSession(context.Background(), pairsJudgeSessionOpts{
+		sessionID: sid, role: "cheap", model: "gemma4:12b", dbPath: path,
+	}, cfg, factory, &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(built) != 1 || built[0].BaseURL != "http://localhost:11434/v1" || built[0].StrongModel != "gemma4:12b" {
+		t.Errorf("built %+v, want the cheap role's endpoint on gemma4:12b", built)
+	}
+	if len(fake.got) != 1 || fake.got[0].Model != "gemma4:12b" {
+		t.Errorf("requests %+v, want one on gemma4:12b", fake.got)
+	}
+	var ps eval.PairSet
+	if err := json.Unmarshal(stdout.Bytes(), &ps); err != nil {
+		t.Fatalf("stdout is not a pair set: %v\n%s", err, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "re-judged by gemma4:12b") {
+		t.Errorf("summary not on stderr:\n%s", stderr.String())
+	}
+}
+
+// TestJudgeFromFileWritesOnlyJSONToStdout checks the summary goes to stderr in file mode.
+func TestJudgeFromFileWritesOnlyJSONToStdout(t *testing.T) {
+	from := filepath.Join(t.TempDir(), "pairs.json")
+	if err := eval.WritePairs(from, &eval.PairSet{Pairs: []eval.LabelledPair{
+		{Pair: "c1|c2", A: "X is true.", B: "X is false.", Label: "contradicts"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	factory, _ := reportFakeFactory(oneContradicts)
+
+	var stdout, stderr bytes.Buffer
+	if err := cmdPairsJudgeFile(context.Background(), pairsJudgeFileOpts{
+		from: from, role: "verifier", model: "fake-model",
+	}, reportTestConfig(), factory, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var ps eval.PairSet
+	if err := json.Unmarshal(stdout.Bytes(), &ps); err != nil {
+		t.Fatalf("stdout is not a pair set: %v\n%s", err, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "judged by fake-model") {
+		t.Errorf("summary not on stderr:\n%s", stderr.String())
+	}
+}
+
+// TestPairsJudgeRefusesMixedModes checks the session-only and file-only flags.
+func TestPairsJudgeRefusesMixedModes(t *testing.T) {
+	cases := []struct {
+		name    string
+		session bool
+		from    string
+		confirm bool
+		kinds   []string
+		labels  string
+		want    string
+	}{
+		{"neither", false, "", false, nil, "", "give a <session-id> or --from <file>"},
+		{"both", true, "p.json", false, nil, "", "not both"},
+		{"confirm on a session", true, "", true, nil, "", "--confirm"},
+		{"kind with from", false, "p.json", false, []string{"contradicts"}, "", "--kind"},
+		{"labels with from", false, "p.json", false, nil, "l.json", "--labels"},
+	}
+	for _, tc := range cases {
+		err := checkPairsJudgeArgs(tc.session, tc.from, tc.confirm, tc.kinds, tc.labels)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want one containing %q", tc.name, err, tc.want)
+		}
+	}
+	if err := checkPairsJudgeArgs(false, "p.json", true, nil, ""); err != nil {
+		t.Errorf("--from with --confirm refused: %v", err)
+	}
+	if err := checkPairsJudgeArgs(true, "", false, []string{"contradicts"}, "l.json"); err != nil {
+		t.Errorf("session with --kind and --labels refused: %v", err)
 	}
 }

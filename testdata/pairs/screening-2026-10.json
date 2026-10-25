@@ -269,7 +269,7 @@
       "why": "Same RAND attribution but conflicting failure figures of 62.2% versus 80.3%",
       "judged": true,
       "label": "contradicts",
-      "note": "true-contradiction: RAND 62.2% total vs RAND 80.3% \"fail to deliver business value\" — both framed as a single definitive total from the same 2025 RAND analysis —",
+      "note": "true-contradiction: RAND 62.2% total vs RAND 80.3% \"fail to deliver business value\" — both framed as a single definitive total from the same 2025 RAND analysis",
       "session": "s_06GQ5J268JSGA9R4",
       "run": "biz-09"
     },
@@ -285,7 +285,7 @@
       "why": "62.2% overall failure vs 80.3% failure rate for the same RAND study cannot both be the stated figure",
       "judged": true,
       "label": "contradicts",
-      "note": "true-contradiction: same 62.2% vs 80.3% conflict, duplicate claim id —",
+      "note": "true-contradiction: same 62.2% vs 80.3% conflict, duplicate claim id",
       "session": "s_06GQ5J268JSGA9R4",
       "run": "biz-09"
     },
@@ -333,7 +333,7 @@
       "why": "B restricts the 42% to most rather than at least one initiative, opposing A's scope",
       "judged": true,
       "label": "contradicts",
-      "note": "gross-vs-net: \"the 42% figure refers to most, not all\" clarifies the ALL/MOST axis, not the at-least-one/most axis A uses; plausibly compatible scopes —",
+      "note": "gross-vs-net: \"the 42% figure refers to most, not all\" clarifies the ALL/MOST axis, not the at-least-one/most axis A uses; plausibly compatible scopes",
       "session": "s_06GQ5J268JSGA9R4",
       "run": "biz-09"
     },
@@ -525,7 +525,7 @@
       "why": "20x versus 100x differ so both frequency multipliers cannot both hold",
       "judged": true,
       "label": "contradicts",
-      "note": "true-contradiction: both general, unscoped claims about the ICE-vs-EV fire-frequency multiplier (20x vs 100x); too far apart to be the same measurement —",
+      "note": "true-contradiction: both general, unscoped claims about the ICE-vs-EV fire-frequency multiplier (20x vs 100x); too far apart to be the same measurement",
       "session": "s_06GQ5J268H6ZGPR1",
       "run": "env-07"
     },
@@ -1005,7 +1005,7 @@
       "why": "A says water could not stop thermal runaway while B says water is the most effective method.",
       "judged": true,
       "label": "neither",
-      "note": "definition-vs-absence: \"water could not stop thermal runaway\" (inside the cell) vs \"water is the most effective way to put out\" the fire (external/overall) — different definitions of \"extinguish\" —",
+      "note": "definition-vs-absence: \"water could not stop thermal runaway\" (inside the cell) vs \"water is the most effective way to put out\" the fire (external/overall) — different definitions of \"extinguish\"",
       "session": "s_06GQ5J268H6ZGPR1",
       "run": "env-07"
     },
@@ -1069,7 +1069,7 @@
       "why": "Same 511 figure attributed to different time spans (2010–2024 vs 2020–2024)",
       "judged": true,
       "label": "contradicts",
-      "note": "scope-mismatch: same 511-fire count attributed to two different periods (2010-2024 vs 2020-2024); likely a secondary-source citation error, not a measured contradiction —",
+      "note": "scope-mismatch: same 511-fire count attributed to two different periods (2010-2024 vs 2020-2024); likely a secondary-source citation error, not a measured contradiction",
       "session": "s_06GQ5J268H6ZGPR1",
       "run": "env-07"
     },
@@ -1165,7 +1165,7 @@
       "why": "Slowing skill instability versus accelerating skill change cannot both hold of the same measure",
       "judged": true,
       "label": "neither",
-      "note": "definition-vs-absence: WEF's internal \"skill instability\" measure slowing vs Lightcast's independently defined \"pace of skill change\" accelerating — different organizations, different methodologies —",
+      "note": "definition-vs-absence: WEF's internal \"skill instability\" measure slowing vs Lightcast's independently defined \"pace of skill change\" accelerating — different organizations, different methodologies",
       "session": "s_06GQ5J269CE2JB31",
       "run": "fc-01"
     },
@@ -1181,7 +1181,7 @@
       "why": "One says skill instability slowed while the other says pace of change is accelerating",
       "judged": true,
       "label": "neither",
-      "note": "definition-vs-absence: same cross-organization methodology mismatch —",
+      "note": "definition-vs-absence: same cross-organization methodology mismatch",
       "session": "s_06GQ5J269CE2JB31",
       "run": "fc-01"
     },
@@ -1229,7 +1229,7 @@
       "why": "100,000 pieces per year versus 39,000–52,000 per year are incompatible magnitudes for the same quantity.",
       "judged": true,
       "label": "contradicts",
-      "note": "true-contradiction: 100,000 pieces/250g per year (Newcastle/WWF) vs 39,000-52,000 particles per year (PMC9920460) — different studies, no stated scope difference, order-of-magnitude apart —",
+      "note": "true-contradiction: 100,000 pieces/250g per year (Newcastle/WWF) vs 39,000-52,000 particles per year (PMC9920460) — different studies, no stated scope difference, order-of-magnitude apart",
       "session": "s_06GQ79PWCE6R8AKQ",
       "run": "mol-01"
     },
@@ -1405,7 +1405,7 @@
       "why": "both give an average particle count per liter of bottled water but differ by orders of magnitude",
       "judged": true,
       "label": "neither",
-      "note": "definition-vs-absence: 240,000 particles/L (NIH, newer nanoplastic-sensitive detection) vs 325 particles/L (Penn State, older microplastics-only method) — different particle-size detection thresholds, not the same measurement —",
+      "note": "definition-vs-absence: 240,000 particles/L (NIH, newer nanoplastic-sensitive detection) vs 325 particles/L (Penn State, older microplastics-only method) — different particle-size detection thresholds, not the same measurement",
       "session": "s_06GQ79PWCE6R8AKQ",
       "run": "mol-01"
     },
@@ -1485,7 +1485,7 @@
       "why": "one says 68,000 per day, the other 7,000-70,000 per year",
       "judged": true,
       "label": "contradicts",
-      "note": "true-contradiction: 68,000 particles/day (WEF) vs 7,000-70,000 per YEAR (2019 study) — even converting units these don't reconcile (68,000/day implies ~25M/year) —",
+      "note": "true-contradiction: 68,000 particles/day (WEF) vs 7,000-70,000 per YEAR (2019 study) — even converting units these don't reconcile (68,000/day implies ~25M/year)",
       "session": "s_06GQ79PWCE6R8AKQ",
       "run": "mol-01"
     },
@@ -1501,7 +1501,7 @@
       "why": "daily inhalation figures differ by orders of magnitude, so they cannot both be right as stated",
       "judged": true,
       "label": "neither",
-      "note": "true-contradiction: 68,000/day (WEF, broad estimate) vs \"up to 130/day\" (PMC11504042, a specific lab tidal-volume simulation) — same units, ~500x apart —",
+      "note": "true-contradiction: 68,000/day (WEF, broad estimate) vs \"up to 130/day\" (PMC11504042, a specific lab tidal-volume simulation) — same units, ~500x apart",
       "session": "s_06GQ79PWCE6R8AKQ",
       "run": "mol-01"
     },
@@ -1533,7 +1533,7 @@
       "why": "15 grams per month conflicts with about 21 grams per month for the same quantity",
       "judged": true,
       "label": "contradicts",
-      "note": "true-contradiction: Indonesia \"highest\" dietary intake at 15g/month vs a quoted ~21g/month figure elsewhere that would have to exceed the \"highest\" country if read as a global figure —",
+      "note": "true-contradiction: Indonesia \"highest\" dietary intake at 15g/month vs a quoted ~21g/month figure elsewhere that would have to exceed the \"highest\" country if read as a global figure",
       "session": "s_06GQ79PWCE6R8AKQ",
       "run": "mol-01"
     },
@@ -1789,7 +1789,7 @@
       "why": "A attributes the titled analysis to University of Newcastle while B attributes it to Dalberg",
       "judged": true,
       "label": "neither",
-      "note": "scope-mismatch: the same titled 2019 report attributed to University of Newcastle vs to Dalberg — in reality Dalberg prepared the report incorporating a Newcastle literature review, so both can be correct for different aspects —",
+      "note": "scope-mismatch: the same titled 2019 report attributed to University of Newcastle vs to Dalberg — in reality Dalberg prepared the report incorporating a Newcastle literature review, so both can be correct for different aspects",
       "session": "s_06GQ79PWCE6R8AKQ",
       "run": "mol-01"
     },
@@ -1805,7 +1805,7 @@
       "why": "Different sources credited for the same credit-card estimate",
       "judged": true,
       "label": "contradicts",
-      "note": "true-contradiction: same document cites Senathirajah et al. (2021) as the basis for the credit-card estimate in one place and Gruber et al. (2022) as its source in another —",
+      "note": "true-contradiction: same document cites Senathirajah et al. (2021) as the basis for the credit-card estimate in one place and Gruber et al. (2022) as its source in another",
       "session": "s_06GQ79PWCE6R8AKQ",
       "run": "mol-01"
     },
@@ -1949,7 +1949,7 @@
       "why": "Reported average ROI of 3.37 falls below the claimed over-5-to-1 return",
       "judged": true,
       "label": "neither",
-      "note": "true-contradiction: \"ROI exceeding 5 to 1\" across 20+ studies vs \"average calculated ROI ... was 3.37\" across fifteen studies — plausibly the same underlying meta-analysis reported two incompatible ways —",
+      "note": "true-contradiction: \"ROI exceeding 5 to 1\" across 20+ studies vs \"average calculated ROI ... was 3.37\" across fifteen studies — plausibly the same underlying meta-analysis reported two incompatible ways",
       "session": "s_06GQ79PW861GM8K3",
       "run": "ri-01"
     },
@@ -2013,7 +2013,7 @@
       "why": "one reports no significant financial effects while the other reports net savings in the same first-year window",
       "judged": true,
       "label": "neither",
-      "note": "scope-mismatch: the NBER study's null first-year result vs \"the peer-reviewed behavioral health benefits study\" reporting $1,070 net savings — different named studies, not necessarily the same program —",
+      "note": "scope-mismatch: the NBER study's null first-year result vs \"the peer-reviewed behavioral health benefits study\" reporting $1,070 net savings — different named studies, not necessarily the same program",
       "session": "s_06GQ79PW861GM8K3",
       "run": "ri-01"
     },
@@ -2365,7 +2365,7 @@
       "why": "A says about 50% offered programs while B says 69% in its sample offered programs",
       "judged": true,
       "label": "neither",
-      "note": "scope-mismatch: \"only about 50%\" (MIT Sloan review, 2021) vs \"69%\" (a DOL survey sample) — different surveys/populations, not stated as the same one —",
+      "note": "scope-mismatch: \"only about 50%\" (MIT Sloan review, 2021) vs \"69%\" (a DOL survey sample) — different surveys/populations, not stated as the same one",
       "session": "s_06GQ79PW861GM8K3",
       "run": "ri-01"
     },
@@ -2413,7 +2413,7 @@
       "why": "Different reported ROI figures ($2.73 absenteeism vs up to $6.00) from supposedly same review.",
       "judged": true,
       "label": "neither",
-      "note": "gross-vs-net: $2.73/$1 for a specific \"absenteeism costs\" sub-metric vs \"up to $6.00\" cited as the review's broader/headline figure — same review, different sub-metrics —",
+      "note": "gross-vs-net: $2.73/$1 for a specific \"absenteeism costs\" sub-metric vs \"up to $6.00\" cited as the review's broader/headline figure — same review, different sub-metrics",
       "session": "s_06GQ79PW861GM8K3",
       "run": "ri-01"
     }

@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -14,8 +16,6 @@ import (
 	"github.com/lajosdeme/mole/internal/llm"
 	"github.com/lajosdeme/mole/internal/verifier"
 	"github.com/spf13/cobra"
-	"log/slog"
-	"os"
 )
 
 // Adjudicator test sets (§11.2).
@@ -243,89 +243,28 @@ func newPairsJudgeCmd() *cobra.Command {
 			"very session being examined.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			if (len(args) == 1) == (from != "") {
-				return errors.New("give a <session-id> or --from <file>, not both")
+			if err := checkPairsJudgeArgs(len(args) == 1, from, confirm, kinds, labels); err != nil {
+				return err
 			}
-
 			cfg, err := config.Load()
 			if err != nil && !errors.Is(err, config.ErrNotConfigured) {
 				return err
 			}
-
 			if from != "" {
-				return cmdPairsJudgeFile(ctx, pairsJudgeFileOpts{
+				return cmdPairsJudgeFile(cmd.Context(), pairsJudgeFileOpts{
 					from: from, role: role, model: model, confirm: confirm, batch: batch, out: out,
-				}, cfg, llm.New, cmd.OutOrStdout())
+				}, cfg, llm.New, cmd.OutOrStdout(), cmd.ErrOrStderr())
 			}
-
-			if model == "" {
-				return errors.New("--model is required: the point is to compare a different one")
-			}
-			provider, _, err := buildLLM(cfg)
-			if err != nil {
-				return err
-			}
-			if provider == nil {
-				return errors.New("no model provider configured")
-			}
-
-			opts := eval.JudgeOptions{Model: model, BatchSize: batch, Kinds: kinds}
-			if labels != "" {
-				prior, err := eval.LoadPairs(labels)
-				if err != nil {
-					return fmt.Errorf("read labels: %w", err)
-				}
-				opts.Labels = eval.LabelsFrom(prior)
-				fmt.Printf("carried %d label(s) forward from %s\n", len(opts.Labels), labels)
-			}
-
-			db, err := openDBNoMigrate(ctx, dbPath(cmd))
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			ps, err := eval.JudgeSession(ctx, db, provider, args[0], opts,
-				slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
-			if err != nil {
-				return err
-			}
-
-			changed, unjudged := 0, 0
-			for _, p := range ps.Pairs {
-				if !p.Judged {
-					unjudged++
-					continue
-				}
-				if p.Model != p.Baseline {
-					changed++
-				}
-			}
-			fmt.Printf("%d pair(s) re-judged by %s: %d verdict(s) differ from the stored graph",
-				len(ps.Pairs), model, changed)
-			if unjudged > 0 {
-				fmt.Printf(", %d unanswered", unjudged)
-			}
-			fmt.Println()
-
-			if out == "" {
-				return eval.WritePairs("/dev/stdout", ps)
-			}
-			if err := eval.WritePairs(out, ps); err != nil {
-				return err
-			}
-			fmt.Printf("written to %s\n", out)
-			if len(opts.Labels) == 0 {
-				fmt.Println("Fill in \"label\" on each, then: mole pairs score " + out)
-			}
-			return nil
+			return cmdPairsJudgeSession(cmd.Context(), pairsJudgeSessionOpts{
+				sessionID: args[0], role: role, model: model, labels: labels, kinds: kinds,
+				batch: batch, out: out, dbPath: dbPath(cmd),
+			}, cfg, llm.New, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	f := c.Flags()
 	f.StringVar(&model, "model", "", "model to judge with, e.g. gemma4:12b")
 	f.StringVar(&role, "role", string(llm.RoleVerifier),
-		"role whose provider judges a --from file: strong, cheap or verifier")
+		"role whose provider judges: strong, cheap or verifier")
 	f.StringVar(&from, "from", "",
 		"judge a labelled pair file instead of a session; needs no database")
 	f.StringVarP(&out, "out", "o", "", "write here instead of stdout")
@@ -335,7 +274,7 @@ func newPairsJudgeCmd() *cobra.Command {
 		"only re-judge these stored verdicts, e.g. --kind contradicts (session mode only)")
 	f.IntVar(&batch, "batch", 0, "pairs per call; 0 uses the default, lower it if the model times out")
 	f.BoolVar(&confirm, "confirm", false,
-		"judge twice; a contradicts or duplicate_of verdict survives only if both agree")
+		"judge twice; a contradicts or duplicate_of verdict survives only if both agree (--from only)")
 	return c
 }
 
@@ -346,9 +285,97 @@ type pairsJudgeFileOpts struct {
 	batch                  int
 }
 
+// checkPairsJudgeArgs refuses a missing or doubled source and flags that do not apply
+// to the chosen mode.
+func checkPairsJudgeArgs(haveSession bool, from string, confirm bool, kinds []string, labels string) error {
+	switch {
+	case !haveSession && from == "":
+		return errors.New("give a <session-id> or --from <file>")
+	case haveSession && from != "":
+		return errors.New("give a <session-id> or --from <file>, not both")
+	case confirm && from == "":
+		return errors.New("--confirm needs --from <file>")
+	case from != "" && len(kinds) > 0:
+		return errors.New("--kind applies to a session, not --from")
+	case from != "" && labels != "":
+		return errors.New("--labels applies to a session, not --from")
+	}
+	return nil
+}
+
+// pairsJudgeSessionOpts configures a session-mode judge run.
+type pairsJudgeSessionOpts struct {
+	sessionID, role, model, labels, out, dbPath string
+	kinds                                       []string
+	batch                                       int
+}
+
+// cmdPairsJudgeSession re-judges a session's stored pairs on the role's provider and
+// writes nothing to the session.
+func cmdPairsJudgeSession(ctx context.Context, o pairsJudgeSessionOpts, cfg *config.Config,
+	newProvider func(llm.Config, *http.Client) (llm.Provider, error), stdout, stderr io.Writer) error {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	if o.model == "" {
+		return errors.New("--model is required: the point is to compare a different one")
+	}
+	provider, model, err := buildReportLLM(cfg, nil, llm.ModelRole(o.role), o.model, newProvider)
+	if err != nil {
+		return err
+	}
+
+	opts := eval.JudgeOptions{Model: model, BatchSize: o.batch, Kinds: o.kinds}
+	if o.labels != "" {
+		prior, err := eval.LoadPairs(o.labels)
+		if err != nil {
+			return fmt.Errorf("read labels: %w", err)
+		}
+		opts.Labels = eval.LabelsFrom(prior)
+		fmt.Fprintf(stderr, "carried %d label(s) forward from %s\n", len(opts.Labels), o.labels)
+	}
+
+	db, err := openDBNoMigrate(ctx, o.dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	ps, err := eval.JudgeSession(ctx, db, provider, o.sessionID, opts,
+		slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	if err != nil {
+		return err
+	}
+
+	changed, unjudged := 0, 0
+	for _, p := range ps.Pairs {
+		if !p.Judged {
+			unjudged++
+			continue
+		}
+		if p.Model != p.Baseline {
+			changed++
+		}
+	}
+	fmt.Fprintf(stderr, "%d pair(s) re-judged by %s: %d verdict(s) differ from the stored graph",
+		len(ps.Pairs), model, changed)
+	if unjudged > 0 {
+		fmt.Fprintf(stderr, ", %d unanswered", unjudged)
+	}
+	fmt.Fprintln(stderr)
+
+	if err := writePairSet(stdout, stderr, o.out, ps); err != nil {
+		return err
+	}
+	if o.out != "" && len(opts.Labels) == 0 {
+		fmt.Fprintln(stderr, "Fill in \"label\" on each, then: mole pairs score "+o.out)
+	}
+	return nil
+}
+
 // cmdPairsJudgeFile judges a labelled pair file with no store and no ledger.
 func cmdPairsJudgeFile(ctx context.Context, o pairsJudgeFileOpts, cfg *config.Config,
-	newProvider func(llm.Config, *http.Client) (llm.Provider, error), stdout io.Writer) error {
+	newProvider func(llm.Config, *http.Client) (llm.Provider, error), stdout, stderr io.Writer) error {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -364,7 +391,7 @@ func cmdPairsJudgeFile(ctx context.Context, o pairsJudgeFileOpts, cfg *config.Co
 
 	result, err := eval.JudgePairFile(ctx, provider, ps, eval.FileJudgeOptions{
 		Model: model, BatchSize: o.batch, Confirm: o.confirm,
-	}, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	}, slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	if err != nil {
 		return err
 	}
@@ -377,19 +404,28 @@ func cmdPairsJudgeFile(ctx context.Context, o pairsJudgeFileOpts, cfg *config.Co
 			unjudged++
 		}
 	}
-	fmt.Fprintf(stdout, "%d pair(s) judged by %s", judged, model)
+	fmt.Fprintf(stderr, "%d pair(s) judged by %s", judged, model)
 	if unjudged > 0 {
-		fmt.Fprintf(stdout, ", %d unanswered", unjudged)
+		fmt.Fprintf(stderr, ", %d unanswered", unjudged)
 	}
-	fmt.Fprintln(stdout)
+	fmt.Fprintln(stderr)
+	return writePairSet(stdout, stderr, o.out, result)
+}
 
-	if o.out == "" {
-		return eval.WritePairs("/dev/stdout", result)
-	}
-	if err := eval.WritePairs(o.out, result); err != nil {
+// writePairSet writes ps as JSON to path, or to stdout when path is empty.
+func writePairSet(stdout, stderr io.Writer, path string, ps *eval.PairSet) error {
+	if path == "" {
+		raw, err := json.MarshalIndent(ps, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = stdout.Write(append(raw, '\n'))
 		return err
 	}
-	fmt.Fprintf(stdout, "written to %s\n", o.out)
+	if err := eval.WritePairs(path, ps); err != nil {
+		return err
+	}
+	fmt.Fprintf(stderr, "written to %s\n", path)
 	return nil
 }
 

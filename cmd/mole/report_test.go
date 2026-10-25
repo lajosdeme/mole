@@ -12,6 +12,7 @@ import (
 	"github.com/lajosdeme/mole/internal/config"
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/llm"
+	"github.com/lajosdeme/mole/internal/pricing"
 	"github.com/lajosdeme/mole/internal/store"
 	"github.com/lajosdeme/mole/internal/store/sqlite"
 )
@@ -248,5 +249,96 @@ func TestReportRefusesAnUnknownEffort(t *testing.T) {
 	}
 	if len(fake.got) != 0 {
 		t.Error("a call was made despite the unknown effort")
+	}
+}
+
+// tieredFake serves a default model per tier when built without one.
+type tieredFake struct{ cfg llm.Config }
+
+func (f *tieredFake) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	return &llm.Response{Text: "ok", Model: f.ModelFor(req.Tier)}, nil
+}
+func (f *tieredFake) Name() string { return "tiered-fake" }
+func (f *tieredFake) ModelFor(tier llm.Tier) string {
+	if tier == llm.TierCheap {
+		return firstNonEmpty(f.cfg.CheapModel, "default-cheap")
+	}
+	return firstNonEmpty(f.cfg.StrongModel, "default-strong")
+}
+
+func tieredFactory(c llm.Config, _ *http.Client) (llm.Provider, error) {
+	return &tieredFake{cfg: c}, nil
+}
+
+// TestReportLLMFallsBackToTheProviderDefault checks each role's model when none is configured.
+func TestReportLLMFallsBackToTheProviderDefault(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{Provider: "anthropic", APIKey: "sk-ant-api03-x"}
+	for role, want := range map[llm.ModelRole]string{
+		llm.RoleStrong: "default-strong", llm.RoleCheap: "default-cheap", llm.RoleVerifier: "default-cheap",
+	} {
+		p, model, err := buildReportLLM(cfg, nil, role, "", tieredFactory)
+		if err != nil {
+			t.Fatalf("%s: %v", role, err)
+		}
+		if model != want || p.ModelFor(llm.TierStrong) != want {
+			t.Errorf("%s: model %q, strong tier %q, want %q", role, model, p.ModelFor(llm.TierStrong), want)
+		}
+	}
+}
+
+// TestReportLLMVerifierFollowsTheCheapModel checks a verifier with no model judges with the cheap one.
+func TestReportLLMVerifierFollowsTheCheapModel(t *testing.T) {
+	cfg := reportTestConfig()
+	_, model, err := buildReportLLM(cfg, nil, llm.RoleVerifier, "", tieredFactory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "claude-haiku-4-5" {
+		t.Errorf("verifier model = %q, want the cheap claude-haiku-4-5", model)
+	}
+}
+
+// TestReportLLMErrorNamesTheRealKey checks a missing model error names keys that exist.
+func TestReportLLMErrorNamesTheRealKey(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{Provider: "openai-compatible", BaseURL: "http://localhost:11434/v1"}
+	for role, want := range map[llm.ModelRole][]string{
+		llm.RoleStrong:   {"llm.model", "llm.strong.model"},
+		llm.RoleCheap:    {"llm.cheap-model", "llm.cheap.model"},
+		llm.RoleVerifier: {"llm.verifier-model", "llm.verifier.model"},
+	} {
+		_, _, err := buildReportLLM(cfg, nil, role, "", llm.New)
+		if err == nil {
+			t.Fatalf("%s: no error for a role with no model", role)
+		}
+		for _, key := range want {
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("%s: error lacks %q: %v", role, key, err)
+			}
+		}
+		if strings.Contains(err.Error(), "llm.strong-model") {
+			t.Errorf("%s: error names the nonexistent llm.strong-model: %v", role, err)
+		}
+	}
+}
+
+// TestReportCostSaysUnpricedForAnUnknownModel checks no fallback rate prices an unknown model.
+func TestReportCostSaysUnpricedForAnUnknownModel(t *testing.T) {
+	var buf bytes.Buffer
+	printReportCost(&buf, reportTestConfig(), "mystery-model", core.Cost{InputTokens: 1000, OutputTokens: 100})
+	if !strings.Contains(buf.String(), "unpriced") {
+		t.Errorf("an unknown model was priced:\n%s", buf.String())
+	}
+}
+
+// TestReportCostUsesDeclaredRates checks a declared rate prices its model.
+func TestReportCostUsesDeclaredRates(t *testing.T) {
+	cfg := reportTestConfig()
+	cfg.Pricing = map[string]pricing.RateConfig{"mystery-model": {Input: 1, Output: 1}}
+	var buf bytes.Buffer
+	printReportCost(&buf, cfg, "mystery-model", core.Cost{InputTokens: 1_000_000, OutputTokens: 0})
+	if !strings.Contains(buf.String(), "$1.00") {
+		t.Errorf("declared rate not used:\n%s", buf.String())
 	}
 }

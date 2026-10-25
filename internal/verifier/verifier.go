@@ -509,8 +509,8 @@ func positivesOf(judged []Judged, mode ConfirmMode) []Pair {
 	return out
 }
 
-// ApplyConfirmations keeps a positive verdict only when second agrees with it,
-// falling back to "neither" otherwise. second is keyed by Pair.Key.
+// ApplyConfirmations keeps a positive verdict second agrees with and sets "neither" where it
+// disagrees; a pair absent from second (keyed by Pair.Key) keeps its first verdict.
 func ApplyConfirmations(judged []Judged, second map[string]Relation) (out []Judged, confirmed, unconfirmed int) {
 	out = make([]Judged, 0, len(judged))
 	for _, j := range judged {
