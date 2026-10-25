@@ -197,7 +197,7 @@ type LLMConfig struct {
 }
 
 // LLMRole is one role's provider and model; empty fields inherit the top level,
-// except that a key is never inherited onto another provider or endpoint.
+// except that a role on another provider inherits nothing and another endpoint no key.
 type LLMRole struct {
 	Provider string `json:"provider,omitempty"`
 	APIKey   string `json:"api_key,omitempty"`
@@ -234,6 +234,10 @@ func (l LLMConfig) Resolve(role string) LLMRole {
 	}
 	if p := l.block(role); p != nil && *p != nil {
 		b := **p
+		// A role on another provider takes nothing from the top level.
+		if b.Provider != "" && providerKind(b.Provider) != providerKind(l.Provider) {
+			return b
+		}
 		r.Provider = firstNonEmpty(b.Provider, r.Provider)
 		r.BaseURL = firstNonEmpty(b.BaseURL, r.BaseURL)
 		r.Model = firstNonEmpty(b.Model, r.Model)

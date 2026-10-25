@@ -1319,6 +1319,14 @@ func verifierModelFor(cfg *config.Config) string {
 	return cfg.LLM.Resolve(string(llm.RoleVerifier)).Model
 }
 
+// kindOf returns a provider setting as a Kind, empty meaning anthropic.
+func kindOf(provider string) llm.Kind {
+	if provider == "" {
+		return llm.KindAnthropic
+	}
+	return llm.Kind(provider)
+}
+
 // llmBackend identifies one provider to build: roles sharing it share the provider.
 type llmBackend struct {
 	kind    llm.Kind
@@ -1339,11 +1347,7 @@ func roleSettings(cfg *config.Config) []llmRole {
 	var out []llmRole
 	for _, role := range llm.Roles {
 		r := cfg.LLM.Resolve(string(role))
-		kind := llm.Kind(r.Provider)
-		if kind == "" {
-			kind = llm.KindAnthropic
-		}
-		out = append(out, llmRole{role: role, backend: llmBackend{kind, r.APIKey, r.BaseURL}, model: r.Model})
+		out = append(out, llmRole{role: role, backend: llmBackend{kindOf(r.Provider), r.APIKey, r.BaseURL}, model: r.Model})
 	}
 	verifier, cheap := &out[2], out[1]
 	b := cfg.LLM.Verifier
@@ -1358,10 +1362,7 @@ func roleSettings(cfg *config.Config) []llmRole {
 func resolveLLMRoles(cfg *config.Config) ([]llmRole, error) {
 	out := roleSettings(cfg)
 	for _, r := range out {
-		kind := llm.Kind(cfg.LLM.Resolve(string(r.role)).Provider)
-		if kind == "" {
-			kind = llm.KindAnthropic
-		}
+		kind := kindOf(cfg.LLM.Resolve(string(r.role)).Provider)
 		if err := checkRoleKeyMatchesProvider(cfg, r.role, kind); err != nil {
 			return nil, err
 		}
@@ -1386,6 +1387,7 @@ func buildConfiguredLLM(cfg *config.Config, client *http.Client,
 	}
 	var groups []*group
 	byRole := map[llm.ModelRole]*group{}
+	topLevel := llmBackend{kindOf(cfg.LLM.Provider), cfg.LLM.APIKey, cfg.LLM.BaseURL}
 	for _, r := range roles {
 		var g *group
 		for _, existing := range groups {
@@ -1412,6 +1414,10 @@ func buildConfiguredLLM(cfg *config.Config, client *http.Client,
 		}
 		if !hasStrong {
 			c.StrongModel = c.CheapModel
+		}
+		// A top-level backend left by the strong role keeps llm.model as its tier default.
+		if c.StrongModel == "" && g.backend == topLevel {
+			c.StrongModel = cfg.LLM.Model
 		}
 		p, err := newProvider(c, client)
 		if err != nil {

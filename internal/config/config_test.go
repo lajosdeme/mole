@@ -467,3 +467,36 @@ func TestRoleOnAnotherEndpointNeverInheritsTheTopLevelKey(t *testing.T) {
 		}
 	}
 }
+
+// TestRoleOnAnotherProviderInheritsNothing checks a provider switch drops the top-level URL, key and model.
+func TestRoleOnAnotherProviderInheritsNothing(t *testing.T) {
+	top := config.LLMConfig{
+		Provider: "openai-compatible", APIKey: "sk-deepseek-top", BaseURL: "https://api.deepseek.com/v1",
+		Model: "deepseek-chat", CheapModel: "deepseek-chat", VerifierModel: "deepseek-chat",
+	}
+	cases := []struct {
+		name  string
+		block config.LLMRole
+	}{
+		{"no key, no model", config.LLMRole{Provider: "anthropic"}},
+		{"own key, no model", config.LLMRole{Provider: "anthropic", APIKey: "sk-ant-api03-own"}},
+		{"no key, own model", config.LLMRole{Provider: "anthropic", Model: "claude-opus-5-5"}},
+		{"own key, own model", config.LLMRole{Provider: "anthropic", APIKey: "sk-ant-api03-own", Model: "claude-opus-5-5"}},
+	}
+	for _, role := range []string{"strong", "verifier"} {
+		for _, tc := range cases {
+			l := top
+			block := tc.block
+			if role == "strong" {
+				l.Strong = &block
+			} else {
+				l.Verifier = &block
+			}
+			got := l.Resolve(role)
+			want := config.LLMRole{Provider: "anthropic", APIKey: tc.block.APIKey, Model: tc.block.Model}
+			if got != want {
+				t.Errorf("%s %s: resolved %+v, want %+v", role, tc.name, got, want)
+			}
+		}
+	}
+}

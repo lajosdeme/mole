@@ -323,3 +323,75 @@ func TestRoleOnAnotherEndpointGetsNoTopLevelKey(t *testing.T) {
 		}
 	}
 }
+
+// TestAnthropicRoleOverDeepSeekNeverGetsTheDeepSeekEndpoint checks each built anthropic backend's URL and key.
+func TestAnthropicRoleOverDeepSeekNeverGetsTheDeepSeekEndpoint(t *testing.T) {
+	blocks := []config.LLMRole{
+		{Provider: "anthropic"},
+		{Provider: "anthropic", APIKey: "sk-ant-api03-own"},
+		{Provider: "anthropic", Model: "claude-opus-5-5"},
+		{Provider: "anthropic", APIKey: "sk-ant-api03-own", Model: "claude-opus-5-5"},
+	}
+	for _, role := range []string{"strong", "verifier"} {
+		for _, b := range blocks {
+			cfg := &config.Config{}
+			cfg.LLM = config.LLMConfig{
+				Provider: "openai-compatible", APIKey: "sk-deepseek-top", BaseURL: "https://api.deepseek.com/v1",
+				Model: "deepseek-chat", VerifierModel: "deepseek-chat",
+			}
+			block := b
+			if role == "strong" {
+				cfg.LLM.Strong = &block
+			} else {
+				cfg.LLM.Verifier = &block
+			}
+			factory, built := recordingFactory()
+			_, err := buildConfiguredLLM(cfg, nil, factory)
+			if role == "verifier" && b.Model == "" {
+				if err == nil || !strings.Contains(err.Error(), "llm.verifier.model") {
+					t.Errorf("verifier %+v: err = %v, want one naming llm.verifier.model", b, err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("%s %+v: %v", role, b, err)
+			}
+			var sawAnthropic bool
+			for _, p := range *built {
+				if p.cfg.Kind != llm.KindAnthropic {
+					continue
+				}
+				sawAnthropic = true
+				if p.cfg.BaseURL != "" || p.cfg.APIKey != b.APIKey {
+					t.Errorf("%s %+v: anthropic backend got URL %q, key %q", role, b, p.cfg.BaseURL, p.cfg.APIKey)
+				}
+				if m := p.cfg.StrongModel + p.cfg.CheapModel; strings.Contains(m, "deepseek") {
+					t.Errorf("%s %+v: anthropic backend got model %q", role, b, m)
+				}
+			}
+			if !sawAnthropic {
+				t.Errorf("%s %+v: no anthropic backend built", role, b)
+			}
+		}
+	}
+}
+
+// TestAnthropicStrongRoleWithoutAModelUsesTheProviderDefault checks the strong default on a provider switch.
+func TestAnthropicStrongRoleWithoutAModelUsesTheProviderDefault(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{
+		Provider: "openai-compatible", APIKey: "sk-deepseek-top", BaseURL: "https://api.deepseek.com/v1",
+		Model: "deepseek-chat", VerifierModel: "deepseek-chat",
+	}
+	cfg.LLM.Strong = &config.LLMRole{Provider: "anthropic", APIKey: "sk-ant-api03-own"}
+	p, err := buildConfiguredLLM(cfg, nil, llm.New)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.ModelFor(llm.TierStrong); got != llm.DefaultAnthropicStrong {
+		t.Errorf("strong model = %q, want %q", got, llm.DefaultAnthropicStrong)
+	}
+	if got := p.ModelFor(llm.TierCheap); got != "deepseek-chat" {
+		t.Errorf("cheap model = %q, want deepseek-chat", got)
+	}
+}
