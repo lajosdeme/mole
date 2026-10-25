@@ -23,8 +23,10 @@ import (
 )
 
 // TestBatchesRunConcurrently. Each call blocks until four are in flight (or
-// 200 ms pass), so a serial loop shows a peak of one and an unbounded one more
-// than four.
+// 1 s passes), so a serial loop shows a peak of one and an unbounded one more
+// than four. A second rather than 200 ms, so a slow scheduler (-race, a loaded
+// CI machine) cannot time the first three out before the fourth starts and
+// report a peak below four for a pool that is working.
 func TestBatchesRunConcurrently(t *testing.T) {
 	const want = 4
 
@@ -47,7 +49,7 @@ func TestBatchesRunConcurrently(t *testing.T) {
 
 		select {
 		case <-g:
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(time.Second):
 		}
 
 		mu.Lock()
@@ -480,4 +482,56 @@ func TestUnreachedPairsKeepTheirDerivedConfidence(t *testing.T) {
 	if n := r.unverified(t); n != 0 {
 		t.Errorf("%d claims still unverified after the second pass", n)
 	}
+}
+
+// TestAFatalSecondLookStopsLaterWaves. confirm dropped its stop error, on the
+// reasoning that the next first-look wave would meet the same failure and report
+// it. True, but only by paying for that wave: a bad credential on a second look
+// fails every call after it alike, so the pass must stop there, as it does for a
+// fatal first look.
+func TestAFatalSecondLookStopsLaterWaves(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		asked = map[string]int{}
+		first int
+	)
+	r := newRig(t, 2_000_000, idedClaims(6), func(call int, prompt string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, m := range promptPairRE.FindAllStringSubmatch(prompt, -1) {
+			key := m[2] + "|" + m[3]
+			asked[key]++
+			if asked[key] > 1 {
+				return "", llm.ErrUnauthorized
+			}
+		}
+		first++
+		return judgeEveryPair(verifier.RelContradicts)(call, prompt)
+	})
+	r.v.BatchSize = 1
+	r.v.Concurrency = 1 // one first-look batch per wave: three waves
+	r.v.Confirm = verifier.ConfirmBoth
+	r.v.Retriever = fixedPairRetriever{
+		"c_00": "c_01", "c_01": "c_00",
+		"c_02": "c_03", "c_03": "c_02",
+		"c_04": "c_05", "c_05": "c_04",
+	}
+
+	res, err := r.v.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if first != 1 {
+		t.Errorf("%d first-look call(s); a fatal second look must stop the waves after it", first)
+	}
+	if got := r.llm.count(); got != 2 {
+		t.Errorf("%d calls, want 2: the first look and the second look that failed", got)
+	}
+	if !strings.Contains(res.Degraded, "unauthorized") {
+		t.Errorf("degraded = %q, want the fatal cause named", res.Degraded)
+	}
+	if res.PairsUnjudged != 2 {
+		t.Errorf("%d pairs unjudged, want the 2 never sent", res.PairsUnjudged)
+	}
+	r.assertNothingHeld(t, "fatal second look")
 }

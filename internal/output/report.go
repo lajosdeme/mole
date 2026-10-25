@@ -175,7 +175,7 @@ func (g *Generator) Generate(ctx context.Context, st store.Store, sessionID stri
 		// not missing: they are in the session, and a consumer rendering it
 		// shows them. Saying they "did not fit" described a shortfall that had
 		// not happened.
-		rep.Degraded = fmt.Sprintf("written from the %d highest-confidence findings",
+		rep.Degraded = fmt.Sprintf("written from the %d highest-ranked findings",
 			len(findings))
 	}
 	rep.Findings = findings

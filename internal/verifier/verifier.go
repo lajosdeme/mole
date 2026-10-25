@@ -137,6 +137,13 @@ const DefaultMaxShareOfBudget = 0.25
 // holds before any of them settles — stays modest. Adjudication does not retry, so
 // a provider that rate-limits the burst costs the limited batches their verdicts;
 // that, not throughput, is what would argue for a different number.
+//
+// Two costs of a wave over a serial pass. Its reservations are all taken before
+// any settles, so the verifier's share can be overshot by up to Concurrency
+// calls' estimate error rather than one call's. And under a tight allowance the
+// wave's first looks spend before any of their second looks do, so fewer
+// positives get confirmed than a serial pass, which confirmed batch by batch,
+// would manage.
 const DefaultConcurrency = 4
 
 // Result reports what one pass did.
@@ -282,7 +289,16 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		// wave it came from has already spent its round trips; asking again only
 		// adds calls after the stop. The wave's first verdicts are kept unconfirmed.
 		if stop == nil || !isFatal(stop) {
-			judged = v.confirm(ctx, sessionID, groups, res)
+			var confirmStop error
+			judged, confirmStop = v.confirm(ctx, sessionID, groups, res)
+			// A fatal second look stops the pass as a fatal first look does: every
+			// call after it fails alike, so the next wave would only pay to find
+			// out. A non-fatal one (the allowance) is left for the next wave's
+			// first look to meet and report — it is that wave's reservation that
+			// says whether there is room.
+			if stop == nil && confirmStop != nil && isFatal(confirmStop) {
+				stop = confirmStop
+			}
 		} else {
 			judged = slices.Concat(groups...)
 		}
@@ -494,13 +510,16 @@ func confirms(mode ConfirmMode, e Effect) bool {
 // this mode skips — KEEPS its first verdict. No edges at all because a second
 // opinion was unaffordable is worse than the graph this replaces.
 //
+// The stop is returned for Run to act on, not acted on here: the verdicts are
+// kept either way, and only Run knows whether later waves are still to launch.
+//
 // Rests on one property it cannot check: the model must be able to disagree
 // with itself. Re-judging reproduced the stored verdict 54% of the time, so a
 // provider caching identical requests would make this a silent no-op.
-func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Judged, res *Result) []Judged {
+func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Judged, res *Result) ([]Judged, error) {
 	judged := slices.Concat(groups...)
 	if len(judged) == 0 {
-		return judged
+		return judged, nil
 	}
 
 	// Each first-look batch's positives are batched on their own, never merged with
@@ -513,18 +532,17 @@ func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Jud
 		batches = append(batches, Batches(positivesOf(g, v.Confirm), v.BatchSize)...)
 	}
 	if len(batches) == 0 {
-		return judged
+		return judged, nil
 	}
 
 	second := map[string]Relation{}
-	// The stop is dropped on purpose: a pair whose second look never happened keeps
-	// its first verdict (see above), and the next first-look wave meets the same
-	// allowance or provider and reports it.
-	again, _, _, _, _ := v.runBatches(ctx, sessionID, batches, res)
+	// A pair whose second look never happened keeps its first verdict (see above),
+	// whatever the stop.
+	again, _, _, _, stop := v.runBatches(ctx, sessionID, batches, res)
 	for _, j := range again {
 		second[j.Pair.Key()] = j.Relation.Normalize()
 	}
-	return v.applyConfirmations(judged, second, res)
+	return v.applyConfirmations(judged, second, res), stop
 }
 
 // positivesOf is the subset worth a second call: verdicts building an edge of a kind
