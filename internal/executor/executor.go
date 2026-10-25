@@ -297,10 +297,10 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 		// batch of claims never got a verify pass.
 		//
 		// Reported as max_wallclock — it is the wall clock that stopped research,
-		// only earlier — and mole-backend's runner reports that string.
+		// only earlier — and mole-backend's runner reports that string. The verify
+		// pass itself runs after the loop, with every other ceiling stop's.
 		if reserve := finishReserve(sess.MaxWallClock, e.FinishReserve); reserve > 0 &&
 			!now.Before(sess.CreatedAt.Add(sess.MaxWallClock-reserve)) {
-			e.verify(ctx, digest, res)
 			res.Status = core.StatusExhausted
 			res.StoppedBecause = "max_wallclock"
 			e.logger().InfoContext(ctx, "stopping research inside the finishing reserve",
@@ -500,6 +500,17 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 				depth++
 			}
 		}
+	}
+
+	// A ceiling stop verifies what research found, whichever ceiling it was. Only
+	// the finishing reserve used to: a run that hit max_leads or max_tool_calls
+	// between replan boundaries left that batch of claims unverified, and every
+	// one reached the report at confidence 0. One pass, here, covers the finishing
+	// reserve too, so it cannot run twice. A pass the ledger refuses — out of
+	// money, calls or clock — leaves the claims unverified rather than marking
+	// them, and a pass with nothing new to judge returns before any call.
+	if res.Status == core.StatusExhausted && ctx.Err() == nil {
+		e.verify(ctx, digest, res)
 	}
 
 	// Without a live context this read fails on a timed-out or cancelled run —

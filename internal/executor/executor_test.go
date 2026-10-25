@@ -1972,6 +1972,53 @@ func TestLoopStopsLeasingInsideTheFinishReserve(t *testing.T) {
 	}
 }
 
+// TestEveryCeilingStopVerifiesWhatResearchFound. Only the finishing reserve used to
+// run a last verify pass; a run that stopped on another ceiling between replan
+// boundaries left that batch of claims unverified, and every one of them reached the
+// report at confidence 0. Here max_leads fires two leads into a three-lead replan
+// cadence, so no in-loop pass ever ran.
+func TestEveryCeilingStopVerifiesWhatResearchFound(t *testing.T) {
+	fl := &verifierLLM{plans: []string{planJSON("a", "b", "c")}, relation: "duplicate_of"}
+	r := newRigFromSpec(t, budget.SessionSpec{
+		Budget: 5 * core.MicrosPerUSD, MaxLeads: 2, MaxToolCalls: 200,
+	}, nil, distinctClaims)
+	r.exec.Planner = &planner.Planner{LLM: fl, MaxInitialLeads: 3, ReplanEvery: 3, MaxDepth: 1}
+	r.withVerifier(fl)
+
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != core.StatusExhausted || res.StoppedBecause != "max_leads" {
+		t.Fatalf("status = %s (%q), want %s on max_leads", res.Status, res.StoppedBecause, core.StatusExhausted)
+	}
+	if res.VerifyPasses != 1 {
+		t.Errorf("verify passes = %d, want exactly 1 after the ceiling stop", res.VerifyPasses)
+	}
+	var claims, unverified int
+	if err := r.db.Read(context.Background(), func(ctx context.Context, q store.Queries) error {
+		list, err := q.ListClaims(ctx, r.sess.ID, 0)
+		if err != nil {
+			return err
+		}
+		claims = len(list)
+		for _, c := range list {
+			if c.VerifiedAt == nil {
+				unverified++
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if claims == 0 {
+		t.Fatal("no claims gathered; the test proves nothing")
+	}
+	if unverified != 0 {
+		t.Errorf("%d of %d claim(s) left unverified after a max_leads stop", unverified, claims)
+	}
+}
+
 // TestLoopLeasesBeforeTheReserve. A minute into ten, the reserve is far off.
 func TestLoopLeasesBeforeTheReserve(t *testing.T) {
 	r := wallClockRig(t, 10*time.Minute, time.Minute)
