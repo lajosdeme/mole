@@ -32,6 +32,9 @@ type scriptedLLM struct {
 	// elapsed is what Complete reports as the call's wall-clock time. Zero
 	// unless a test sets it, so every existing test is unaffected.
 	elapsed time.Duration
+	// usage is what each call reports spending. Zero takes 400 in / 80 out, so
+	// only a test that needs charges to land exactly on a reservation sets it.
+	usage llm.Usage
 }
 
 // requestedModels is what each call asked for, so a test can see whether an override
@@ -57,10 +60,14 @@ func (s *scriptedLLM) Complete(_ context.Context, req llm.Request) (*llm.Respons
 	s.mu.Unlock()
 
 	text, err := s.reply(i, prompt)
+	usage := s.usage
+	if usage.IsZero() {
+		usage = llm.Usage{InputTokens: 400, OutputTokens: 80}
+	}
 	resp := &llm.Response{
 		Model:   "fake-model",
 		Text:    text,
-		Usage:   llm.Usage{InputTokens: 400, OutputTokens: 80},
+		Usage:   usage,
 		Elapsed: s.elapsed,
 	}
 	return resp, err
@@ -317,19 +324,25 @@ func TestNothingIsLeftHeld(t *testing.T) {
 		if _, err := r.v.Run(context.Background(), r.sess.ID); err != nil {
 			t.Fatalf("%s: run: %v", name, err)
 		}
+		r.assertNothingHeld(t, name)
+	}
+}
 
-		after := r.reload(t)
-		if after.Held != 0 {
-			t.Errorf("%s: %d still held", name, after.Held)
-		}
-		v, err := r.led.Verify(context.Background(), r.sess.ID)
-		if err != nil {
-			t.Fatalf("%s: verify: %v", name, err)
-		}
-		if !v.Consistent() {
-			t.Errorf("%s: ledger drift: spent recorded=%d ledger=%d",
-				name, v.SpentRecorded, v.SpentFromLedger)
-		}
+// assertNothingHeld fails the test if any reservation is still held or the
+// session's recorded spend has drifted from the ledger's.
+func (r *rig) assertNothingHeld(t *testing.T, label string) {
+	t.Helper()
+	after := r.reload(t)
+	if after.Held != 0 {
+		t.Errorf("%s: %d still held", label, after.Held)
+	}
+	v, err := r.led.Verify(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatalf("%s: verify: %v", label, err)
+	}
+	if !v.Consistent() {
+		t.Errorf("%s: ledger drift: spent recorded=%d ledger=%d",
+			label, v.SpentRecorded, v.SpentFromLedger)
 	}
 }
 
@@ -341,6 +354,9 @@ func TestAFatalProviderErrorStopsRatherThanRepeating(t *testing.T) {
 		return "", llm.ErrUnauthorized
 	})
 	r.v.BatchSize = 2
+	// Serial, so "one call" is exact. Concurrently the first wave is already in
+	// flight when the error comes back; TestFatalErrorStopsLaterWaves pins that.
+	r.v.Concurrency = 1
 
 	res, err := r.v.Run(context.Background(), r.sess.ID)
 	if err != nil {

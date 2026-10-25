@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -57,6 +58,10 @@ type Verifier struct {
 	// default.
 	BatchSize int
 
+	// Concurrency is how many adjudication calls may be in flight at once. Zero
+	// takes DefaultConcurrency; 1 is the serial pass. See runBatches.
+	Concurrency int
+
 	// Confirm chooses which edge kinds need a second agreeing judgement before the
 	// edge is written. The zero value confirms nothing — callers opt in, as they did
 	// when this was a bool. See ConfirmMode for the measurement.
@@ -95,10 +100,14 @@ type Verifier struct {
 	Log *slog.Logger
 
 	// spent accumulates this Verifier's charges within one process. Reconciled against
-	// the ledger before each batch — see remainingAllowance — because an in-memory
-	// counter restarts at zero for a second Verifier on the same session, and the cap
-	// is supposed to bind on the SESSION.
+	// the ledger before each wave of batches — see remainingAllowance — because an
+	// in-memory counter restarts at zero for a second Verifier on the same session, and
+	// the cap is supposed to bind on the SESSION.
 	spent int64
+
+	// mu guards spent, and the Result counters adjudicate writes (Spent, Calls),
+	// because a wave's batches settle from their own goroutines.
+	mu sync.Mutex
 
 	// warnUnpriced logs the "no rate for this model" fallback once per Verifier
 	// rather than once per reservation — a batch pass takes one per batch and a
@@ -116,6 +125,18 @@ type Verifier struct {
 // binds before the graph is useful would make the Verifier look worthless for
 // reasons of arithmetic.
 const DefaultMaxShareOfBudget = 0.25
+
+// DefaultConcurrency is how many adjudication batches run at once.
+//
+// Measured: one Standard run spent its last ~5 of 12 minutes in 291 serial
+// verifier calls, each an independent model call waiting on the one before.
+//
+// Four is a starting point, not a measured optimum: enough to cut that wait
+// roughly fourfold, small enough that a wave's burst — and the reservations it
+// holds before any of them settles — stays modest. Adjudication does not retry, so
+// a provider that rate-limits the burst costs the limited batches their verdicts;
+// that, not throughput, is what would argue for a different number.
+const DefaultConcurrency = 4
 
 // Result reports what one pass did.
 type Result struct {
@@ -241,27 +262,41 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 	res.PairsDecidedFree = len(free)
 
 	verdicts := free
+	var unjudged []Pair
+	// consumed is the pairs in batches actually sent to adjudicate.
 	consumed := 0
-	for _, batch := range Batches(pairs, v.BatchSize) {
-		judged, unjudged, stop := v.adjudicate(ctx, sessionID, batch, res)
-		judged = v.confirm(ctx, sessionID, judged, res)
+	batches := Batches(pairs, v.BatchSize)
+	// One wave's worth of batches at a time, so each wave's positives are
+	// confirmed before the next wave spends the allowance — the order the serial
+	// loop confirmed in, batch by batch, when Concurrency is 1.
+	for start := 0; start < len(batches); {
+		end := min(start+v.concurrency(), len(batches))
+		judged, missed, n, stop := v.runBatches(ctx, sessionID, batches[start:end], res)
+		// A fatal error fails a second look exactly as it failed the first, and the
+		// wave it came from has already spent its round trips; asking again only
+		// adds calls after the stop. The wave's first verdicts are kept unconfirmed.
+		if stop == nil || !isFatal(stop) {
+			judged = v.confirm(ctx, sessionID, judged, res)
+		}
 		verdicts = append(verdicts, judged...)
-		res.PairsUnjudged += len(unjudged)
-		consumed += len(batch)
+		unjudged = append(unjudged, missed...)
+		consumed += n
 
 		if stop != nil {
 			// Out of allowance, out of budget, or a fatal provider error. Keep what
 			// was judged: an incomplete graph is worth more than none, and the
 			// claims still need marking verified or the queue never drains.
 			res.Degraded = stop.Error()
+			for _, b := range batches[end:] {
+				unjudged = append(unjudged, b...)
+			}
 			break
 		}
+		start = end
 	}
-	// Pairs the loop never reached. Counted from what it consumed rather than from
-	// judged+unjudged, which double-counts the batch that triggered the stop.
-	if remaining := len(pairs) - consumed; remaining > 0 {
-		res.PairsUnjudged += remaining
-	}
+	// Built from the pairs themselves rather than from len(pairs)-consumed plus each
+	// batch's leftovers, which double-counted the batch that triggered the stop.
+	res.PairsUnjudged += len(unjudged)
 	res.PairsJudged = len(verdicts) - len(free)
 
 	// A pass that could not adjudicate ANYTHING must not mark its claims verified.
@@ -430,14 +465,12 @@ func (v *Verifier) confirm(ctx context.Context, sessionID string, judged []Judge
 	}
 
 	second := map[string]Relation{}
-	for _, batch := range Batches(positives, v.BatchSize) {
-		again, _, stop := v.adjudicate(ctx, sessionID, batch, res)
-		for _, j := range again {
-			second[j.Pair.Key()] = j.Relation.Normalize()
-		}
-		if stop != nil {
-			break
-		}
+	// The stop is dropped on purpose: a pair whose second look never happened keeps
+	// its first verdict (see above), and the next first-look wave meets the same
+	// allowance or provider and reports it.
+	again, _, _, _ := v.runBatches(ctx, sessionID, Batches(positives, v.BatchSize), res)
+	for _, j := range again {
+		second[j.Pair.Key()] = j.Relation.Normalize()
 	}
 	return v.applyConfirmations(judged, second, res)
 }
@@ -485,23 +518,149 @@ func (v *Verifier) applyConfirmations(judged []Judged, second map[string]Relatio
 	return out
 }
 
+func (v *Verifier) concurrency() int {
+	if v.Concurrency > 0 {
+		return v.Concurrency
+	}
+	return DefaultConcurrency
+}
+
+// batchOutcome is one batch's adjudicate result, kept by batch index so a wave's
+// results are appended in the order the batches were listed, not the order the
+// calls returned.
+type batchOutcome struct {
+	judged   []Judged
+	unjudged []Pair
+	stop     error
+	// panicked is a recovered panic and its stack, re-raised on the caller's
+	// goroutine once the wave has finished.
+	panicked any
+}
+
+// runBatches adjudicates batches several at a time, in waves.
+//
+// Each wave is sized once, before it launches, against the allowance as it stands:
+// every call in a wave reserves before any of them settles, so a per-batch check
+// inside the wave would pass all of them against the same unspent figure and let
+// the wave overrun the share. Results are appended in batch-index order, so the
+// verdicts — and from them the edges and every later prompt — are what a serial
+// pass produces. After a wave in which any batch returned a stop error, no further
+// wave starts; the in-flight ones cannot be recalled and are kept.
+//
+// unjudged is every pair without a verdict: those a launched batch did not answer,
+// and those in batches never launched. consumed counts the pairs in launched
+// batches only.
+func (v *Verifier) runBatches(ctx context.Context, sessionID string, batches [][]Pair, res *Result) (judged []Judged, unjudged []Pair, consumed int, stop error) {
+	next := 0
+	for next < len(batches) && stop == nil {
+		sess, err := v.session(ctx, sessionID)
+		if err != nil {
+			stop = err
+			break
+		}
+		k, err := v.waveSize(ctx, sess, batches[next:])
+		if err != nil {
+			stop = err
+			break
+		}
+
+		wave := batches[next : next+k]
+		outcomes := make([]batchOutcome, len(wave))
+		var wg sync.WaitGroup
+		for i, batch := range wave {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// Serially, a panic here unwound into the session supervisor's
+				// recover, which fails that one session and releases its holds. A
+				// bare goroutine is invisible to that recover — the executor's lead
+				// pool learned this — so the panic is carried back and re-raised
+				// below, on the goroutine that called Run.
+				defer func() {
+					if p := recover(); p != nil {
+						outcomes[i].panicked = fmt.Sprintf("%v\n\nadjudication goroutine stack:\n%s", p, debug.Stack())
+					}
+				}()
+				j, u, e := v.adjudicate(ctx, sess, batch, res)
+				outcomes[i] = batchOutcome{judged: j, unjudged: u, stop: e}
+			}()
+		}
+		wg.Wait()
+		next += k
+		for _, o := range outcomes {
+			if o.panicked != nil {
+				panic(o.panicked)
+			}
+		}
+
+		for i, o := range outcomes {
+			judged = append(judged, o.judged...)
+			unjudged = append(unjudged, o.unjudged...)
+			consumed += len(wave[i])
+			if o.stop != nil && stop == nil {
+				stop = o.stop // the lowest-indexed batch's reason, as a serial pass would report
+			}
+		}
+	}
+	for _, batch := range batches[next:] {
+		unjudged = append(unjudged, batch...)
+	}
+	return judged, unjudged, consumed, stop
+}
+
+// waveSize is how many of the remaining batches the next wave may launch.
+//
+// Bounded by Concurrency, by the verification allowance, by what the session has
+// available, and by max_tool_calls — each counted for the whole wave, because the
+// wave's reservations are all taken before any settles, and a serial pass would
+// have re-checked each of them against the previous call's charge. The first batch
+// is held to the allowance alone, exactly as the serial pass held every batch: it
+// fails with the familiar "allowance exhausted" reason, and adjudicate clamps its
+// reservation to what is available.
+func (v *Verifier) waveSize(ctx context.Context, sess *core.Session, left [][]Pair) (int, error) {
+	limit := min(v.concurrency(), len(left))
+	if sess.MaxToolCalls > 0 {
+		// At least one, so a session at its ceiling is refused by the ledger with
+		// the ceiling's own name rather than by this guess at it.
+		limit = min(limit, max(1, int(sess.MaxToolCalls-sess.ToolCallCount)))
+	}
+
+	allowance := v.remainingAllowance(ctx, sess)
+	avail := sess.Available()
+	var sum int64
+	k := 0
+	for ; k < limit; k++ {
+		est := v.estimateBatch(sess.BudgetUnit, len(left[k]))
+		if k == 0 {
+			if est > allowance {
+				return 0, fmt.Errorf("verification allowance exhausted (%d of %.0f%% of budget spent)",
+					v.spentSoFar(), v.share()*100)
+			}
+		} else if sum+est > allowance || sum+est > avail {
+			break
+		}
+		sum += est
+	}
+	return k, nil
+}
+
+func (v *Verifier) spentSoFar() int64 {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.spent
+}
+
 // adjudicate reserves, calls, settles, and parses one batch.
 //
 // Reserve BEFORE the call, per §8.2. The order matters for the same reason it did
 // in the planner: an after-the-fact reserve that gets refused because a ceiling
 // just fired leaves the cost spent and unrecorded.
-func (v *Verifier) adjudicate(ctx context.Context, sessionID string, batch []Pair, res *Result) ([]Judged, []Pair, error) {
-	sess, err := v.session(ctx, sessionID)
-	if err != nil {
-		return nil, batch, err
-	}
-
-	allowance := v.remainingAllowance(ctx, sess)
+//
+// The allowance is checked by runBatches for the whole wave, not here: sess is the
+// wave's snapshot, and adjudicate runs concurrently with the rest of its wave.
+func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, batch []Pair, res *Result) ([]Judged, []Pair, error) {
+	sessionID := sess.ID
 	est := v.estimateBatch(sess.BudgetUnit, len(batch))
-	if est > allowance {
-		return nil, batch, fmt.Errorf("verification allowance exhausted (%d of %.0f%% of budget spent)",
-			v.spent, v.share()*100)
-	}
 	if avail := sess.Available(); est > avail {
 		est = avail
 	}
@@ -558,9 +717,11 @@ func (v *Verifier) adjudicate(ctx context.Context, sessionID string, batch []Pai
 		}
 	} else {
 		charged := settled.Cost.BudgetAmount(sess.BudgetUnit)
+		v.mu.Lock()
 		v.spent += charged
 		res.Spent += charged
 		res.Calls++
+		v.mu.Unlock()
 		if settled.Flagged {
 			v.logger().WarnContext(settleCtx,
 				"verifier: settled cost exceeded its reservation by more than the allowed factor",
@@ -686,7 +847,7 @@ func (v *Verifier) share() float64 {
 func (v *Verifier) remainingAllowance(ctx context.Context, sess *core.Session) int64 {
 	ceiling := int64(float64(sess.Budget) * v.share())
 
-	spent := v.spent
+	spent := v.spentSoFar()
 	if fromLedger, err := v.verifierSpend(ctx, sess); err == nil && fromLedger > spent {
 		spent = fromLedger
 	} else if err != nil {
