@@ -299,9 +299,8 @@ func TestVerificationCannotOutspendItsShare(t *testing.T) {
 	if res.PairsUnjudged == 0 {
 		t.Error("degraded but reported every pair judged")
 	}
-	// Pairs that were judged still mark their claims; pairs the ceiling never
-	// reached leave theirs unverified (see
-	// TestUnreachedPairsLeaveTheirClaimsUnverified).
+	// Pairs that were judged still mark their claims; pairs the ceiling
+	// never reached leave theirs unverified.
 	if n := r.unverified(t); n == 0 {
 		t.Error("every claim marked verified despite the ceiling leaving pairs unjudged")
 	}
@@ -355,8 +354,7 @@ func TestAFatalProviderErrorStopsRatherThanRepeating(t *testing.T) {
 		return "", llm.ErrUnauthorized
 	})
 	r.v.BatchSize = 2
-	// Serial, so "one call" is exact; TestFatalErrorStopsLaterWaves covers the
-	// concurrent case.
+	// Serial, so "one call" is exact.
 	r.v.Concurrency = 1
 
 	res, err := r.v.Run(context.Background(), r.sess.ID)
@@ -782,9 +780,8 @@ func TestPastTheStoreLimitClaimsStillGetVerified(t *testing.T) {
 			Source: fmt.Sprintf("https://s%03d.example/p", i),
 		})
 	}
-	// Unlimited tool calls: 505 claims need 501 batches of 8, one more than
-	// newRig's default max_tool_calls of 500, which would test that ceiling
-	// instead of the store limit this test is for.
+	// Unlimited tool calls: 505 claims need more batches than newRig's
+	// default max_tool_calls allows.
 	r := newRigWithCeilings(t, 40_000_000, 50, 0, claims, judgeEveryPair(verifier.RelNeither))
 	r.v.BatchSize = 8
 	r.v.MaxShareOfBudget = 0.9
@@ -1161,9 +1158,8 @@ func TestAPassThatComparedNothingLeavesClaimsUnverified(t *testing.T) {
 		t.Errorf("%d claims left unverified after the model was asked and answered badly", n)
 	}
 
-	// A call that ERRORS is neither of those: no response came back, so there's
-	// nothing to re-ask for free. The claims stay unverified and the pair
-	// retries next pass.
+	// A call that ERRORS is neither of those: no response came back, so the
+	// claims stay unverified.
 	errored := newRig(t, 4_000_000, distinctClaims(6), func(int, string) (string, error) {
 		return "", llm.ErrOverloaded
 	})

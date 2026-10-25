@@ -1314,12 +1314,8 @@ func (t *queries) SetClaimGrounding(ctx context.Context, results []store.ClaimGr
 	return nil
 }
 
-// ScoreClaims writes the Verifier's verdicts.
-//
-// Touches confidence, grounded, and verified_at only — and not verified_at at
-// all on a KeepUnverified row. The claim's text, quote and source are
-// evidence, so a verification pass that rewrote them would make its own
-// grounding check circular.
+// ScoreClaims writes the Verifier's verdicts: confidence, grounded, and
+// verified_at (skipped on a KeepUnverified row).
 func (t *queries) ScoreClaims(ctx context.Context, scores []store.ClaimScore) error {
 	now := toMicros(time.Now().UTC())
 	for i, s := range scores {

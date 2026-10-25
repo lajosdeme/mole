@@ -1919,9 +1919,7 @@ func TestDeferredFollowUpsRunBeforeTheRunEnds(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// The finishing reserve
-// ---------------------------------------------------------------------------
+// The finishing reserve.
 
 // wallClockRig is a rig whose session has a wall clock, a verifier, one queued
 // lead, and an executor clock standing `elapsed` after the session was created.

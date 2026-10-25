@@ -474,9 +474,8 @@ func TestTheCapNeverShowsOneSideOfADisagreement(t *testing.T) {
 		c.Confidence = conf
 		return c
 	}
-	// The disputed pair scores lowest, so the cap reaches it first. Neither
-	// of the other two shares a content word with the question, so
-	// confidence, not relevance, is what ranks them ahead of the pair.
+	// The disputed pair scores lowest, so the cap reaches it first; neither
+	// other claim shares a content word with the question.
 	claims := []core.Claim{
 		mk("Subword tokenization improves accuracy.", "a.example", 0.10),
 		mk("Subword tokenization does not improve accuracy.", "b.example", 0.10),

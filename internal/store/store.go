@@ -56,9 +56,8 @@ type ClaimScore struct {
 	// claims — §11.5's re-fetch is budgeted and reserved for load-bearing ones.
 	Grounded *bool
 
-	// KeepUnverified writes Confidence and Grounded but leaves verified_at as
-	// it was, so a claim whose pairs went unjudged stays in
-	// ListUnverifiedClaims. The zero value marks the claim verified.
+	// KeepUnverified writes Confidence and Grounded but leaves verified_at
+	// unset. The zero value marks the claim verified.
 	KeepUnverified bool
 }
 

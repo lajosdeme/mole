@@ -145,9 +145,8 @@ func parseGroundVerdict(raw string) (supported bool, why string, ok bool) {
 	return *w.Supported, why, true
 }
 
-// groundCallEstimate is one judge call's reservation, in the session's unit.
-// It prices input and output separately through v.estimate, against the
-// same v.Pricing and v.model() the adjudication batches use.
+// groundCallEstimate is one judge call's reservation, in the session's unit,
+// priced through v.estimate.
 func (v *Verifier) groundCallEstimate(unit core.BudgetUnit) int64 {
 	in := int64(2 * ((MaxPassageChars+MaxClaimChars)/4 + 400))
 	out := int64(2 * groundMaxTokens)

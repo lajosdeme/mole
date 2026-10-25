@@ -250,9 +250,8 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 	return res, nil
 }
 
-// sourceSummary tracks one source's contribution within the run: enough to
-// bound MaxClaimsPerSource (claims and rows share one allowance) and to
-// decide whether the source counted toward the run summary.
+// sourceSummary tracks one source's contribution: claims and rows toward
+// MaxClaimsPerSource, and whether it counted toward the run summary.
 type sourceSummary struct {
 	Claims []core.Claim
 	// Rows counts what dataset mode extracted from this source, not the rows

@@ -65,21 +65,8 @@ type Finding struct {
 	disputes []string
 }
 
-// Findings collapses claims into what the report should say.
-//
-// Ordered by DERIVED confidence (§11.3) weighted by relevance to the
-// question, never by the extractor's self-report. The sort key is
-// Confidence * (0.5 + 0.5*relevance): relevance tempers confidence rather
-// than overriding it, so a well-evidenced off-topic finding can still
-// outrank a barely-evidenced on-topic one, but equally-confident findings
-// are told apart by which one the question was actually about.
-//
-// Before the Verifier scores a session every derived confidence is 0, which
-// zeroes the key for everyone, so relevance decides ties first, then
-// publisher breadth.
-//
-// Truncated to max AFTER collapsing, so the cap counts distinct assertions
-// rather than repetitions.
+// Findings collapses claims into what the report should say, sorted by
+// confidence weighted by relevance to the question, then truncated to max.
 func Findings(question string, claims []*core.Claim, edges []*core.ClaimEdge, max int) []Finding {
 	if len(claims) == 0 {
 		return nil
@@ -209,13 +196,8 @@ func Findings(question string, claims []*core.Claim, edges []*core.ClaimEdge, ma
 	return out
 }
 
-// sortFindings ranks by confidence weighted by relevance to the question
-// (Confidence * (0.5 + 0.5*relevance)), then relevance alone, then publisher
-// breadth, then source breadth, then input position.
-//
-// Before the Verifier scores a session every derived confidence is 0, which
-// zeroes the weighted key for everyone, so relevance decides first; ties
-// after that fall back to breadth.
+// sortFindings orders by Confidence*(0.5+0.5*relevance), then relevance,
+// publishers, breadth, input order.
 func sortFindings(out []Finding) {
 	key := func(f Finding) float64 { return f.Confidence * (0.5 + 0.5*f.relevance) }
 	sort.SliceStable(out, func(i, j int) bool {

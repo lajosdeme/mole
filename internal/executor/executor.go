@@ -93,8 +93,7 @@ type Executor struct {
 	Estimator *budget.Estimator
 
 	// FinishReserve is how much of the wall clock research leaves for a last
-	// verify pass, grounding, and the report. Zero uses the default (see
-	// finishReserve); ignored when the session has no wall clock.
+	// verify pass, grounding, and the report. Zero uses the default.
 	FinishReserve time.Duration
 
 	// Now and Jitter are injectable for tests.
@@ -291,9 +290,8 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			res.StoppedBecause = which
 			break
 		}
-		// Inside the finishing reserve: stop leasing new work so there is time
-		// left to verify what research already found. Reported as max_wallclock,
-		// since that is the ceiling that would have stopped it anyway.
+		// Inside the finishing reserve: stop leasing new work so there is
+		// time to verify what research already found.
 		if reserve := finishReserve(sess.MaxWallClock, e.FinishReserve); reserve > 0 &&
 			!now.Before(sess.CreatedAt.Add(sess.MaxWallClock-reserve)) {
 			res.Status = core.StatusExhausted
@@ -498,8 +496,7 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 	}
 
 	// On any ceiling stop, verify what research found before building the
-	// report, so the last batch of claims isn't left unverified. A pass the
-	// ledger refuses, or one with nothing new to judge, is a no-op.
+	// report.
 	if res.Status == core.StatusExhausted && ctx.Err() == nil {
 		e.verify(ctx, digest, res)
 	}
@@ -515,11 +512,8 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 	return res, nil
 }
 
-// finishReserve is how long before the wall clock research stops leasing,
-// leaving room for a verify pass, grounding, and the report.
-//
-// It is configured if set, else 15% of the clock with a 90-second floor,
-// capped at half the clock. Zero for a session with no wall clock.
+// finishReserve is how long before the wall clock research stops, to leave
+// time to verify, ground and report. Configured value, else 15% (min 90s, max half); 0 without a clock.
 func finishReserve(maxWall, configured time.Duration) time.Duration {
 	if maxWall <= 0 {
 		return 0

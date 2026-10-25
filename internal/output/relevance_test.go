@@ -7,8 +7,7 @@ import (
 )
 
 // relClaim builds a claim with a unique ID, for tests that call Findings
-// directly rather than going through a store (report_test.go's claim() helper
-// returns a value with no ID, which Findings cannot cluster or rank by).
+// directly rather than through a store.
 func relClaim(text, source string, confidence float64) *core.Claim {
 	return &core.Claim{
 		ID:         core.NewClaimID(),
@@ -71,9 +70,8 @@ func TestCapAdmitsTheRelevantFinding(t *testing.T) {
 	t.Errorf("the relevant finding was cut by the cap: %+v", findings)
 }
 
-// TestNoOverlapLeavesOrderUnchanged checks that a question sharing no content
-// word with any claim falls back to confidence, publisher breadth, source
-// breadth, then order.
+// TestNoOverlapLeavesOrderUnchanged checks that no question overlap falls
+// back to confidence, publishers, breadth, then order.
 func TestNoOverlapLeavesOrderUnchanged(t *testing.T) {
 	a := relClaim("Adults ingest about 4.1 micrograms of microplastic per week.", "https://a.example/x", 0.30)
 	b := relClaim("The OECD workshop was held on 12-14 November 2025.", "https://b.example/y", 0.80)

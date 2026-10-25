@@ -1,8 +1,7 @@
 package verifier_test
 
-// Adjudication batches run several at a time. These tests check that batches
-// overlap, and that overlapping them changes nothing else — not the graph,
-// not the allowance, not the fatal stop.
+// Adjudication batches run several at a time; these tests check that
+// overlapping them changes nothing else about the result.
 
 import (
 	"context"
@@ -80,10 +79,8 @@ func TestBatchesRunConcurrently(t *testing.T) {
 // requires "b", which the instructions' shape example does not carry.
 var promptPairRE = regexp.MustCompile(`\{"pair":(\d+),"a":"((?:[^"\\]|\\.)*)","b":"((?:[^"\\]|\\.)*)"\}`)
 
-// pairAnswerer answers each pair by its text, not call order, after a random
-// 0-20ms sleep, so batch order never changes a pair's answer. The second
-// time a pair is asked (the confirm pass), some answers flip, to exercise
-// both the confirmed and the withheld path.
+// pairAnswerer answers each pair by its text, not call order; the second
+// time a pair is asked (confirm), some answers flip.
 type pairAnswerer struct {
 	mu    sync.Mutex
 	asked map[string]int
@@ -144,8 +141,7 @@ func idedClaims(n int) []core.Claim {
 }
 
 // TestConcurrentRunMatchesSerialRun checks that a concurrent pass writes the
-// same edges as a serial one, since results are appended in batch order, not
-// completion order.
+// same edges as a serial one.
 func TestConcurrentRunMatchesSerialRun(t *testing.T) {
 	type outcome struct {
 		edges   []string
@@ -190,9 +186,7 @@ func TestConcurrentRunMatchesSerialRun(t *testing.T) {
 		t.Errorf("edge sets differ.\nserial:\n  %s\nconcurrent:\n  %s",
 			strings.Join(serial.edges, "\n  "), strings.Join(concurrent.edges, "\n  "))
 	}
-	// The same prompts too: a second look that mixed pairs from different
-	// first-look batches could change the graph even though this answerer,
-	// judging each pair alone, wouldn't show it.
+	// The same prompts too, in any order.
 	if len(serial.prompts) != len(concurrent.prompts) {
 		t.Errorf("%d prompts serially, %d concurrently", len(serial.prompts), len(concurrent.prompts))
 	} else {
@@ -309,9 +303,8 @@ func pairsIn(prompt string) string {
 	return strings.Join(promptPairRE.FindAllString(prompt, -1), "\n")
 }
 
-// fixedPairRetriever maps a claim ID to the one partner it is ever candidated
-// against, so a test can pin exactly which pairs — and so which batches — form,
-// independent of the lexical retriever's scoring.
+// fixedPairRetriever maps a claim ID to its one partner, so a test can pin
+// exactly which pairs and batches form.
 type fixedPairRetriever map[string]string
 
 func (f fixedPairRetriever) Candidates(_ context.Context, target *core.Claim, pool []*core.Claim, _ int) ([]*core.Claim, error) {
@@ -389,15 +382,13 @@ func TestUnreachedPairsLeaveTheirClaimsUnverified(t *testing.T) {
 	}
 }
 
-// TestUnreachedPairsKeepTheirDerivedConfidence checks that a claim whose
-// pairs were never judged keeps its derived confidence instead of reverting
-// to 0.
+// TestUnreachedPairsKeepTheirDerivedConfidence checks that an unjudged
+// claim keeps its derived confidence instead of reverting to 0.
 func TestUnreachedPairsKeepTheirDerivedConfidence(t *testing.T) {
 	ctx := context.Background()
 	claims := idedClaims(6)
 
-	// Same rig as TestUnreachedPairsLeaveTheirClaimsUnverified: allowance for one
-	// of three disjoint pairs.
+	// Allowance for one of three disjoint pairs.
 	est := verifier.EstimateBatch(&verifier.Verifier{}, core.BudgetTokens, 1)
 	r := newRig(t, 4*est, claims, judgeEveryPair(verifier.RelNeither))
 	r.v.BatchSize = 1

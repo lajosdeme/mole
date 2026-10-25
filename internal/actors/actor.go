@@ -18,8 +18,7 @@ import (
 // Result is what one lead produced.
 type Result struct {
 	// Summary is a one-line count of claims and sources, or why there were
-	// none. Nothing downstream reads it, so it's a plain string, not a
-	// model call.
+	// none.
 	Summary string
 
 	// Claims are atomic facts, each carrying a source and a verbatim quote

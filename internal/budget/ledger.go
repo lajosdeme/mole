@@ -233,9 +233,8 @@ func (l *Ledger) ReserveVerify(ctx context.Context, sessionID string, amount int
 	return l.reserveWith(ctx, sessionID, amount, ceilingsExceptLeads, nil, false)
 }
 
-// ReserveGround reserves for the grounding pass (§11.5.2). Grounding runs
-// after research has already stopped, so it is exempt from MaxLeads and
-// MaxWallClock, bound instead by MaxToolCalls and its share of the escrow.
+// ReserveGround reserves for the grounding pass. Exempt from MaxLeads and
+// MaxWallClock, bound by MaxToolCalls and the money.
 func (l *Ledger) ReserveGround(ctx context.Context, sessionID string, amount int64) (*core.Reservation, error) {
 	return l.reserveWith(ctx, sessionID, amount, ceilingsMoneyAndCalls, nil, false)
 }

@@ -421,8 +421,7 @@ func TestDisagreementIsInstructed(t *testing.T) {
 }
 
 // TestReportPromptSaysWhatToLeadWith checks that the prompt tells the model
-// to open with the answer, treat repetition as not corroboration, and
-// distinguish what a source measured from what it merely reports or cites.
+// to open with the answer and not treat repetition as corroboration.
 func TestReportPromptSaysWhatToLeadWith(t *testing.T) {
 	claims := []core.Claim{
 		claim("Model X scores 80.3% on the benchmark.", "https://a.example/1", "scored 80.3 percent"),
