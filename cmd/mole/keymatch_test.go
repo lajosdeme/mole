@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -84,5 +87,210 @@ func TestVendorPrefixOrdering(t *testing.T) {
 	}
 	if _, ok := llm.VendorFromKey("totally-opaque"); ok {
 		t.Error("an unrecognized key was assigned a vendor")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Per-role providers
+// ---------------------------------------------------------------------------
+
+// recordingProvider stands in for a built backend and records what reaches it.
+type recordingProvider struct {
+	cfg llm.Config
+	got []llm.Request
+}
+
+func (p *recordingProvider) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	p.got = append(p.got, req)
+	return &llm.Response{Text: "ok", Model: p.modelOf(req)}, nil
+}
+
+func (p *recordingProvider) modelOf(req llm.Request) string {
+	if req.Model != "" {
+		return req.Model
+	}
+	return p.ModelFor(req.Tier)
+}
+
+func (p *recordingProvider) Name() string { return string(p.cfg.Kind) }
+
+func (p *recordingProvider) ModelFor(tier llm.Tier) string {
+	if tier == llm.TierCheap {
+		return p.cfg.CheapModel
+	}
+	return p.cfg.StrongModel
+}
+
+// recordingFactory returns a provider factory and the providers it built.
+func recordingFactory() (func(llm.Config, *http.Client) (llm.Provider, error), *[]*recordingProvider) {
+	var built []*recordingProvider
+	return func(c llm.Config, _ *http.Client) (llm.Provider, error) {
+		p := &recordingProvider{cfg: c}
+		built = append(built, p)
+		return p, nil
+	}, &built
+}
+
+func TestNoRoleBlocksBuildsTheSingleProvider(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{
+		Provider: "anthropic", APIKey: "sk-ant-api03-top", Model: "claude-opus-5",
+		CheapModel: "claude-haiku-4-5", VerifierModel: "claude-sonnet-5",
+	}
+	factory, built := recordingFactory()
+
+	p, err := buildConfiguredLLM(cfg, nil, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*built) != 1 {
+		t.Fatalf("built %d providers, want 1", len(*built))
+	}
+	single := (*built)[0]
+	if p != llm.Provider(single) {
+		t.Fatalf("got %T, want the single provider itself rather than a router", p)
+	}
+	want := llm.Config{
+		Kind: llm.KindAnthropic, APIKey: "sk-ant-api03-top",
+		StrongModel: "claude-opus-5", CheapModel: "claude-haiku-4-5",
+	}
+	if single.cfg != want {
+		t.Errorf("provider config = %+v, want %+v", single.cfg, want)
+	}
+
+	req := llm.Request{Tier: llm.TierCheap, Model: "claude-sonnet-5", System: "s", MaxTokens: 7}
+	if _, err := p.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(single.got, []llm.Request{req}) {
+		t.Errorf("request changed on the way: %+v", single.got)
+	}
+	if got := verifierModelFor(cfg); got != "claude-sonnet-5" {
+		t.Errorf("verifier model = %q, want the top-level one", got)
+	}
+}
+
+func TestRoleBlockInheritsTopLevel(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{Provider: "anthropic", APIKey: "sk-ant-api03-top", Model: "claude-opus-5"}
+	cfg.LLM.Cheap = &config.LLMRole{Model: "claude-haiku-4-5"}
+	factory, built := recordingFactory()
+
+	p, err := buildConfiguredLLM(cfg, nil, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*built) != 1 || p != llm.Provider((*built)[0]) {
+		t.Fatalf("a model-only block built %d providers (%T), want the one top-level provider", len(*built), p)
+	}
+	anthropic := (*built)[0]
+	if anthropic.cfg.Kind != llm.KindAnthropic || anthropic.cfg.APIKey != "sk-ant-api03-top" {
+		t.Errorf("cheap role did not inherit the top-level provider: %+v", anthropic.cfg)
+	}
+
+	resp, err := p.Complete(context.Background(), llm.Request{Tier: llm.TierCheap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Model != "claude-haiku-4-5" {
+		t.Errorf("cheap request ran on %q, want claude-haiku-4-5", resp.Model)
+	}
+	if got := p.ModelFor(llm.TierStrong); got != "claude-opus-5" {
+		t.Errorf("strong model = %q, want the top-level claude-opus-5", got)
+	}
+}
+
+func TestMixedRolesBuildARouter(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{Provider: "anthropic", APIKey: "sk-ant-api03-top", Model: "claude-sonnet-5"}
+	cfg.LLM.Cheap = &config.LLMRole{
+		Provider: "openai-compatible", APIKey: "sk-deepseek", BaseURL: "https://api.deepseek.com/v1",
+		Model: "deepseek-chat",
+	}
+	cfg.LLM.Verifier = &config.LLMRole{Model: "claude-haiku-4-5"}
+	factory, built := recordingFactory()
+
+	p, err := buildConfiguredLLM(cfg, nil, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*built) != 2 {
+		t.Fatalf("built %d providers, want one per distinct backend (2)", len(*built))
+	}
+	anthropic, deepseek := (*built)[0], (*built)[1]
+	ctx := context.Background()
+
+	if _, err := p.Complete(ctx, llm.Request{Tier: llm.TierCheap, Model: verifierModelFor(cfg)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Complete(ctx, llm.Request{Tier: llm.TierCheap}); err != nil {
+		t.Fatal(err)
+	}
+	if len(anthropic.got) != 1 || anthropic.got[0].Model != "claude-haiku-4-5" {
+		t.Errorf("verifier request: anthropic got %+v", anthropic.got)
+	}
+	if len(deepseek.got) != 1 || deepseek.got[0].Model != "deepseek-chat" {
+		t.Errorf("miner request: deepseek got %+v", deepseek.got)
+	}
+	if got := p.Name(); got != "anthropic+openai-compatible" {
+		t.Errorf("Name() = %q", got)
+	}
+}
+
+func TestRoleKeyMismatchIsCheckedPerRole(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{Provider: "anthropic", APIKey: "sk-ant-api03-top"}
+	cfg.LLM.Cheap = &config.LLMRole{APIKey: "gsk_abc123", Model: "llama-3.1-8b-instant"}
+	factory, _ := recordingFactory()
+
+	_, err := buildConfiguredLLM(cfg, nil, factory)
+	if err == nil {
+		t.Fatal("a Groq key on the cheap role, inheriting anthropic, was accepted")
+	}
+	if !strings.Contains(err.Error(), "llm.cheap.provider") {
+		t.Errorf("error does not name the role's setting:\n%s", err)
+	}
+	if strings.Contains(err.Error(), "gsk_abc123") {
+		t.Errorf("error printed the key:\n%s", err)
+	}
+}
+
+func TestVerifierOnItsOwnProviderNeedsAModel(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{Provider: "anthropic", APIKey: "sk-ant-api03-top"}
+	cfg.LLM.Verifier = &config.LLMRole{Provider: "openai-compatible", BaseURL: "https://api.deepseek.com/v1"}
+	factory, _ := recordingFactory()
+
+	if _, err := buildConfiguredLLM(cfg, nil, factory); err == nil || !strings.Contains(err.Error(), "llm.verifier.model") {
+		t.Errorf("err = %v, want one naming llm.verifier.model", err)
+	}
+}
+
+func TestDoctorPrintsOneLinePerRoleWithoutKeys(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{Provider: "anthropic", APIKey: "sk-ant-api03-topsecretvalue", Model: "claude-sonnet-5"}
+	cfg.LLM.Cheap = &config.LLMRole{
+		Provider: "openai-compatible", APIKey: "sk-deepseeksecretvalue", BaseURL: "https://api.deepseek.com/v1",
+		Model: "unlisted-model",
+	}
+	cfg.LLM.Verifier = &config.LLMRole{Model: "claude-haiku-4-5"}
+	factory, _ := recordingFactory()
+	built, err := buildConfiguredLLM(cfg, nil, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() { reportLLMRoles(&checks{}, cfg, built) })
+	for _, want := range []string{
+		"llm strong", "anthropic claude-sonnet-5, priced yes",
+		"llm cheap", "openai-compatible unlisted-model, priced no",
+		"llm verifier", "anthropic claude-haiku-4-5, priced yes",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doctor output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "secretvalue") {
+		t.Errorf("doctor printed a key:\n%s", out)
 	}
 }

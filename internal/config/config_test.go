@@ -382,3 +382,65 @@ func TestTheSessionClockHasAConfigDefault(t *testing.T) {
 		t.Error("the session clock and the per-call timeout are the same field")
 	}
 }
+
+func TestConfigSetRoleKeys(t *testing.T) {
+	isolate(t)
+
+	cfg := &config.Config{}
+	for _, kv := range [][2]string{
+		{"llm.provider", "anthropic"},
+		{"llm.cheap-model", "claude-haiku-4-5"},
+		{"llm.cheap.provider", "OpenAI-Compatible"},
+		{"llm.cheap.model", "deepseek-chat"},
+		{"llm.verifier.api-key", "sk-ant-api03-verifiersecretvalue"},
+	} {
+		if err := cfg.Set(kv[0], kv[1]); err != nil {
+			t.Fatalf("set %s: %v", kv[0], err)
+		}
+	}
+	if err := cfg.Set("llm.cheap.provider", "hotdog"); err == nil {
+		t.Error("unknown role provider accepted")
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"llm.cheap.provider":   "openai-compatible",
+		"llm.cheap.model":      "deepseek-chat",
+		"llm.verifier.api-key": "sk-ant-api03-verifiersecretvalue",
+		"llm.cheap-model":      "claude-haiku-4-5",
+		"llm.strong.model":     "",
+	} {
+		if got, err := loaded.Get(key); err != nil || got != want {
+			t.Errorf("%s = %q (err %v), want %q", key, got, err, want)
+		}
+	}
+	if loaded.LLM.Cheap == nil || loaded.LLM.Cheap.Model != "deepseek-chat" {
+		t.Errorf("cheap block = %+v", loaded.LLM.Cheap)
+	}
+	if loaded.LLM.Strong != nil {
+		t.Errorf("an unset role grew a block: %+v", loaded.LLM.Strong)
+	}
+
+	var sawKey bool
+	for _, f := range config.Fields() {
+		shown := config.Display(f, loaded)
+		if strings.Contains(shown, "verifiersecret") {
+			t.Errorf("%s leaked the key: %q", f.Name, shown)
+		}
+		if f.Name == "llm.verifier.api-key" {
+			sawKey = true
+			if !strings.Contains(shown, "*") {
+				t.Errorf("role key not masked: %q", shown)
+			}
+		}
+	}
+	if !sawKey {
+		t.Fatal("llm.verifier.api-key is missing from the field table")
+	}
+}
