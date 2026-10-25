@@ -92,6 +92,10 @@ type Executor struct {
 	// budget unit.
 	Estimator *budget.Estimator
 
+	// FinishReserve is how much of the wall clock research leaves for a last
+	// verify pass, grounding, and the report. Zero uses the default.
+	FinishReserve time.Duration
+
 	// Now and Jitter are injectable for tests.
 	Now    func() time.Time
 	Jitter func() float64
@@ -280,9 +284,20 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 		if err != nil {
 			return res, err
 		}
-		if hit, which := sess.HitCeiling(e.now()); hit {
+		now := e.now()
+		if hit, which := sess.HitCeiling(now); hit {
 			res.Status = core.StatusExhausted
 			res.StoppedBecause = which
+			break
+		}
+		// Inside the finishing reserve: stop leasing new work so there is
+		// time to verify what research already found.
+		if reserve := finishReserve(sess.MaxWallClock, e.FinishReserve); reserve > 0 &&
+			!now.Before(sess.CreatedAt.Add(sess.MaxWallClock-reserve)) {
+			res.Status = core.StatusExhausted
+			res.StoppedBecause = "max_wallclock"
+			e.logger().InfoContext(ctx, "stopping research inside the finishing reserve",
+				"reserve", reserve)
 			break
 		}
 		if sess.Available() <= 0 {
@@ -480,6 +495,12 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 		}
 	}
 
+	// On any ceiling stop, verify what research found before building the
+	// report.
+	if res.Status == core.StatusExhausted && ctx.Err() == nil {
+		e.verify(ctx, digest, res)
+	}
+
 	// Without a live context this read fails on a timed-out or cancelled run —
 	// exactly the runs whose spend most needs reporting — and the result says
 	// 0 spent while the ledger holds the real figure.
@@ -489,6 +510,19 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 	}
 	res.CacheStats = e.Cache.Stats()
 	return res, nil
+}
+
+// finishReserve is how long before the wall clock research stops, to leave
+// time to verify, ground and report. Configured value, else 15% (min 90s, max half); 0 without a clock.
+func finishReserve(maxWall, configured time.Duration) time.Duration {
+	if maxWall <= 0 {
+		return 0
+	}
+	reserve := configured
+	if reserve <= 0 {
+		reserve = max(90*time.Second, maxWall*15/100)
+	}
+	return min(reserve, maxWall/2)
 }
 
 // DefaultWorkers is the per-session pool size when Workers is unset.
@@ -1101,6 +1135,7 @@ func (e *Executor) planWithBudget(ctx context.Context, sess *core.Session, call 
 				CacheReadTokens:  plan.Usage.CacheReadTokens,
 				CacheWriteTokens: plan.Usage.CacheWriteTokens,
 			},
+			DurationMS: plan.Elapsed.Milliseconds(),
 		}
 		if callErr != nil {
 			tc.Err = callErr.Error()

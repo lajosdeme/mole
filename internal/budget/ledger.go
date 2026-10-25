@@ -233,12 +233,20 @@ func (l *Ledger) ReserveVerify(ctx context.Context, sessionID string, amount int
 	return l.reserveWith(ctx, sessionID, amount, ceilingsExceptLeads, nil, false)
 }
 
+// ReserveGround reserves for the grounding pass. Exempt from MaxLeads and
+// MaxWallClock, bound by MaxToolCalls and the money.
+func (l *Ledger) ReserveGround(ctx context.Context, sessionID string, amount int64) (*core.Reservation, error) {
+	return l.reserveWith(ctx, sessionID, amount, ceilingsMoneyAndCalls, nil, false)
+}
+
 // ceilingPolicy selects which §8.5 ceilings a reservation honours.
 type ceilingPolicy int
 
 const (
 	allCeilings ceilingPolicy = iota
 	ceilingsExceptLeads
+	// ceilingsMoneyAndCalls honours MaxToolCalls and Available() only.
+	ceilingsMoneyAndCalls
 	noCeilings
 )
 
@@ -266,11 +274,25 @@ func (l *Ledger) reserveWith(ctx context.Context, sessionID string, amount int64
 		if s.Status.Terminal() {
 			return fmt.Errorf("budget: session %s is %s", sessionID, s.Status)
 		}
-		if policy != noCeilings {
+		switch policy {
+		case noCeilings:
+		case ceilingsMoneyAndCalls:
+			// Checked directly: HitCeiling reports only the first ceiling it
+			// finds hit, which depends on check order, not on which one applies.
+			if s.MaxToolCalls > 0 && s.ToolCallCount >= s.MaxToolCalls {
+				return fmt.Errorf("%w: session %s hit max_tool_calls", ErrInsufficientBudget, sessionID)
+			}
+		case ceilingsExceptLeads:
+			// Checked directly, for the same reason.
+			if s.MaxToolCalls > 0 && s.ToolCallCount >= s.MaxToolCalls {
+				return fmt.Errorf("%w: session %s hit max_tool_calls", ErrInsufficientBudget, sessionID)
+			}
+			if s.MaxWallClock > 0 && now.Sub(s.CreatedAt) >= s.MaxWallClock {
+				return fmt.Errorf("%w: session %s hit max_wallclock", ErrInsufficientBudget, sessionID)
+			}
+		default:
 			if hit, which := s.HitCeiling(now); hit {
-				if !(policy == ceilingsExceptLeads && which == "max_leads") {
-					return fmt.Errorf("%w: session %s hit %s", ErrInsufficientBudget, sessionID, which)
-				}
+				return fmt.Errorf("%w: session %s hit %s", ErrInsufficientBudget, sessionID, which)
 			}
 		}
 		if avail := s.Available(); amount > avail {

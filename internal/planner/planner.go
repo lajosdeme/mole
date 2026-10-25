@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/llm"
@@ -92,6 +93,9 @@ type Plan struct {
 	Leads     []core.Lead
 	Usage     llm.Usage
 	Model     string
+	// Elapsed is how long the model call took, carried through to the ledger
+	// row.
+	Elapsed time.Duration
 	// Done is set when the planner judges the research complete. Only Replan
 	// can set it.
 	Done bool
@@ -125,7 +129,7 @@ func (p *Planner) InitialLeads(ctx context.Context, sess *core.Session) (*Plan, 
 	if resp == nil {
 		return nil, err
 	}
-	out := &Plan{Usage: resp.Usage, Model: resp.Model}
+	out := &Plan{Usage: resp.Usage, Model: resp.Model, Elapsed: resp.Elapsed}
 	if err != nil {
 		return out, err
 	}
@@ -215,7 +219,7 @@ func (p *Planner) Replan(ctx context.Context, sess *core.Session, d *Digest, dep
 	if resp == nil {
 		return nil, err
 	}
-	out.Usage, out.Model = resp.Usage, resp.Model
+	out.Usage, out.Model, out.Elapsed = resp.Usage, resp.Model, resp.Elapsed
 	if err != nil {
 		return out, err
 	}

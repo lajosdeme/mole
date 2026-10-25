@@ -88,7 +88,7 @@ func (g *Generator) Answer(ctx context.Context, st store.Store, sessionID, quest
 
 	// Collapsed AFTER filtering, so the cap counts distinct assertions among the
 	// relevant ones rather than spending it on one page saying one thing twice.
-	findings := Findings(relevant, edges, gen.MaxClaims)
+	findings := Findings(question, relevant, edges, gen.MaxClaims)
 	rep.Findings = findings
 	rep.Citations = citeFindings(findings)
 	index := map[string]int{}

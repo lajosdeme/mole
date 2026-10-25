@@ -56,6 +56,9 @@ type Report struct {
 	Cost core.Cost
 	// Model names what wrote it.
 	Model string
+	// Elapsed is how long the synthesis call took, carried through to the
+	// ledger row.
+	Elapsed time.Duration
 
 	// Findings are the collapsed assertions the body was written from (§11.2):
 	// one per duplicate cluster, each with every source asserting it.
@@ -166,13 +169,13 @@ func (g *Generator) Generate(ctx context.Context, st store.Store, sessionID stri
 	// Collapse duplicate clusters BEFORE the cap applies (§11.2). Capping raw
 	// claims spends the whole budget on one page asserting one thing eight ways;
 	// capping findings counts distinct assertions.
-	findings := Findings(claims, edges, gen.MaxClaims)
-	if n := len(Findings(claims, edges, 0)); n > len(findings) {
+	findings := Findings(sess.Prompt, claims, edges, gen.MaxClaims)
+	if n := len(Findings(sess.Prompt, claims, edges, 0)); n > len(findings) {
 		// What the prose was written from, not what was left out. The rest are
 		// not missing: they are in the session, and a consumer rendering it
 		// shows them. Saying they "did not fit" described a shortfall that had
 		// not happened.
-		rep.Degraded = fmt.Sprintf("written from the %d highest-confidence findings",
+		rep.Degraded = fmt.Sprintf("written from the %d highest-ranked findings",
 			len(findings))
 	}
 	rep.Findings = findings
@@ -231,6 +234,7 @@ func (gen *Generator) writeBody(ctx context.Context, req llm.Request, rep *Repor
 			CacheReadTokens:  resp.Usage.CacheReadTokens,
 			CacheWriteTokens: resp.Usage.CacheWriteTokens,
 		}
+		rep.Elapsed = resp.Elapsed
 	}
 	if err == nil && resp == nil {
 		// The nil guard above concedes resp can be nil, which makes every

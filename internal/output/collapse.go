@@ -50,6 +50,10 @@ type Finding struct {
 	// Superseded is set when a later-published finding supersedes this one.
 	Superseded bool
 
+	// relevance is how well this finding bears on the question asked, in
+	// [0,1]: the max over its cluster of relevanceScores' per-claim score.
+	relevance float64
+
 	// cluster is every claim collapsed into this finding, so a citation can carry
 	// the quote its own source supplied.
 	cluster []*core.Claim
@@ -61,26 +65,14 @@ type Finding struct {
 	disputes []string
 }
 
-// Findings collapses claims into what the report should say.
-//
-// Ordered by DERIVED confidence (§11.3), never by the extractor's self-report. This
-// ordering replaced a function that sorted by the latter under the same field name, so
-// an uncalibrated number — one §11.3 describes as "mostly encoding fluency" — decided
-// which claims led the answer and which were dropped at the cap. A fluent claim from
-// one anonymous page outranked a claim three independent publishers agreed on.
-//
-// Before the Verifier scores a session every derived confidence is 0 and the sort has
-// nothing to work with. Assertion strength is the wrong tie-break — preferring it is
-// the exact behaviour that was removed — so ties fall back to publisher breadth, which
-// is mechanical and claims nothing.
-//
-// Truncated to max AFTER collapsing. Collapsing first is what lets the cap count
-// distinct assertions rather than repetitions; a cap applied to raw claims spends its
-// whole budget on one page saying one thing eight ways.
-func Findings(claims []*core.Claim, edges []*core.ClaimEdge, max int) []Finding {
+// Findings collapses claims into what the report should say, sorted by
+// confidence weighted by relevance to the question, then truncated to max.
+func Findings(question string, claims []*core.Claim, edges []*core.ClaimEdge, max int) []Finding {
 	if len(claims) == 0 {
 		return nil
 	}
+
+	relevance := relevanceScores(question, claims)
 
 	// Built FROM the Verifier's scores rather than re-derived.
 	//
@@ -125,6 +117,7 @@ func Findings(claims []*core.Claim, edges []*core.ClaimEdge, max int) []Finding 
 			Confidence: rep.Confidence,
 			Publishers: sc.Publishers,
 			Superseded: sc.Superseded,
+			relevance:  clusterRelevance(sc.Cluster.Claims, relevance),
 			cluster:    sc.Cluster.Claims,
 			order:      len(claims),
 		}
@@ -203,18 +196,16 @@ func Findings(claims []*core.Claim, edges []*core.ClaimEdge, max int) []Finding 
 	return out
 }
 
-// sortFindings ranks by derived confidence, then publisher breadth, then source breadth,
-// then input position.
-//
-// Ordered by DERIVED confidence (§11.3), never by the extractor's self-report — a
-// function that sorted by the latter under the same field name let an uncalibrated number
-// decide which claims led the answer. Before the Verifier scores a session every derived
-// confidence is 0, and assertion strength is the wrong tie-break, so ties fall back to
-// breadth: mechanical, and it claims nothing.
+// sortFindings orders by Confidence*(0.5+0.5*relevance), then relevance,
+// publishers, breadth, input order.
 func sortFindings(out []Finding) {
+	key := func(f Finding) float64 { return f.Confidence * (0.5 + 0.5*f.relevance) }
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Confidence != out[j].Confidence {
-			return out[i].Confidence > out[j].Confidence
+		if ki, kj := key(out[i]), key(out[j]); ki != kj {
+			return ki > kj
+		}
+		if out[i].relevance != out[j].relevance {
+			return out[i].relevance > out[j].relevance
 		}
 		if out[i].Publishers != out[j].Publishers {
 			return out[i].Publishers > out[j].Publishers
@@ -311,7 +302,9 @@ func corroborationNote(f Finding) string {
 	var parts []string
 	switch {
 	case f.Publishers > 1:
-		parts = append(parts, fmt.Sprintf("%d independent publishers", f.Publishers))
+		// Not "independent": distinct domains show the coverage isn't one
+		// site, not that it's independent.
+		parts = append(parts, fmt.Sprintf("%d publishers", f.Publishers))
 	case len(f.Sources) > 1:
 		// Several URLs, one publisher. Worth saying: it looks like corroboration
 		// and is not, which is §11.3's inflation risk in a form a reader can see.

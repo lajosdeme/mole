@@ -404,7 +404,9 @@ func TestDisagreementsSurviveReordering(t *testing.T) {
 		// Inserted FIRST, lowest confidence: sorted last.
 		mk("Subword tokenization improves accuracy.", "a.example", 0.10),
 		mk("Subword tokenization does not improve accuracy.", "b.example", 0.10),
-		mk("Byte-level models handle long documents.", "c.example", 0.90),
+		// Shares no content word with the question, so relevance isn't why
+		// this claim outranks the disputed pair — confidence is.
+		mk("Kernel fusion improves GPU throughput.", "c.example", 0.90),
 		mk("Inference latency drops with speculative decoding.", "d.example", 0.80),
 		mk("The PG-19 corpus measures long-document perplexity.", "e.example", 0.70),
 	}
@@ -472,11 +474,12 @@ func TestTheCapNeverShowsOneSideOfADisagreement(t *testing.T) {
 		c.Confidence = conf
 		return c
 	}
-	// The disputed pair scores lowest, so the cap reaches it first.
+	// The disputed pair scores lowest, so the cap reaches it first; neither
+	// other claim shares a content word with the question.
 	claims := []core.Claim{
 		mk("Subword tokenization improves accuracy.", "a.example", 0.10),
 		mk("Subword tokenization does not improve accuracy.", "b.example", 0.10),
-		mk("Byte-level models handle long documents.", "c.example", 0.90),
+		mk("Kernel fusion improves GPU throughput.", "c.example", 0.90),
 		mk("Inference latency drops with speculative decoding.", "d.example", 0.80),
 	}
 	st, sid := newStore(t, claims)

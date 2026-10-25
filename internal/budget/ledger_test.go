@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -805,5 +806,129 @@ func TestSweepSurvivesAnUnreleasableReservation(t *testing.T) {
 	}
 	if held != 0 {
 		t.Errorf("%d still held in unresolved reservations after the sweep", held)
+	}
+}
+
+// TestReserveGroundIgnoresTheWallClock checks that ReserveGround ignores
+// MaxWallClock and MaxLeads but still enforces MaxToolCalls and the money.
+func TestReserveGroundIgnoresTheWallClock(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	l := budget.New(db, noEscrow())
+	t0 := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	now := t0
+	l.SetClock(func() time.Time { return now })
+
+	create := func(spec budget.SessionSpec) *core.Session {
+		t.Helper()
+		spec.Prompt, spec.Mode = "q", core.ModeReport
+		spec.ActorTypes = []core.ActorType{core.ActorWeb}
+		spec.BudgetUnit, spec.Budget = core.BudgetUSD, core.MicrosPerUSD
+		s, err := l.CreateSession(ctx, spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	bump := func(id string, d store.BudgetDelta) {
+		t.Helper()
+		if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+			return tx.ApplyBudgetDelta(ctx, id, d)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := create(budget.SessionSpec{MaxWallClock: time.Minute, MaxLeads: 1, MaxToolCalls: 10})
+	now = t0.Add(2 * time.Minute)
+
+	if _, err := l.ReserveVerify(ctx, s.ID, 1000); !errors.Is(err, budget.ErrInsufficientBudget) {
+		t.Fatalf("ReserveVerify past the wall clock: err = %v, want ErrInsufficientBudget", err)
+	}
+	ground := func(why string) {
+		t.Helper()
+		r, err := l.ReserveGround(ctx, s.ID, 1000)
+		if err != nil {
+			t.Fatalf("ReserveGround %s: %v", why, err)
+		}
+		if err := l.Release(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ground("past the wall clock")
+
+	// max_leads is a research ceiling too.
+	bump(s.ID, store.BudgetDelta{LeadCount: 1})
+	ground("past the wall clock and max_leads")
+
+	// MaxToolCalls still binds.
+	bump(s.ID, store.BudgetDelta{ToolCallCount: 10})
+	if _, err := l.ReserveGround(ctx, s.ID, 1000); !errors.Is(err, budget.ErrInsufficientBudget) {
+		t.Errorf("ReserveGround at MaxToolCalls: err = %v, want ErrInsufficientBudget", err)
+	}
+
+	// So does the money.
+	rich := create(budget.SessionSpec{})
+	avail, err := l.Available(ctx, rich.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.ReserveGround(ctx, rich.ID, avail+1); !errors.Is(err, budget.ErrInsufficientBudget) {
+		t.Errorf("ReserveGround beyond Available(): err = %v, want ErrInsufficientBudget", err)
+	}
+}
+
+// TestMaxLeadsDoesNotMaskTheWallClock checks that a session at MaxLeads still
+// has MaxWallClock enforced on ReserveVerify and ReserveForRetry.
+func TestMaxLeadsDoesNotMaskTheWallClock(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	l := budget.New(db, noEscrow())
+	t0 := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	now := t0
+	l.SetClock(func() time.Time { return now })
+
+	s, err := l.CreateSession(ctx, budget.SessionSpec{
+		Prompt:       "q",
+		Mode:         core.ModeReport,
+		ActorTypes:   []core.ActorType{core.ActorWeb},
+		BudgetUnit:   core.BudgetUSD,
+		Budget:       core.MicrosPerUSD,
+		MaxWallClock: time.Minute,
+		MaxLeads:     1,
+		MaxToolCalls: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.ApplyBudgetDelta(ctx, s.ID, store.BudgetDelta{LeadCount: 1})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// At MaxLeads but inside the clock: both still run.
+	r, err := l.ReserveVerify(ctx, s.ID, 1000)
+	if err != nil {
+		t.Fatalf("ReserveVerify at MaxLeads within the clock: %v", err)
+	}
+	if err := l.Release(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	r, err = l.ReserveForRetry(ctx, s.ID, "lead-1", 1000)
+	if err != nil {
+		t.Fatalf("ReserveForRetry at MaxLeads within the clock: %v", err)
+	}
+	if err := l.Release(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+
+	// At MaxLeads AND past the clock: the clock binds.
+	now = t0.Add(2 * time.Minute)
+	if _, err := l.ReserveVerify(ctx, s.ID, 1000); !errors.Is(err, budget.ErrInsufficientBudget) || !strings.Contains(err.Error(), "max_wallclock") {
+		t.Errorf("ReserveVerify at MaxLeads past the clock: err = %v, want ErrInsufficientBudget naming max_wallclock", err)
+	}
+	if _, err := l.ReserveForRetry(ctx, s.ID, "lead-1", 1000); !errors.Is(err, budget.ErrInsufficientBudget) || !strings.Contains(err.Error(), "max_wallclock") {
+		t.Errorf("ReserveForRetry at MaxLeads past the clock: err = %v, want ErrInsufficientBudget naming max_wallclock", err)
 	}
 }

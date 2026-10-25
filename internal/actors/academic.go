@@ -285,11 +285,8 @@ func citationURL(p academic.Paper) string {
 
 // summarize writes the planner's view of this lead, mechanically.
 //
-// No model call, unlike WebActor's reduce. The digest needs coverage — what was
-// looked at and how much came back — and paying a strong-tier call to phrase
-// that is the kind of spend the escalation ladder exists to avoid. It also keeps
-// §9.1's guarantee that no page-derived text reaches the planner: titles here
-// are the providers' own metadata, not mined content.
+// No model call: nothing downstream reads Result.Summary, and titles are
+// provider metadata, not mined content.
 func summarize(query string, papers []academic.Paper, claims int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Read %d paper(s) for %q, yielding %d claim(s).", len(papers), query, claims)

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
-	"strings"
 
 	"github.com/lajosdeme/mole/internal/cache"
 	"github.com/lajosdeme/mole/internal/core"
@@ -21,7 +20,7 @@ import (
 
 // WebActor runs a web research lead:
 //
-//	search → (fetch → extract)? → chunk → mine claims → verify quotes → reduce
+//	search → (fetch → extract)? → chunk → mine claims → verify quotes → summarize
 //
 // The parenthesized step is conditional: a search provider that returned usable
 // page content skips it entirely (§10.4). Everything raw dies when Run returns.
@@ -136,7 +135,7 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 		res.Stats.Chunks += len(plan.Chunks)
 		res.Stats.ChunksSkipped += plan.Skipped
 
-		summary := sourceSummary{Title: doc.Title, URL: src.url}
+		var summary sourceSummary
 
 		for _, chunk := range plan.Chunks {
 			// Plan sized the whole document against an ESTIMATE. Re-check
@@ -196,20 +195,11 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 		}
 
 		if len(summary.Claims) > 0 || summary.Rows > 0 || doc.Excerpt != "" {
-			summary.Excerpt = doc.Excerpt
 			perSource = append(perSource, summary)
 		}
 	}
 
-	// 6. Reduce to one summary.
-	if len(perSource) > 0 {
-		summary, err := a.reduce(ctx, lead, perSource, res)
-		if err != nil {
-			a.logger().WarnContext(ctx, "reduce failed", "lead", lead.ID, "err", err)
-		} else {
-			res.Summary = summary
-		}
-	}
+	// 6. Summarize what was found.
 	if res.Summary == "" {
 		// Say what actually happened. Claiming no sources were found while
 		// printing claims from those sources directly underneath is worse than
@@ -218,7 +208,7 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 		switch {
 		case len(res.Claims) > 0:
 			res.Summary = fmt.Sprintf(
-				"Summarization failed; %d verified claim(s) from %d source(s) are listed below, unsynthesized.",
+				"%d verified claim(s) from %d source(s).",
 				len(res.Claims), len(perSource))
 		case res.Stats.ChunksFailed > 0:
 			res.Summary = fmt.Sprintf(
@@ -260,15 +250,12 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 	return res, nil
 }
 
+// sourceSummary tracks one source's contribution: claims and rows toward
+// MaxClaimsPerSource, and whether it counted toward the run summary.
 type sourceSummary struct {
-	Title   string
-	URL     string
-	Excerpt string
-	Claims  []core.Claim
-	// Rows counts what dataset mode extracted from this source. A count, not the
-	// rows: the per-source summary feeds the reduce prompt, and a table of values
-	// there would be the extraction sent back through a model that has no use for
-	// it.
+	Claims []core.Claim
+	// Rows counts what dataset mode extracted from this source, not the rows
+	// themselves.
 	Rows int
 }
 
@@ -425,43 +412,6 @@ func (a *WebActor) mineChunk(
 	res.Stats.ClaimsProposed += out.Proposed
 	res.Stats.ClaimsRejected += out.Rejected
 	return out.Claims, out.Usage, err
-}
-
-// reduce writes the one summary the planner will see.
-func (a *WebActor) reduce(ctx context.Context, lead core.Lead, sources []sourceSummary, res *Result) (string, error) {
-	var b strings.Builder
-	for _, s := range sources {
-		b.WriteString("\nsource: " + sanitizeTag(s.URL) + "\n")
-		if s.Title != "" {
-			b.WriteString("title: " + sanitizeTag(s.Title) + "\n")
-		}
-		for _, c := range s.Claims {
-			b.WriteString("- " + sanitizeTag(c.Text) + "\n")
-		}
-		if len(s.Claims) == 0 && s.Excerpt != "" {
-			b.WriteString("- " + sanitizeTag(s.Excerpt) + "\n")
-		}
-	}
-
-	resp, err := a.LLM.Complete(ctx, llm.Request{
-		Tier:     llm.TierStrong,
-		System:   reduceSystemPrompt,
-		Messages: []llm.Message{llm.User(reduceUserPrompt(fenceToken(), lead.Query, b.String()))},
-		// Headroom for a reasoning model, which spends this budget on its own
-		// reasoning before emitting anything. Unused output tokens are free.
-		MaxTokens: 4000,
-	})
-	if resp == nil {
-		return "", err
-	}
-	res.Costs = append(res.Costs, toolCallFor(a.SessionID, lead, resp, "reduce", a.Pricing, a.Log, err))
-	if err != nil {
-		return "", err
-	}
-	if resp.Refused {
-		return "", fmt.Errorf("actors/web: model refused summary (%s)", resp.RefusalCategory)
-	}
-	return strings.TrimSpace(resp.Text), nil
 }
 
 // toolCall prices a model response into a ledger row.

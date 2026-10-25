@@ -29,6 +29,12 @@ type scriptedLLM struct {
 	prompts []string
 	models  []string
 	reply   func(call int, prompt string) (string, error)
+	// elapsed is what Complete reports as the call's wall-clock time. Zero
+	// unless a test sets it, so every existing test is unaffected.
+	elapsed time.Duration
+	// usage is what each call reports spending. Zero takes 400 in / 80 out, so
+	// only a test that needs charges to land exactly on a reservation sets it.
+	usage llm.Usage
 }
 
 // requestedModels is what each call asked for, so a test can see whether an override
@@ -54,10 +60,15 @@ func (s *scriptedLLM) Complete(_ context.Context, req llm.Request) (*llm.Respons
 	s.mu.Unlock()
 
 	text, err := s.reply(i, prompt)
+	usage := s.usage
+	if usage.IsZero() {
+		usage = llm.Usage{InputTokens: 400, OutputTokens: 80}
+	}
 	resp := &llm.Response{
-		Model: "fake-model",
-		Text:  text,
-		Usage: llm.Usage{InputTokens: 400, OutputTokens: 80},
+		Model:   "fake-model",
+		Text:    text,
+		Usage:   usage,
+		Elapsed: s.elapsed,
 	}
 	return resp, err
 }
@@ -288,10 +299,10 @@ func TestVerificationCannotOutspendItsShare(t *testing.T) {
 	if res.PairsUnjudged == 0 {
 		t.Error("degraded but reported every pair judged")
 	}
-	// And the claims are still marked verified, or the work queue never drains and
-	// the next pass pays again for the same pairs.
-	if n := r.unverified(t); n != 0 {
-		t.Errorf("%d claims still unverified after a degraded pass", n)
+	// Pairs that were judged still mark their claims; pairs the ceiling
+	// never reached leave theirs unverified.
+	if n := r.unverified(t); n == 0 {
+		t.Error("every claim marked verified despite the ceiling leaving pairs unjudged")
 	}
 }
 
@@ -313,19 +324,25 @@ func TestNothingIsLeftHeld(t *testing.T) {
 		if _, err := r.v.Run(context.Background(), r.sess.ID); err != nil {
 			t.Fatalf("%s: run: %v", name, err)
 		}
+		r.assertNothingHeld(t, name)
+	}
+}
 
-		after := r.reload(t)
-		if after.Held != 0 {
-			t.Errorf("%s: %d still held", name, after.Held)
-		}
-		v, err := r.led.Verify(context.Background(), r.sess.ID)
-		if err != nil {
-			t.Fatalf("%s: verify: %v", name, err)
-		}
-		if !v.Consistent() {
-			t.Errorf("%s: ledger drift: spent recorded=%d ledger=%d",
-				name, v.SpentRecorded, v.SpentFromLedger)
-		}
+// assertNothingHeld fails the test if any reservation is still held or the
+// session's recorded spend has drifted from the ledger's.
+func (r *rig) assertNothingHeld(t *testing.T, label string) {
+	t.Helper()
+	after := r.reload(t)
+	if after.Held != 0 {
+		t.Errorf("%s: %d still held", label, after.Held)
+	}
+	v, err := r.led.Verify(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatalf("%s: verify: %v", label, err)
+	}
+	if !v.Consistent() {
+		t.Errorf("%s: ledger drift: spent recorded=%d ledger=%d",
+			label, v.SpentRecorded, v.SpentFromLedger)
 	}
 }
 
@@ -337,6 +354,8 @@ func TestAFatalProviderErrorStopsRatherThanRepeating(t *testing.T) {
 		return "", llm.ErrUnauthorized
 	})
 	r.v.BatchSize = 2
+	// Serial, so "one call" is exact.
+	r.v.Concurrency = 1
 
 	res, err := r.v.Run(context.Background(), r.sess.ID)
 	if err != nil {
@@ -488,6 +507,33 @@ func TestVerifierSpendIsAttributedToTheVerifier(t *testing.T) {
 	for role := range byRole {
 		if role != core.RoleVerifier {
 			t.Errorf("verification charged %v as well", role)
+		}
+	}
+}
+
+// TestAdjudicationRecordsItsDuration checks that every stored verifier call
+// records how long the model call took.
+func TestAdjudicationRecordsItsDuration(t *testing.T) {
+	r := newRig(t, 2_000_000, distinctClaims(6), judgeEveryPair(verifier.RelNeither))
+	r.llm.elapsed = 1500 * time.Millisecond
+	if _, err := r.v.Run(context.Background(), r.sess.ID); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var calls []*core.ToolCall
+	if err := r.db.Read(context.Background(), func(ctx context.Context, q store.Queries) error {
+		var err error
+		calls, err = q.ListToolCalls(ctx, r.sess.ID, 0)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) == 0 {
+		t.Fatal("no tool call rows recorded")
+	}
+	for _, c := range calls {
+		if c.DurationMS != 1500 {
+			t.Errorf("call %+v: DurationMS = %d, want 1500", c, c.DurationMS)
 		}
 	}
 }
@@ -734,7 +780,9 @@ func TestPastTheStoreLimitClaimsStillGetVerified(t *testing.T) {
 			Source: fmt.Sprintf("https://s%03d.example/p", i),
 		})
 	}
-	r := newRig(t, 40_000_000, claims, judgeEveryPair(verifier.RelNeither))
+	// Unlimited tool calls: 505 claims need more batches than newRig's
+	// default max_tool_calls allows.
+	r := newRigWithCeilings(t, 40_000_000, 50, 0, claims, judgeEveryPair(verifier.RelNeither))
 	r.v.BatchSize = 8
 	r.v.MaxShareOfBudget = 0.9
 
@@ -1073,11 +1121,12 @@ func TestHittingMaxLeadsDoesNotBlockVerification(t *testing.T) {
 // Marking is what drains the work queue, and doing it after a pass that could not
 // adjudicate at all records "we compared these and found nothing" when the truth is "we
 // never compared them". Distinct from a pass whose model answered uselessly — that one
-// HAS asked, and re-asking pays again for the same answer.
+// HAS asked, and re-asking would pay again for the same answer — not a call
+// that errored outright, which has no answer to repay for.
 func TestAPassThatComparedNothingLeavesClaimsUnverified(t *testing.T) {
 	ctx := context.Background()
 
-	// Allowance far too small for even one batch.
+	// Allowance far too small for even one batch: no call is ever attempted.
 	blocked := newRig(t, 400_000, distinctClaims(6), judgeEveryPair(verifier.RelNeither))
 	blocked.v.MaxShareOfBudget = 0.00001
 	res, err := blocked.v.Run(ctx, blocked.sess.ID)
@@ -1097,8 +1146,8 @@ func TestAPassThatComparedNothingLeavesClaimsUnverified(t *testing.T) {
 		t.Errorf("the reason does not say the claims were left alone: %q", res.Degraded)
 	}
 
-	// A model that ANSWERS uselessly is the other case: the claims are marked, because
-	// re-asking would pay again for the same non-answer.
+	// A model that ANSWERS uselessly is a different case: the claims are marked,
+	// because re-asking would pay again for the same non-answer.
 	asked := newRig(t, 4_000_000, distinctClaims(6), func(int, string) (string, error) {
 		return "I decline to compare these.", nil
 	})
@@ -1107,6 +1156,22 @@ func TestAPassThatComparedNothingLeavesClaimsUnverified(t *testing.T) {
 	}
 	if n := asked.unverified(t); n != 0 {
 		t.Errorf("%d claims left unverified after the model was asked and answered badly", n)
+	}
+
+	// A call that ERRORS is neither of those: no response came back, so the
+	// claims stay unverified.
+	errored := newRig(t, 4_000_000, distinctClaims(6), func(int, string) (string, error) {
+		return "", llm.ErrOverloaded
+	})
+	erroredRes, err := errored.v.Run(ctx, errored.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if erroredRes.Calls == 0 {
+		t.Fatal("no call was attempted, so this is not the case under test")
+	}
+	if n := errored.unverified(t); n != 6 {
+		t.Errorf("%d of 6 claims left unverified after every call errored", n)
 	}
 }
 

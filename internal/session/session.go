@@ -436,6 +436,7 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 		Store:     r.Store,
 		Ledger:    led,
 		LLM:       actor.LLM,
+		Pricing:   actor.Pricing,
 		Log:       r.logger(),
 		Model:     r.VerifierModel,
 		BatchSize: r.VerifierBatchSize,
@@ -638,12 +639,13 @@ func (r *Runner) finish(
 		var calls []core.ToolCall
 		if !report.Cost.IsZero() {
 			calls = append(calls, core.ToolCall{
-				SessionID: sess.ID,
-				Role:      core.RoleOutput,
-				Type:      core.CallLLM,
-				Model:     report.Model,
-				Input:     "report",
-				Cost:      output.Price(actor.Pricing, report),
+				SessionID:  sess.ID,
+				Role:       core.RoleOutput,
+				Type:       core.CallLLM,
+				Model:      report.Model,
+				Input:      "report",
+				Cost:       output.Price(actor.Pricing, report),
+				DurationMS: report.Elapsed.Milliseconds(),
 			})
 		}
 		if _, serr := led.Settle(ctx, reservation, calls); serr != nil {

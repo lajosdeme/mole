@@ -22,6 +22,9 @@ type fakeLLM struct {
 	err     error
 	refused bool
 	calls   int
+	// elapsed is what Complete reports as the call's wall-clock time. Zero
+	// unless a test sets it, so every existing test is unaffected.
+	elapsed time.Duration
 }
 
 func (f *fakeLLM) Name() string               { return "fake" }
@@ -31,7 +34,7 @@ func (f *fakeLLM) Complete(ctx context.Context, req llm.Request) (*llm.Response,
 	if len(req.Messages) > 0 {
 		f.prompt = req.Messages[0].Text
 	}
-	resp := &llm.Response{Model: "fake-model", Usage: llm.Usage{InputTokens: 800, OutputTokens: 200}}
+	resp := &llm.Response{Model: "fake-model", Usage: llm.Usage{InputTokens: 800, OutputTokens: 200}, Elapsed: f.elapsed}
 	if f.refused {
 		resp.Refused, resp.RefusalCategory = true, "policy"
 		return resp, nil
@@ -398,8 +401,8 @@ func listClaimTexts(t *testing.T, st store.Store, sid string) []string {
 	return out
 }
 
-// TestDisagreementIsInstructed. §13: contradictions are rendered explicitly
-// rather than silently resolved by whichever claim the model liked.
+// TestDisagreementIsInstructed checks that the prompt requires conflicts to
+// be rendered explicitly, with the one most relevant to the question leading.
 func TestDisagreementIsInstructed(t *testing.T) {
 	st, sid := newStore(t, []core.Claim{
 		claim("The value is 1.31.", "https://a.example", "reports 1.31"),
@@ -411,6 +414,49 @@ func TestDisagreementIsInstructed(t *testing.T) {
 	}
 	if !strings.Contains(f.prompt, "disagree") {
 		t.Errorf("the prompt does not require disagreement to be surfaced:\n%s", f.prompt)
+	}
+	if !strings.Contains(f.prompt, "lead with the conflicts that bear most on") {
+		t.Errorf("the prompt does not say which conflicts to lead with:\n%s", f.prompt)
+	}
+}
+
+// TestReportPromptSaysWhatToLeadWith checks that the prompt tells the model
+// to open with the answer and not treat repetition as corroboration.
+func TestReportPromptSaysWhatToLeadWith(t *testing.T) {
+	claims := []core.Claim{
+		claim("Model X scores 80.3% on the benchmark.", "https://a.example/1", "scored 80.3 percent"),
+		claim("Model X scores 80.3 percent on the benchmark.", "https://b.example/1", "80.3% reported here"),
+		claim("Model X achieved 80.3% on the benchmark.", "https://c.example/1", "achieved 80.3%"),
+		claim("A separate finding about latency.", "https://d.example/1", "latency finding quote"),
+	}
+	st, sid := newStore(t, claims)
+	stored := storedClaims(t, st, sid)
+	first := stored["Model X scores 80.3% on the benchmark."].ID
+	link(t, st, sid, first, stored["Model X scores 80.3 percent on the benchmark."].ID, core.EdgeDuplicateOf)
+	link(t, st, sid, first, stored["Model X achieved 80.3% on the benchmark."].ID, core.EdgeDuplicateOf)
+
+	f := &fakeLLM{reply: func(string) string { return "Summary [1][2]." }}
+	if _, err := (&output.Generator{LLM: f}).Generate(context.Background(), st, sid); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"Open with a direct answer",
+		"Repetition is not corroboration",
+		"outweighs repetitions of that figure",
+		"measured from what it reports",
+	} {
+		if !strings.Contains(f.prompt, want) {
+			t.Errorf("prompt is missing rule %q:\n%s", want, f.prompt)
+		}
+	}
+
+	mat := material(f.prompt)
+	if !strings.Contains(mat, "(3 publishers") {
+		t.Errorf("material does not credit the 3-publisher finding:\n%s", mat)
+	}
+	if strings.Contains(mat, "independent") {
+		t.Errorf("material still claims independence, which is not established:\n%s", mat)
 	}
 }
 
@@ -610,5 +656,22 @@ func TestUnverifiedClaimsFallBackToSourceBreadth(t *testing.T) {
 
 	if strings.Contains(f.prompt, "A claim from a page mentioned once.") {
 		t.Errorf("assertion strength is still breaking ties:\n%s", f.prompt)
+	}
+}
+
+// TestReportCarriesElapsed checks that Generate copies the synthesis call's
+// elapsed time onto the report.
+func TestReportCarriesElapsed(t *testing.T) {
+	st, sid := newStore(t, []core.Claim{
+		claim("MambaByte reports 1.31 BPB.", "https://arxiv.org/abs/2401.13660", "It achieves 1.31 bits per byte"),
+	})
+
+	f := &fakeLLM{reply: func(string) string { return "A finding [1]." }, elapsed: 2 * time.Second}
+	rep, err := (&output.Generator{LLM: f}).Generate(context.Background(), st, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Elapsed != 2*time.Second {
+		t.Errorf("rep.Elapsed = %v, want 2s", rep.Elapsed)
 	}
 }

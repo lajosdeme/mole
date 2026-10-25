@@ -17,8 +17,8 @@ import (
 
 // Result is what one lead produced.
 type Result struct {
-	// Summary is a few paragraphs. The planner sees this; it never sees the
-	// pages behind it.
+	// Summary is a one-line count of claims and sources, or why there were
+	// none.
 	Summary string
 
 	// Claims are atomic facts, each carrying a source and a verbatim quote

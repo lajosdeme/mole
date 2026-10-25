@@ -65,15 +65,27 @@ func reportPrompt(fence, question string, findings []Finding, index map[string]i
 	return fmt.Sprintf(`Write an answer to a research question from verified claims.
 
 Rules:
+- Open with a direct answer in two to four sentences: the best-supported figure
+  or conclusion and, in the same paragraph, the most important disagreement or
+  correction that bears on it.
+- The material is ordered by strength of evidence and relevance to the
+  question, strongest first. Repetition is not corroboration: many sites
+  restating one press release or one study are one piece of evidence.
+- A finding that says another figure is wrong, unmeasured, overstated,
+  retracted, or cited without evidence outweighs repetitions of that figure.
+  Put it next to the figure it challenges.
+- Distinguish what a source measured from what it reports or cites from
+  elsewhere.
 - Cite every factual sentence with the [n] marker of the claim supporting it.
   A sentence with no marker reads as your own assertion, and you have no
   evidence of your own.
 - Use ONLY the numbers that appear in the material. Inventing one produces a
   citation pointing nowhere.
 - Where the material lists conflicting findings, every conflict must appear in
-  your answer, stated as a conflict between sources, with both sides cited. Do
-  not pick a winner silently — a reader who cannot see the disagreement cannot
-  judge it.
+  your answer with both sides cited; lead with the conflicts that bear most on
+  the question, and give one about a definition or side detail a single short
+  sentence. Do not pick a winner silently — a reader who cannot see the
+  disagreement cannot judge it.
 - Some findings carry a parenthetical note about how well supported they are.
   Take it into account: a finding whose source failed a re-read should not be
   relied on, and one flagged as outdated should give way to the later finding.
@@ -190,6 +202,14 @@ func askPrompt(fence, question, sessionQuestion string, findings []Finding, inde
 	return fmt.Sprintf(`Answer the question below from the material, and nothing else.
 
 Rules:
+- The material is ordered by strength of evidence and relevance to the
+  question, strongest first. Repetition is not corroboration: many sites
+  restating one press release or one study are one piece of evidence.
+- A finding that says another figure is wrong, unmeasured, overstated,
+  retracted, or cited without evidence outweighs repetitions of that figure.
+  Put it next to the figure it challenges.
+- Distinguish what a source measured from what it reports or cites from
+  elsewhere.
 - Cite every factual sentence with the [n] marker of the finding supporting it.
 - Use ONLY numbers that appear in the material. Inventing one produces a
   citation pointing nowhere.

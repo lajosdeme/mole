@@ -253,12 +253,13 @@ func (d Deps) closeAsk(
 		var calls []core.ToolCall
 		if rep != nil && !rep.Cost.IsZero() {
 			calls = append(calls, core.ToolCall{
-				SessionID: askSess.ID,
-				Role:      core.RoleOutput,
-				Type:      core.CallLLM,
-				Model:     rep.Model,
-				Input:     "ask",
-				Cost:      output.Price(d.Pricing, rep),
+				SessionID:  askSess.ID,
+				Role:       core.RoleOutput,
+				Type:       core.CallLLM,
+				Model:      rep.Model,
+				Input:      "ask",
+				Cost:       output.Price(d.Pricing, rep),
+				DurationMS: rep.Elapsed.Milliseconds(),
 			})
 		}
 		settled, err := led.Settle(ctx, reservation, calls)
