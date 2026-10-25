@@ -294,11 +294,20 @@ func (l *Ledger) reserveWith(ctx context.Context, sessionID string, amount int64
 			if s.MaxToolCalls > 0 && s.ToolCallCount >= s.MaxToolCalls {
 				return fmt.Errorf("%w: session %s hit max_tool_calls", ErrInsufficientBudget, sessionID)
 			}
+		case ceilingsExceptLeads:
+			// Checked directly for the same reason. Filtering HitCeiling's answer
+			// for "max_leads" let a session AT MaxLeads mask its wall clock:
+			// HitCeiling checks leads before the clock, reported max_leads, and the
+			// filter passed verify and retry calls on past max_wallclock.
+			if s.MaxToolCalls > 0 && s.ToolCallCount >= s.MaxToolCalls {
+				return fmt.Errorf("%w: session %s hit max_tool_calls", ErrInsufficientBudget, sessionID)
+			}
+			if s.MaxWallClock > 0 && now.Sub(s.CreatedAt) >= s.MaxWallClock {
+				return fmt.Errorf("%w: session %s hit max_wallclock", ErrInsufficientBudget, sessionID)
+			}
 		default:
 			if hit, which := s.HitCeiling(now); hit {
-				if !(policy == ceilingsExceptLeads && which == "max_leads") {
-					return fmt.Errorf("%w: session %s hit %s", ErrInsufficientBudget, sessionID, which)
-				}
+				return fmt.Errorf("%w: session %s hit %s", ErrInsufficientBudget, sessionID, which)
 			}
 		}
 		if avail := s.Available(); amount > avail {

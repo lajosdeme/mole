@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -879,5 +880,63 @@ func TestReserveGroundIgnoresTheWallClock(t *testing.T) {
 	}
 	if _, err := l.ReserveGround(ctx, rich.ID, avail+1); !errors.Is(err, budget.ErrInsufficientBudget) {
 		t.Errorf("ReserveGround beyond Available(): err = %v, want ErrInsufficientBudget", err)
+	}
+}
+
+// TestMaxLeadsDoesNotMaskTheWallClock. ReserveVerify and ReserveForRetry exempt
+// max_leads, and the exemption used to be a filter on HitCeiling's answer. HitCeiling
+// names only the FIRST ceiling it finds and checks max_leads before max_wallclock, so
+// a session at MaxLeads reported "max_leads", the filter waved it through, and the
+// clock was never read: verify and retry calls ran on past the wall clock.
+func TestMaxLeadsDoesNotMaskTheWallClock(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	l := budget.New(db, noEscrow())
+	t0 := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	now := t0
+	l.SetClock(func() time.Time { return now })
+
+	s, err := l.CreateSession(ctx, budget.SessionSpec{
+		Prompt:       "q",
+		Mode:         core.ModeReport,
+		ActorTypes:   []core.ActorType{core.ActorWeb},
+		BudgetUnit:   core.BudgetUSD,
+		Budget:       core.MicrosPerUSD,
+		MaxWallClock: time.Minute,
+		MaxLeads:     1,
+		MaxToolCalls: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.ApplyBudgetDelta(ctx, s.ID, store.BudgetDelta{LeadCount: 1})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// At MaxLeads but inside the clock: both still run.
+	r, err := l.ReserveVerify(ctx, s.ID, 1000)
+	if err != nil {
+		t.Fatalf("ReserveVerify at MaxLeads within the clock: %v", err)
+	}
+	if err := l.Release(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	r, err = l.ReserveForRetry(ctx, s.ID, "lead-1", 1000)
+	if err != nil {
+		t.Fatalf("ReserveForRetry at MaxLeads within the clock: %v", err)
+	}
+	if err := l.Release(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+
+	// At MaxLeads AND past the clock: the clock binds.
+	now = t0.Add(2 * time.Minute)
+	if _, err := l.ReserveVerify(ctx, s.ID, 1000); !errors.Is(err, budget.ErrInsufficientBudget) || !strings.Contains(err.Error(), "max_wallclock") {
+		t.Errorf("ReserveVerify at MaxLeads past the clock: err = %v, want ErrInsufficientBudget naming max_wallclock", err)
+	}
+	if _, err := l.ReserveForRetry(ctx, s.ID, "lead-1", 1000); !errors.Is(err, budget.ErrInsufficientBudget) || !strings.Contains(err.Error(), "max_wallclock") {
+		t.Errorf("ReserveForRetry at MaxLeads past the clock: err = %v, want ErrInsufficientBudget naming max_wallclock", err)
 	}
 }
