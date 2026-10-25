@@ -395,3 +395,48 @@ func TestAnthropicStrongRoleWithoutAModelUsesTheProviderDefault(t *testing.T) {
 		t.Errorf("cheap model = %q, want deepseek-chat", got)
 	}
 }
+
+// TestAnthropicKeyIsRefusedOnAnOpenAICompatibleBackend checks an sk-ant- key never reaches an openai-compatible host.
+func TestAnthropicKeyIsRefusedOnAnOpenAICompatibleBackend(t *testing.T) {
+	const secret = "sk-ant-api03-supersecretvalue"
+	deepseek := config.LLMConfig{
+		Provider: "openai-compatible", BaseURL: "https://api.deepseek.com/v1", Model: "deepseek-chat",
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*config.LLMConfig)
+		setting string
+	}{
+		{"top level", func(l *config.LLMConfig) { l.APIKey = secret }, "llm.api-key"},
+		{"strong block", func(l *config.LLMConfig) {
+			l.APIKey = "sk-deepseek-top"
+			l.Strong = &config.LLMRole{Provider: "openai-compatible", APIKey: secret}
+		}, "llm.strong.api-key"},
+		{"cheap block on another provider", func(l *config.LLMConfig) {
+			l.Provider, l.BaseURL, l.Model = "anthropic", "", "claude-opus-5-5"
+			l.Cheap = &config.LLMRole{Provider: "openai-compatible", BaseURL: "https://api.deepseek.com/v1",
+				APIKey: secret, Model: "deepseek-chat"}
+		}, "llm.cheap.api-key"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.LLM = deepseek
+			c.mutate(&cfg.LLM)
+			factory, built := recordingFactory()
+			_, err := buildConfiguredLLM(cfg, nil, factory)
+			if err == nil {
+				t.Fatal("an Anthropic key was accepted for an openai-compatible backend")
+			}
+			if !strings.Contains(err.Error(), c.setting) {
+				t.Errorf("error does not name %s: %v", c.setting, err)
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "supersecret") {
+				t.Errorf("error leaks the key: %v", err)
+			}
+			if len(*built) != 0 {
+				t.Errorf("built %d backends, want none", len(*built))
+			}
+		})
+	}
+}

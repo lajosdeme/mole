@@ -1366,11 +1366,28 @@ func resolveLLMRoles(cfg *config.Config) ([]llmRole, error) {
 		if err := checkRoleKeyMatchesProvider(cfg, r.role, kind); err != nil {
 			return nil, err
 		}
+		if err := refuseAnthropicKeyElsewhere(cfg, r); err != nil {
+			return nil, err
+		}
 	}
 	if verifier, cheap := out[2], out[1]; verifier.model == "" && verifier.backend != cheap.backend {
 		return nil, errors.New("llm.verifier has its own provider but no model (set llm.verifier.model or llm.verifier-model)")
 	}
 	return out, nil
+}
+
+// refuseAnthropicKeyElsewhere refuses an Anthropic key on an openai-compatible
+// backend, naming the setting the key came from and never the key.
+func refuseAnthropicKeyElsewhere(cfg *config.Config, r llmRole) error {
+	if r.backend.kind != llm.KindOpenAICompatible || !strings.HasPrefix(r.backend.key, "sk-ant-") {
+		return nil
+	}
+	setting := "llm.api-key"
+	if b := cfg.LLM.Block(string(r.role)); b != nil && b.APIKey != "" {
+		setting = "llm." + string(r.role) + ".api-key"
+	}
+	return fmt.Errorf("%s holds an Anthropic key, but the %s role uses provider %s; "+
+		"set a key for that provider instead", setting, r.role, llm.KindOpenAICompatible)
 }
 
 // llmGroup is one built backend and the model of each role it serves.

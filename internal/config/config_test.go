@@ -500,3 +500,78 @@ func TestRoleOnAnotherProviderInheritsNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestAnthropicEnvKeyStaysOffAnotherProvider checks ANTHROPIC_API_KEY never fills an openai-compatible top-level key.
+func TestAnthropicEnvKeyStaysOffAnotherProvider(t *testing.T) {
+	for _, fileKey := range []string{"sk-deepseek-file", ""} {
+		isolate(t)
+		cfg := &config.Config{}
+		cfg.LLM = config.LLMConfig{
+			Provider: "openai-compatible", APIKey: fileKey,
+			BaseURL: "https://api.deepseek.com/v1", Model: "deepseek-chat",
+		}
+		if err := cfg.Save(); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api03-env")
+
+		loaded, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.LLM.APIKey != fileKey {
+			t.Errorf("file key %q: top-level key = %q, want the file key", fileKey, loaded.LLM.APIKey)
+		}
+	}
+}
+
+// TestAnthropicEnvKeyFillsAnAnthropicTopLevel checks ANTHROPIC_API_KEY applies when the provider is anthropic or unset.
+func TestAnthropicEnvKeyFillsAnAnthropicTopLevel(t *testing.T) {
+	for _, provider := range []string{"anthropic", ""} {
+		isolate(t)
+		cfg := &config.Config{}
+		cfg.LLM = config.LLMConfig{Provider: provider, APIKey: "sk-ant-api03-file", Model: "claude-opus-5-5"}
+		if err := cfg.Save(); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api03-env")
+
+		loaded, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.LLM.APIKey != "sk-ant-api03-env" {
+			t.Errorf("provider %q: top-level key = %q, want the environment value", provider, loaded.LLM.APIKey)
+		}
+	}
+
+	isolate(t)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api03-env")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("env-only config: %v", err)
+	}
+	if cfg.LLM.APIKey != "sk-ant-api03-env" {
+		t.Errorf("no file: top-level key = %q, want the environment value", cfg.LLM.APIKey)
+	}
+}
+
+// TestMoleLLMKeyAppliesWhateverTheProvider checks MOLE_LLM_API_KEY still sets the top-level key on any provider.
+func TestMoleLLMKeyAppliesWhateverTheProvider(t *testing.T) {
+	isolate(t)
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{Provider: "openai-compatible", APIKey: "sk-deepseek-file"}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MOLE_LLM_API_KEY", "sk-deepseek-env")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api03-env")
+
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LLM.APIKey != "sk-deepseek-env" {
+		t.Errorf("top-level key = %q, want MOLE_LLM_API_KEY", loaded.LLM.APIKey)
+	}
+}
