@@ -166,6 +166,15 @@ func newRig(t *testing.T, budgetAmount int64, replies []string, outcome func(int
 
 func newRigWithCeilings(t *testing.T, budgetAmount int64, maxLeads, maxCalls int64, replies []string, outcome func(int, core.Lead) (*actors.Result, error)) *rig {
 	t.Helper()
+	return newRigFromSpec(t, budget.SessionSpec{
+		Budget: budgetAmount, MaxLeads: maxLeads, MaxToolCalls: maxCalls,
+	}, replies, outcome)
+}
+
+// newRigFromSpec builds a rig around a session with the given budget and ceilings;
+// the prompt, mode, actor and unit are the rig's own.
+func newRigFromSpec(t *testing.T, spec budget.SessionSpec, replies []string, outcome func(int, core.Lead) (*actors.Result, error)) *rig {
+	t.Helper()
 	ctx := context.Background()
 
 	db, err := sqlite.Open(filepath.Join(t.TempDir(), "t.db"), sqlite.Options{})
@@ -178,12 +187,10 @@ func newRigWithCeilings(t *testing.T, budgetAmount int64, maxLeads, maxCalls int
 	}
 
 	led := budget.New(db, budget.DefaultConfig())
-	sess, err := led.CreateSession(ctx, budget.SessionSpec{
-		Prompt: "the research question", Mode: core.ModeReport,
-		ActorTypes: []core.ActorType{core.ActorWeb},
-		BudgetUnit: core.BudgetUSD, Budget: budgetAmount,
-		MaxLeads: maxLeads, MaxToolCalls: maxCalls,
-	})
+	spec.Prompt, spec.Mode = "the research question", core.ModeReport
+	spec.ActorTypes = []core.ActorType{core.ActorWeb}
+	spec.BudgetUnit = core.BudgetUSD
+	sess, err := led.CreateSession(ctx, spec)
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -1909,5 +1916,109 @@ func TestDeferredFollowUpsRunBeforeTheRunEnds(t *testing.T) {
 	if deferred > 0 {
 		t.Errorf("the run ended owing %d follow-up(s); a contradiction it judged "+
 			"worth settling was recorded and never researched", deferred)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The finishing reserve
+// ---------------------------------------------------------------------------
+
+// wallClockRig is a rig whose session has a wall clock, a verifier, one queued
+// lead, and an executor clock standing `elapsed` after the session was created.
+func wallClockRig(t *testing.T, wall, elapsed time.Duration) *rig {
+	t.Helper()
+	fl := &verifierLLM{plans: []string{planJSON("the only question")}, relation: "duplicate_of"}
+	r := newRigFromSpec(t, budget.SessionSpec{
+		Budget: 5 * core.MicrosPerUSD, MaxLeads: 50, MaxToolCalls: 200, MaxWallClock: wall,
+	}, nil, distinctClaims)
+	r.exec.Planner = &planner.Planner{LLM: fl, MaxInitialLeads: 3, ReplanEvery: 3, MaxDepth: 1}
+	r.withVerifier(fl)
+	at := r.sess.CreatedAt.Add(elapsed)
+	r.exec.Now = func() time.Time { return at }
+	return r
+}
+
+// TestLoopStopsLeasingInsideTheFinishReserve. Measured on Standard runs: research ran
+// until max_wallclock fired mid-batch, so the last batch of claims never got a verify
+// pass, and grounding then started after the ceiling. Inside the reserve the loop
+// verifies what it has and stops, rather than leasing work it cannot finish.
+func TestLoopStopsLeasingInsideTheFinishReserve(t *testing.T) {
+	r := wallClockRig(t, 10*time.Minute, 9*time.Minute)
+
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := r.actor.count(); n != 0 {
+		t.Errorf("%d lead(s) ran inside the finishing reserve, want 0", n)
+	}
+	for _, l := range leadsOf(t, r) {
+		if l.Status != core.LeadQueued {
+			t.Errorf("lead %s is %s, want it left queued", l.ID, l.Status)
+		}
+	}
+	if res.VerifyPasses != 1 {
+		t.Errorf("verify passes = %d, want exactly 1 before stopping", res.VerifyPasses)
+	}
+	if res.Status != core.StatusExhausted {
+		t.Errorf("status = %s, want %s", res.Status, core.StatusExhausted)
+	}
+	// mole-backend's runner reports this exact string.
+	if res.StoppedBecause != "max_wallclock" {
+		t.Errorf("stopped because %q, want max_wallclock", res.StoppedBecause)
+	}
+	if held := r.reload(t).Held; held != 0 {
+		t.Errorf("%d still held after stopping in the reserve", held)
+	}
+}
+
+// TestLoopLeasesBeforeTheReserve. A minute into ten, the reserve is far off.
+func TestLoopLeasesBeforeTheReserve(t *testing.T) {
+	r := wallClockRig(t, 10*time.Minute, time.Minute)
+
+	if _, err := r.exec.Run(context.Background(), r.sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if r.actor.count() == 0 {
+		t.Error("no lead ran a minute into a ten-minute session")
+	}
+}
+
+// TestNoWallClockNoReserve. A session with no wall clock has nothing to reserve
+// time against, and must not stop on an arithmetic accident at zero.
+func TestNoWallClockNoReserve(t *testing.T) {
+	if got := executor.FinishReserveFor(0, 0); got != 0 {
+		t.Errorf("finishReserve(0, 0) = %s, want 0", got)
+	}
+	if got := executor.FinishReserveFor(0, time.Minute); got != 0 {
+		t.Errorf("finishReserve(0, 1m) = %s, want 0", got)
+	}
+
+	r := wallClockRig(t, 0, 24*time.Hour)
+	if _, err := r.exec.Run(context.Background(), r.sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if r.actor.count() == 0 {
+		t.Error("no lead ran on a session with no wall clock")
+	}
+}
+
+// TestReserveIsCappedAtHalfTheClock. The 90-second floor would otherwise swallow
+// most of a short run, or all of one under 90 seconds.
+func TestReserveIsCappedAtHalfTheClock(t *testing.T) {
+	cases := []struct {
+		wall, configured, want time.Duration
+	}{
+		{2 * time.Minute, 0, time.Minute},
+		{time.Minute, 0, 30 * time.Second},
+		{10 * time.Minute, 0, 90 * time.Second},              // the floor
+		{20 * time.Minute, 0, 3 * time.Minute},               // 15%
+		{10 * time.Minute, 2 * time.Minute, 2 * time.Minute}, // configured
+		{2 * time.Minute, 5 * time.Minute, time.Minute},      // configured, capped
+	}
+	for _, c := range cases {
+		if got := executor.FinishReserveFor(c.wall, c.configured); got != c.want {
+			t.Errorf("finishReserve(%s, %s) = %s, want %s", c.wall, c.configured, got, c.want)
+		}
 	}
 }

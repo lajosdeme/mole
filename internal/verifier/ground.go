@@ -399,7 +399,7 @@ func (v *Verifier) checkOne(ctx context.Context, sessionID string, c *core.Claim
 
 	window := contextAround(text, match.Offset, len(match.Text))
 
-	reservation, rerr := v.Ledger.ReserveVerify(ctx, sessionID, v.groundCallEstimate(v.unit(ctx, sessionID)))
+	reservation, rerr := v.Ledger.ReserveGround(ctx, sessionID, v.groundCallEstimate(v.unit(ctx, sessionID)))
 	if rerr != nil {
 		out.Outcome = GroundUndecided
 		out.Note = "could not reserve budget to judge the quote: " + oneLine(rerr.Error())
@@ -489,7 +489,7 @@ func (v *Verifier) settleFetchAlone(ctx context.Context, sessionID string, call 
 		return
 	}
 	sctx := context.WithoutCancel(ctx)
-	r, err := v.Ledger.ReserveVerify(sctx, sessionID, 1)
+	r, err := v.Ledger.ReserveGround(sctx, sessionID, 1)
 	if err != nil {
 		v.logger().WarnContext(sctx, "grounding: could not record the re-fetch", "err", err)
 		return

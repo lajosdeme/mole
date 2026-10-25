@@ -807,3 +807,77 @@ func TestSweepSurvivesAnUnreleasableReservation(t *testing.T) {
 		t.Errorf("%d still held in unresolved reservations after the sweep", held)
 	}
 }
+
+// TestReserveGroundIgnoresTheWallClock. Grounding runs after research has stopped —
+// on a Standard run, usually BECAUSE max_wallclock fired — so a policy that honours
+// the clock refuses every judge call it makes. Measured: each reservation came back
+// "session … hit max_wallclock" and the re-fetch it had already paid for was wasted.
+//
+// Money and the call ceiling still bind: grounding is bounded by its escrow share and
+// MaxGroundChecks, and a fetch MaxToolCalls cannot see is the hole §8.5 closes.
+func TestReserveGroundIgnoresTheWallClock(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	l := budget.New(db, noEscrow())
+	t0 := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	now := t0
+	l.SetClock(func() time.Time { return now })
+
+	create := func(spec budget.SessionSpec) *core.Session {
+		t.Helper()
+		spec.Prompt, spec.Mode = "q", core.ModeReport
+		spec.ActorTypes = []core.ActorType{core.ActorWeb}
+		spec.BudgetUnit, spec.Budget = core.BudgetUSD, core.MicrosPerUSD
+		s, err := l.CreateSession(ctx, spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	bump := func(id string, d store.BudgetDelta) {
+		t.Helper()
+		if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+			return tx.ApplyBudgetDelta(ctx, id, d)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := create(budget.SessionSpec{MaxWallClock: time.Minute, MaxLeads: 1, MaxToolCalls: 10})
+	now = t0.Add(2 * time.Minute)
+
+	if _, err := l.ReserveVerify(ctx, s.ID, 1000); !errors.Is(err, budget.ErrInsufficientBudget) {
+		t.Fatalf("ReserveVerify past the wall clock: err = %v, want ErrInsufficientBudget", err)
+	}
+	ground := func(why string) {
+		t.Helper()
+		r, err := l.ReserveGround(ctx, s.ID, 1000)
+		if err != nil {
+			t.Fatalf("ReserveGround %s: %v", why, err)
+		}
+		if err := l.Release(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ground("past the wall clock")
+
+	// max_leads is a research ceiling too.
+	bump(s.ID, store.BudgetDelta{LeadCount: 1})
+	ground("past the wall clock and max_leads")
+
+	// MaxToolCalls still binds.
+	bump(s.ID, store.BudgetDelta{ToolCallCount: 10})
+	if _, err := l.ReserveGround(ctx, s.ID, 1000); !errors.Is(err, budget.ErrInsufficientBudget) {
+		t.Errorf("ReserveGround at MaxToolCalls: err = %v, want ErrInsufficientBudget", err)
+	}
+
+	// So does the money.
+	rich := create(budget.SessionSpec{})
+	avail, err := l.Available(ctx, rich.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.ReserveGround(ctx, rich.ID, avail+1); !errors.Is(err, budget.ErrInsufficientBudget) {
+		t.Errorf("ReserveGround beyond Available(): err = %v, want ErrInsufficientBudget", err)
+	}
+}

@@ -92,6 +92,11 @@ type Executor struct {
 	// budget unit.
 	Estimator *budget.Estimator
 
+	// FinishReserve is how much of the wall clock research leaves for finishing:
+	// a last verify pass here, then grounding and the report. Zero takes the
+	// default — see finishReserve. Ignored on a session with no wall clock.
+	FinishReserve time.Duration
+
 	// Now and Jitter are injectable for tests.
 	Now    func() time.Time
 	Jitter func() float64
@@ -280,9 +285,26 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 		if err != nil {
 			return res, err
 		}
-		if hit, which := sess.HitCeiling(e.now()); hit {
+		now := e.now()
+		if hit, which := sess.HitCeiling(now); hit {
 			res.Status = core.StatusExhausted
 			res.StoppedBecause = which
+			break
+		}
+		// Inside the finishing reserve: verify what research found and stop,
+		// rather than lease work the clock will cut off. Measured on Standard
+		// runs: research ran until max_wallclock fired mid-research, so the last
+		// batch of claims never got a verify pass.
+		//
+		// Reported as max_wallclock — it is the wall clock that stopped research,
+		// only earlier — and mole-backend's runner reports that string.
+		if reserve := finishReserve(sess.MaxWallClock, e.FinishReserve); reserve > 0 &&
+			!now.Before(sess.CreatedAt.Add(sess.MaxWallClock-reserve)) {
+			e.verify(ctx, digest, res)
+			res.Status = core.StatusExhausted
+			res.StoppedBecause = "max_wallclock"
+			e.logger().InfoContext(ctx, "stopping research inside the finishing reserve",
+				"reserve", reserve)
 			break
 		}
 		if sess.Available() <= 0 {
@@ -489,6 +511,24 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 	}
 	res.CacheStats = e.Cache.Stats()
 	return res, nil
+}
+
+// finishReserve is how long before the wall clock research stops leasing.
+//
+// configured if set, else 15% of the clock with a 90-second floor: room for one
+// verify pass, then grounding and the report. A starting guess, like the escrow
+// fraction, to be calibrated from real runs. Always capped at half the clock, so
+// the floor cannot swallow a short run whole, and 0 for a session with no wall
+// clock, which has nothing to reserve time against.
+func finishReserve(maxWall, configured time.Duration) time.Duration {
+	if maxWall <= 0 {
+		return 0
+	}
+	reserve := configured
+	if reserve <= 0 {
+		reserve = max(90*time.Second, maxWall*15/100)
+	}
+	return min(reserve, maxWall/2)
 }
 
 // DefaultWorkers is the per-session pool size when Workers is unset.
