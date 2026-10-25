@@ -404,15 +404,23 @@ func TestCurrentClaudeRates(t *testing.T) {
 		t.Errorf("opus-5-5 1M in + 1M out = %d micros, want %d", c.USDMicros, want)
 	}
 
-	// Claude Opus 5-5 cache read: $0.4/MTok input * 0.1 = $0.04/MTok cache read.
-	// No wait, the brief says CacheRead 200 nano-dollars per token.
-	// 1M cache-read tokens * 200 nano-dollars / 1000 = 200_000 micros.
+	// Opus 5-5: 1M cache-read tokens at 200 nano-dollars/token = 200_000 micros.
 	c, err = tbl.Cost("claude-opus-5-5", pricing.Usage{CacheReadTokens: 1_000_000})
 	if err != nil {
 		t.Fatalf("opus-5-5 cache read: %v", err)
 	}
 	if want := int64(200_000); c.USDMicros != want {
 		t.Errorf("opus-5-5 1M cache-read = %d micros, want %d", c.USDMicros, want)
+	}
+
+	// Claude Sonnet 5-5: $2/MTok input, $10/MTok output.
+	// 1M input + 1M output = $2 + $10 = $12.
+	c, err = tbl.Cost("claude-sonnet-5-5", pricing.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000})
+	if err != nil {
+		t.Fatalf("claude-sonnet-5-5 cost: %v", err)
+	}
+	if want := int64(12_000_000); c.USDMicros != want {
+		t.Errorf("sonnet-5-5 1M in + 1M out = %d micros, want %d", c.USDMicros, want)
 	}
 
 	// Claude Fable 5-1: $10/MTok input, $50/MTok output.
@@ -423,5 +431,38 @@ func TestCurrentClaudeRates(t *testing.T) {
 	}
 	if want := int64(60_000_000); c.USDMicros != want {
 		t.Errorf("fable-5-1 1M in + 1M out = %d micros, want %d", c.USDMicros, want)
+	}
+}
+
+// TestHaikuFiveFiveTiersByPromptLength validates prompt-length tiered pricing.
+func TestHaikuFiveFiveTiersByPromptLength(t *testing.T) {
+	tbl := pricing.NewTable()
+
+	// Short prompt (≤100k): 50k input + 1k output = 50*100 + 1*500 = 5_500_000 nano = 5_500 micros.
+	c, err := tbl.Cost("claude-haiku-5-5", pricing.Usage{InputTokens: 50_000, OutputTokens: 1_000})
+	if err != nil {
+		t.Fatalf("haiku-5-5 short prompt cost: %v", err)
+	}
+	if want := int64(5_500); c.USDMicros != want {
+		t.Errorf("haiku-5-5 short (50k in + 1k out) = %d micros, want %d", c.USDMicros, want)
+	}
+
+	// Long prompt (>100k): 150k input + 1k output uses long tier: 150*500 + 1*2500 = 77_500_000 nano = 77_500 micros.
+	c, err = tbl.Cost("claude-haiku-5-5", pricing.Usage{InputTokens: 150_000, OutputTokens: 1_000})
+	if err != nil {
+		t.Fatalf("haiku-5-5 long prompt cost: %v", err)
+	}
+	if want := int64(77_500); c.USDMicros != want {
+		t.Errorf("haiku-5-5 long (150k in + 1k out) = %d micros, want %d", c.USDMicros, want)
+	}
+
+	// Mixed cache: 90k input + 20k cache-read + 1k output; total prompt = 110k > 100k, uses long tier.
+	// 90*500 + 20*50 + 1*2500 = 45_000_000 + 1_000_000 + 2_500_000 = 48_500_000 nano = 48_500 micros.
+	c, err = tbl.Cost("claude-haiku-5-5", pricing.Usage{InputTokens: 90_000, CacheReadTokens: 20_000, OutputTokens: 1_000})
+	if err != nil {
+		t.Fatalf("haiku-5-5 mixed cache cost: %v", err)
+	}
+	if want := int64(48_500); c.USDMicros != want {
+		t.Errorf("haiku-5-5 mixed (90k in + 20k cache + 1k out) = %d micros, want %d", c.USDMicros, want)
 	}
 }

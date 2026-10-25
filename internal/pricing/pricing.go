@@ -27,11 +27,13 @@ const NanoPerMicro = 1000
 
 // Rates is the per-token price of one model, in nano-dollars.
 type Rates struct {
-	Input        int64
-	Output       int64
-	CacheRead    int64
-	CacheWrite   int64 // 5-minute TTL
-	CacheWrite1h int64
+	Input               int64
+	Output              int64
+	CacheRead           int64
+	CacheWrite          int64 // 5-minute TTL
+	CacheWrite1h        int64
+	LongPromptThreshold int64  // prompt tokens threshold for tiered pricing (0 = no tiering)
+	LongPrompt          *Rates // rates for prompts exceeding threshold
 }
 
 // RateConfig is a rate as somebody writes it down: dollars per MILLION tokens,
@@ -156,9 +158,25 @@ func defaultTable() map[string]Rates {
 		"claude-opus-4-6":   perMTok(5, 25),
 
 		"claude-sonnet-5":   perMTok(2, 10),
+		"claude-sonnet-5-5": {Input: 2000, Output: 10000, CacheRead: 100, CacheWrite: 2500, CacheWrite1h: 4000},
 		"claude-sonnet-4-6": perMTok(3, 15),
 
 		"claude-haiku-4-5": perMTok(1, 5),
+		"claude-haiku-5-5": {
+			Input:               100,
+			Output:              500,
+			CacheRead:           10,
+			CacheWrite:          125,
+			CacheWrite1h:        200,
+			LongPromptThreshold: 100_000,
+			LongPrompt: &Rates{
+				Input:        500,
+				Output:       2500,
+				CacheRead:    50,
+				CacheWrite:   625,
+				CacheWrite1h: 1000,
+			},
+		},
 
 		// OpenAI, which detect.go selects from an OPENAI_API_KEY. Rates are the
 		// published dollars-per-MTok as of 2026-10; an operator who finds them
@@ -380,6 +398,14 @@ func (t *Table) Cost(model string, u Usage) (core.Cost, error) {
 				return c, &ErrUnknownModel{Model: model}
 			}
 			return c, nil
+		}
+	}
+
+	// Use long-prompt rates if available and total prompt tokens exceed threshold.
+	if r.LongPrompt != nil && r.LongPromptThreshold > 0 {
+		promptTokens := u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens
+		if promptTokens > r.LongPromptThreshold {
+			r = *r.LongPrompt
 		}
 	}
 
