@@ -16,9 +16,8 @@ import (
 	"github.com/lajosdeme/mole/internal/store/sqlite"
 )
 
-// seedReportSession creates a report-mode session at path, with one verified
-// claim when withClaim is true, and returns its id and its ledger state right
-// after creation — the baseline a test checks `mole report` left untouched.
+// seedReportSession creates a report-mode session at path, with one claim
+// when withClaim is true, and returns its id and its session row.
 func seedReportSession(t *testing.T, path string, withClaim bool) (string, *core.Session) {
 	t.Helper()
 	ctx := context.Background()
@@ -67,9 +66,7 @@ func seedReportSession(t *testing.T, path string, withClaim bool) (string, *core
 	return sess.ID, sess
 }
 
-// reportFakeProvider stands in for a built role provider and records what
-// reaches it, so a test can assert --model actually changed the model the
-// generator asked for.
+// reportFakeProvider records the requests it receives and replies with text.
 type reportFakeProvider struct {
 	text  string
 	model string
@@ -86,9 +83,8 @@ func (f *reportFakeProvider) Complete(_ context.Context, req llm.Request) (*llm.
 func (f *reportFakeProvider) Name() string               { return "report-fake" }
 func (f *reportFakeProvider) ModelFor(_ llm.Tier) string { return f.model }
 
-// reportFakeFactory returns a provider factory that records the llm.Config it
-// was built with, so a test can see which model and backend buildReportLLM
-// resolved for the chosen role.
+// reportFakeFactory returns a provider factory that records the llm.Config
+// it was built with.
 func reportFakeFactory(text string) (func(llm.Config, *http.Client) (llm.Provider, error), *reportFakeProvider) {
 	p := &reportFakeProvider{text: text}
 	return func(c llm.Config, _ *http.Client) (llm.Provider, error) {
@@ -106,9 +102,8 @@ func reportTestConfig() *config.Config {
 	return cfg
 }
 
-// TestReportRewritesWithTheGivenModel: --model overrides the role's strong
-// model for this run, and the rewritten body reaches the output untouched by
-// the session's stored report or ledger.
+// TestReportRewritesWithTheGivenModel: --model overrides the role's model,
+// and the session's stored report and ledger stay untouched.
 func TestReportRewritesWithTheGivenModel(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.db")
 	sid, baseline := seedReportSession(t, path, true)

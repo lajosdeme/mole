@@ -19,11 +19,8 @@ import (
 
 // mole report
 //
-// Rewrites a stored session's report with any model, for comparing
-// report-writer models on identical evidence. It reruns synthesis over the
-// claims already verified by the original run — no new research, no new
-// spend recorded — and never writes the result back: output.Generator.Generate
-// only reads, and this command never opens a write transaction or a ledger.
+// Rewrites a stored session's report with any model. Read-only: it writes
+// nothing back to the session or the ledger.
 
 const reportUsage = `Rewrite a stored session's report with any model.
 
@@ -132,10 +129,8 @@ func printReportCost(w io.Writer, cfg *config.Config, model string, cost core.Co
 		model, cost.InputTokens, cost.OutputTokens, usd)
 }
 
-// buildReportLLM builds one role's provider, reusing Task 3's resolution
-// rather than reimplementing it, with --model overriding the model that role
-// resolves to: the generator always asks llm.TierStrong, so this is the model
-// that actually writes the report.
+// buildReportLLM builds the provider for role, with its strong model set to
+// model when given.
 func buildReportLLM(cfg *config.Config, client *http.Client, role llm.ModelRole, modelOverride string,
 	newProvider func(llm.Config, *http.Client) (llm.Provider, error)) (llm.Provider, string, error) {
 	if !validReportRole(role) {
