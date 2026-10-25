@@ -2,11 +2,13 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -25,6 +27,11 @@ type anthropicProvider struct {
 	client anthropic.Client
 	cfg    Config
 	source CredentialSource
+
+	// thinkingMu guards thinkingCache, the per-model answer to whether the
+	// model accepts {"type":"disabled"} thinking, learned from the Models API.
+	thinkingMu    sync.Mutex
+	thinkingCache map[string]bool
 }
 
 // newAnthropic builds the client.
@@ -53,9 +60,10 @@ func newAnthropic(cfg Config, httpClient *http.Client) (*anthropicProvider, erro
 	}
 
 	return &anthropicProvider{
-		client: anthropic.NewClient(opts...),
-		cfg:    cfg,
-		source: source,
+		client:        anthropic.NewClient(opts...),
+		cfg:           cfg,
+		source:        source,
+		thinkingCache: make(map[string]bool),
 	}, nil
 }
 
@@ -117,16 +125,23 @@ func (p *anthropicProvider) Complete(ctx context.Context, req Request) (*Respons
 			Effort: anthropic.OutputConfigEffort(req.Effort),
 		}
 	}
-	if req.Thinking {
+	switch {
+	case req.Thinking:
 		params.Thinking = anthropic.ThinkingConfigParamUnion{
 			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{},
 		}
-	} else {
+	case p.disabledThinkingSupported(ctx, model):
 		// Chunk mining is mechanical extraction. Thinking there adds latency
 		// and tokens without improving the task, and the per-chunk call is the
 		// one that runs most often.
 		params.Thinking = anthropic.ThinkingConfigParamUnion{
 			OfDisabled: &anthropic.ThinkingConfigDisabledParam{},
+		}
+	case req.Effort == "":
+		// This model rejects the disabled type outright, so the field is left
+		// unset entirely and low effort stands in for "don't think hard".
+		params.OutputConfig = anthropic.OutputConfigParam{
+			Effort: anthropic.OutputConfigEffortLow,
 		}
 	}
 
@@ -174,6 +189,61 @@ func (p *anthropicProvider) Complete(ctx context.Context, req Request) (*Respons
 		return resp, ErrNoUsageReported
 	}
 	return resp, nil
+}
+
+// disabledThinkingPrefixes are models known to reject {"type":"disabled"}
+// thinking, used only when the Models API lookup itself fails.
+var disabledThinkingPrefixes = []string{
+	"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5", "claude-mythos-5",
+}
+
+// disabledThinkingSupported reports whether model accepts {"type":"disabled"}
+// thinking, asking the Models API once per model and caching the answer.
+func (p *anthropicProvider) disabledThinkingSupported(ctx context.Context, model string) bool {
+	p.thinkingMu.Lock()
+	if v, ok := p.thinkingCache[model]; ok {
+		p.thinkingMu.Unlock()
+		return v
+	}
+	p.thinkingMu.Unlock()
+
+	supported := fallbackDisabledThinkingSupported(model)
+	if info, err := p.client.Models.Get(ctx, model, anthropic.ModelGetParams{}); err == nil {
+		supported = disabledSupportedFromCapabilities(info.Capabilities.Thinking.Types.RawJSON())
+	}
+
+	p.thinkingMu.Lock()
+	p.thinkingCache[model] = supported
+	p.thinkingMu.Unlock()
+	return supported
+}
+
+// fallbackDisabledThinkingSupported is used when the Models API lookup fails:
+// known-bad model families are assumed unsupported, everything else assumed
+// supported since that was the behaviour before this check existed.
+func fallbackDisabledThinkingSupported(model string) bool {
+	for _, prefix := range disabledThinkingPrefixes {
+		if strings.HasPrefix(model, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+// disabledSupportedFromCapabilities reads capabilities.thinking.types.disabled
+// from the Models API response. The SDK's ThinkingTypes struct has no field
+// for "disabled" yet, so this parses the type's raw JSON instead of a
+// hand-rolled HTTP call.
+func disabledSupportedFromCapabilities(typesRawJSON string) bool {
+	var types struct {
+		Disabled struct {
+			Supported bool `json:"supported"`
+		} `json:"disabled"`
+	}
+	if err := json.Unmarshal([]byte(typesRawJSON), &types); err != nil {
+		return false
+	}
+	return types.Disabled.Supported
 }
 
 // partialResponse projects whatever the accumulator holds into a Response.
