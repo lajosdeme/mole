@@ -444,3 +444,26 @@ func TestConfigSetRoleKeys(t *testing.T) {
 		t.Fatal("llm.verifier.api-key is missing from the field table")
 	}
 }
+
+func TestRoleOnAnotherEndpointNeverInheritsTheTopLevelKey(t *testing.T) {
+	llm := config.LLMConfig{Provider: "", APIKey: "sk-ant-api03-topsecret", BaseURL: ""}
+	cases := []struct {
+		name  string
+		block config.LLMRole
+		want  string
+	}{
+		{"other base url", config.LLMRole{BaseURL: "https://api.deepseek.com/v1", Model: "deepseek-chat"}, ""},
+		{"other provider", config.LLMRole{Provider: "openai-compatible", Model: "x"}, ""},
+		{"own key on other endpoint", config.LLMRole{BaseURL: "https://api.deepseek.com/v1", APIKey: "sk-own"}, "sk-own"},
+		{"model only", config.LLMRole{Model: "claude-haiku-4-5"}, "sk-ant-api03-topsecret"},
+		{"same provider spelled out", config.LLMRole{Provider: "anthropic"}, "sk-ant-api03-topsecret"},
+	}
+	for _, tc := range cases {
+		l := llm
+		block := tc.block
+		l.Cheap = &block
+		if got := l.Resolve("cheap").APIKey; got != tc.want {
+			t.Errorf("%s: key = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

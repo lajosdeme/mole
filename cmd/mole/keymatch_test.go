@@ -294,3 +294,32 @@ func TestDoctorPrintsOneLinePerRoleWithoutKeys(t *testing.T) {
 		t.Errorf("doctor printed a key:\n%s", out)
 	}
 }
+
+func TestRoleOnAnotherEndpointGetsNoTopLevelKey(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{Provider: "anthropic", APIKey: "sk-ant-api03-top", Model: "claude-sonnet-5"}
+	cfg.LLM.Cheap = &config.LLMRole{
+		Provider: "openai-compatible", BaseURL: "http://localhost:11434/v1", Model: "qwen3:8b",
+	}
+	cfg.LLM.Verifier = &config.LLMRole{Model: "claude-haiku-4-5"}
+	factory, built := recordingFactory()
+
+	if _, err := buildConfiguredLLM(cfg, nil, factory); err != nil {
+		t.Fatal(err)
+	}
+	if len(*built) != 2 {
+		t.Fatalf("built %d providers, want 2", len(*built))
+	}
+	for _, p := range *built {
+		switch p.cfg.BaseURL {
+		case "http://localhost:11434/v1":
+			if p.cfg.APIKey != "" {
+				t.Errorf("the cheap role's endpoint was handed the top-level key")
+			}
+		case "":
+			if p.cfg.APIKey != "sk-ant-api03-top" {
+				t.Errorf("the top-level provider lost its key")
+			}
+		}
+	}
+}

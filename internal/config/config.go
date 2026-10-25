@@ -196,7 +196,8 @@ type LLMConfig struct {
 	Verifier *LLMRole `json:"verifier,omitempty"`
 }
 
-// LLMRole is one role's provider and model; empty fields inherit the top level.
+// LLMRole is one role's provider and model; empty fields inherit the top level,
+// except that a key is never inherited onto another provider or endpoint.
 type LLMRole struct {
 	Provider string `json:"provider,omitempty"`
 	APIKey   string `json:"api_key,omitempty"`
@@ -234,11 +235,24 @@ func (l LLMConfig) Resolve(role string) LLMRole {
 	if p := l.block(role); p != nil && *p != nil {
 		b := **p
 		r.Provider = firstNonEmpty(b.Provider, r.Provider)
-		r.APIKey = firstNonEmpty(b.APIKey, r.APIKey)
 		r.BaseURL = firstNonEmpty(b.BaseURL, r.BaseURL)
 		r.Model = firstNonEmpty(b.Model, r.Model)
+		// A role on another provider or endpoint uses only its own key, never the top-level one.
+		if providerKind(r.Provider) != providerKind(l.Provider) || r.BaseURL != l.BaseURL {
+			r.APIKey = b.APIKey
+		} else {
+			r.APIKey = firstNonEmpty(b.APIKey, r.APIKey)
+		}
 	}
 	return r
+}
+
+// providerKind returns the provider name with the anthropic default applied.
+func providerKind(p string) string {
+	if p == "" {
+		return "anthropic"
+	}
+	return p
 }
 
 // Block returns a role's override block, or nil when it has none.
