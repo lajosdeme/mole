@@ -311,7 +311,9 @@ func corroborationNote(f Finding) string {
 	var parts []string
 	switch {
 	case f.Publishers > 1:
-		parts = append(parts, fmt.Sprintf("%d independent publishers", f.Publishers))
+		// Not "independent publishers": distinct domains are not evidence the
+		// coverage is independent, only that it is not one site (task 7).
+		parts = append(parts, fmt.Sprintf("%d publishers", f.Publishers))
 	case len(f.Sources) > 1:
 		// Several URLs, one publisher. Worth saying: it looks like corroboration
 		// and is not, which is §11.3's inflation risk in a form a reader can see.
