@@ -206,9 +206,8 @@ var disabledThinkingPrefixes = []string{
 	"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5", "claude-mythos-5",
 }
 
-// disabledThinkingSupported reports whether model accepts {"type":"disabled"}
-// thinking, asking the Models API once per model and caching the answer.
-// Concurrent callers for the same uncached model share one lookup.
+// disabledThinkingSupported reports whether model accepts disabled thinking,
+// asking the Models API once per model; concurrent callers share the lookup.
 func (p *anthropicProvider) disabledThinkingSupported(ctx context.Context, model string) bool {
 	p.thinkingMu.Lock()
 	if v, ok := p.thinkingCache[model]; ok {
