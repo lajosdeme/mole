@@ -207,7 +207,7 @@ func (v *Verifier) Ground(ctx context.Context, sessionID string, allowance int64
 	// a note is what distinguishes a checked claim from an unchecked one — so an
 	// exhausted allowance would make every remaining claim look inspected.
 	unit := v.unit(ctx, sessionID)
-	perCall := groundCallEstimate(unit)
+	perCall := v.groundCallEstimate(unit)
 	remaining := func() int64 { return allowance - spent }
 
 exhausted:
@@ -396,7 +396,7 @@ func (v *Verifier) checkOne(ctx context.Context, sessionID string, c *core.Claim
 
 	window := contextAround(text, match.Offset, len(match.Text))
 
-	reservation, rerr := v.Ledger.ReserveVerify(ctx, sessionID, groundCallEstimate(v.unit(ctx, sessionID)))
+	reservation, rerr := v.Ledger.ReserveVerify(ctx, sessionID, v.groundCallEstimate(v.unit(ctx, sessionID)))
 	if rerr != nil {
 		out.Outcome = GroundUndecided
 		out.Note = "could not reserve budget to judge the quote: " + oneLine(rerr.Error())
@@ -444,6 +444,11 @@ func (v *Verifier) checkOne(ctx context.Context, sessionID string, c *core.Claim
 	} else {
 		charged = settled.Cost.BudgetAmount(v.unit(ctx, sessionID))
 		rep.Calls++
+		if settled.Flagged {
+			v.logger().WarnContext(settleCtx,
+				"verifier: settled cost exceeded its reservation by more than the allowed factor",
+				"reserved", settled.Reserved, "charged", settled.Charged)
+		}
 	}
 
 	if callErr != nil || resp == nil || resp.Refused {

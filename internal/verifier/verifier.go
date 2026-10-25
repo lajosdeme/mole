@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/lajosdeme/mole/internal/budget"
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/llm"
+	"github.com/lajosdeme/mole/internal/pricing"
 	"github.com/lajosdeme/mole/internal/store"
 )
 
@@ -26,6 +28,14 @@ type Verifier struct {
 	Store  store.Store
 	Ledger *budget.Ledger
 	LLM    llm.Provider
+
+	// Pricing prices the adjudication and grounding reservations against this
+	// Verifier's own model and the session's real rate table, replacing a flat
+	// 2 micro-dollars per 1k tokens that measured 2-6 micro-dollars of reserved
+	// hold against calls the ledger actually charged ~146 micro-dollars for.
+	// Nil — or a model the table has never heard of — reserves against
+	// fallbackRates instead.
+	Pricing *pricing.Table
 
 	// Model overrides the tier's default for every call this Verifier makes. Empty
 	// leaves the cheap-tier model in place.
@@ -89,6 +99,12 @@ type Verifier struct {
 	// counter restarts at zero for a second Verifier on the same session, and the cap
 	// is supposed to bind on the SESSION.
 	spent int64
+
+	// warnUnpriced logs the "no rate for this model" fallback once per Verifier
+	// rather than once per reservation — a batch pass takes one per batch and a
+	// grounding pass one per claim, and either would otherwise fill the log with
+	// the same sentence for the whole run.
+	warnUnpriced sync.Once
 }
 
 // DefaultMaxShareOfBudget is the cumulative verification allowance.
@@ -481,7 +497,7 @@ func (v *Verifier) adjudicate(ctx context.Context, sessionID string, batch []Pai
 	}
 
 	allowance := v.remainingAllowance(ctx, sess)
-	est := estimateBatch(sess.BudgetUnit, len(batch))
+	est := v.estimateBatch(sess.BudgetUnit, len(batch))
 	if est > allowance {
 		return nil, batch, fmt.Errorf("verification allowance exhausted (%d of %.0f%% of budget spent)",
 			v.spent, v.share()*100)
@@ -544,6 +560,11 @@ func (v *Verifier) adjudicate(ctx context.Context, sessionID string, batch []Pai
 		v.spent += charged
 		res.Spent += charged
 		res.Calls++
+		if settled.Flagged {
+			v.logger().WarnContext(settleCtx,
+				"verifier: settled cost exceeded its reservation by more than the allowed factor",
+				"reserved", settled.Reserved, "charged", settled.Charged)
+		}
 	}
 
 	if callErr != nil {
@@ -697,23 +718,89 @@ func isFatal(err error) bool {
 	return errors.Is(err, llm.ErrUnauthorized) || errors.Is(err, llm.ErrQuotaExceeded)
 }
 
+// fallbackRates price a call whose model this Verifier cannot look up — either
+// because it has no Pricing table at all, or because the table has never heard
+// of the model (a provider rename, or a Verifier run against a fresh table that
+// hasn't registered it yet).
+//
+// Deliberately high: $5/MTok in, $25/MTok out is this table's own Opus-tier rate
+// (pricing.go's claude-opus-5), not a typical cheap-tier number. A reservation
+// is a hold taken before the call (§8.2); guessing low is the failure that
+// matters, because a hold the settle overruns trips the overshoot detector that
+// is supposed to catch a MISPRICED call, not a merely unidentified one.
+var fallbackRates = pricing.RateConfig{Input: 5, Output: 25}.Rates()
+
+// fallbackTable prices fallbackRates through the same rounding Table.Cost uses
+// for everything else, rather than duplicating its nano-to-micro arithmetic
+// here.
+var fallbackTable = func() *pricing.Table {
+	t := pricing.NewEmptyTable()
+	t.Register("fallback", fallbackRates)
+	return t
+}()
+
+// model is what this Verifier's calls are actually billed against: v.Model
+// when the caller named an override, else whatever the cheap tier resolves to
+// — the same model adjudicate and the grounding judge pass as llm.Request.Model,
+// which the provider fills in from the tier when that field is empty.
+func (v *Verifier) model() string {
+	if v.Model != "" {
+		return v.Model
+	}
+	if v.LLM != nil {
+		return v.LLM.ModelFor(llm.TierCheap)
+	}
+	return ""
+}
+
+// estimate reserves what a call shaped (in, out) tokens is expected to cost, in
+// the session's budget unit.
+//
+// Token mode returns in+out untouched: pricing has no voice in a reservation
+// that token mode is meant to measure directly.
+//
+// USD mode prices the two token counts separately against this Verifier's own
+// model, because input and output are priced differently — the flat
+// 2-micro-dollar-per-1k-tokens rate this replaced was measured at 2-6
+// micro-dollars held against calls the ledger actually charged ~146
+// micro-dollars for, almost two orders of magnitude under. A model this
+// Verifier cannot price — no table, or a table that does not know it — falls
+// back to fallbackRates rather than refusing the reservation; the warning fires
+// once per Verifier, not once per call.
+func (v *Verifier) estimate(unit core.BudgetUnit, in, out int64) int64 {
+	if unit == core.BudgetTokens {
+		return in + out
+	}
+
+	usage := pricing.Usage{InputTokens: in, OutputTokens: out}
+	if v.Pricing != nil {
+		if cost, err := v.Pricing.Cost(v.model(), usage); err == nil {
+			return max(1, cost.USDMicros)
+		}
+		v.warnUnpriced.Do(func() {
+			v.logger().Warn("verifier: model not in the pricing table; "+
+				"reserving at a deliberately high fallback rate instead",
+				"model", v.model())
+		})
+	}
+
+	cost, _ := fallbackTable.Cost("fallback", usage) // "fallback" is always registered above.
+	return max(1, cost.USDMicros)
+}
+
 // estimateBatch guesses what one adjudication call costs.
 //
 // Deliberately generous. The estimate is a reservation, not a charge — settling
 // replaces it with the real usage — and under-reserving is the failure that
 // matters: §8.2's whole point is that the hold is taken before the call, so a hold
 // smaller than the call trips the overshoot detector.
-func estimateBatch(unit core.BudgetUnit, pairs int) int64 {
+func (v *Verifier) estimateBatch(unit core.BudgetUnit, pairs int) int64 {
 	// ~350 tokens of instructions, ~120 in and ~60 out per pair, doubled for
-	// headroom.
-	tokens := int64(2 * (350 + pairs*180))
-	if unit == core.BudgetTokens {
-		return tokens
-	}
-	// USD mode: price it as cheap-tier work. A coarse rate rather than a pricing
-	// lookup, because this is a reservation and the settle carries the truth.
-	const microsPerKTokenCheap = 2
-	return max(1, tokens*microsPerKTokenCheap/1000)
+	// headroom. Split so USD mode can price input and output at their own
+	// rates rather than one blended one; the token-mode total is unchanged.
+	in := int64(2 * (350 + pairs*120))
+	out := int64(2 * 60 * pairs)
+	return v.estimate(unit, in, out)
 }
 
 // maxTokensForBatch leaves room for a verdict per pair plus a reasoning model's

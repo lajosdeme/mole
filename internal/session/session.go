@@ -436,6 +436,7 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 		Store:     r.Store,
 		Ledger:    led,
 		LLM:       actor.LLM,
+		Pricing:   actor.Pricing,
 		Log:       r.logger(),
 		Model:     r.VerifierModel,
 		BatchSize: r.VerifierBatchSize,
