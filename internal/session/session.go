@@ -639,12 +639,13 @@ func (r *Runner) finish(
 		var calls []core.ToolCall
 		if !report.Cost.IsZero() {
 			calls = append(calls, core.ToolCall{
-				SessionID: sess.ID,
-				Role:      core.RoleOutput,
-				Type:      core.CallLLM,
-				Model:     report.Model,
-				Input:     "report",
-				Cost:      output.Price(actor.Pricing, report),
+				SessionID:  sess.ID,
+				Role:       core.RoleOutput,
+				Type:       core.CallLLM,
+				Model:      report.Model,
+				Input:      "report",
+				Cost:       output.Price(actor.Pricing, report),
+				DurationMS: report.Elapsed.Milliseconds(),
 			})
 		}
 		if _, serr := led.Settle(ctx, reservation, calls); serr != nil {

@@ -22,6 +22,9 @@ type fakeLLM struct {
 	err     error
 	refused bool
 	calls   int
+	// elapsed is what Complete reports as the call's wall-clock time. Zero
+	// unless a test sets it, so every existing test is unaffected.
+	elapsed time.Duration
 }
 
 func (f *fakeLLM) Name() string               { return "fake" }
@@ -31,7 +34,7 @@ func (f *fakeLLM) Complete(ctx context.Context, req llm.Request) (*llm.Response,
 	if len(req.Messages) > 0 {
 		f.prompt = req.Messages[0].Text
 	}
-	resp := &llm.Response{Model: "fake-model", Usage: llm.Usage{InputTokens: 800, OutputTokens: 200}}
+	resp := &llm.Response{Model: "fake-model", Usage: llm.Usage{InputTokens: 800, OutputTokens: 200}, Elapsed: f.elapsed}
 	if f.refused {
 		resp.Refused, resp.RefusalCategory = true, "policy"
 		return resp, nil
@@ -610,5 +613,22 @@ func TestUnverifiedClaimsFallBackToSourceBreadth(t *testing.T) {
 
 	if strings.Contains(f.prompt, "A claim from a page mentioned once.") {
 		t.Errorf("assertion strength is still breaking ties:\n%s", f.prompt)
+	}
+}
+
+// TestReportCarriesElapsed. A report's wall-clock time has to reach the caller
+// before anything can measure or budget against it.
+func TestReportCarriesElapsed(t *testing.T) {
+	st, sid := newStore(t, []core.Claim{
+		claim("MambaByte reports 1.31 BPB.", "https://arxiv.org/abs/2401.13660", "It achieves 1.31 bits per byte"),
+	})
+
+	f := &fakeLLM{reply: func(string) string { return "A finding [1]." }, elapsed: 2 * time.Second}
+	rep, err := (&output.Generator{LLM: f}).Generate(context.Background(), st, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Elapsed != 2*time.Second {
+		t.Errorf("rep.Elapsed = %v, want 2s", rep.Elapsed)
 	}
 }

@@ -29,6 +29,9 @@ type scriptedLLM struct {
 	prompts []string
 	models  []string
 	reply   func(call int, prompt string) (string, error)
+	// elapsed is what Complete reports as the call's wall-clock time. Zero
+	// unless a test sets it, so every existing test is unaffected.
+	elapsed time.Duration
 }
 
 // requestedModels is what each call asked for, so a test can see whether an override
@@ -55,9 +58,10 @@ func (s *scriptedLLM) Complete(_ context.Context, req llm.Request) (*llm.Respons
 
 	text, err := s.reply(i, prompt)
 	resp := &llm.Response{
-		Model: "fake-model",
-		Text:  text,
-		Usage: llm.Usage{InputTokens: 400, OutputTokens: 80},
+		Model:   "fake-model",
+		Text:    text,
+		Usage:   llm.Usage{InputTokens: 400, OutputTokens: 80},
+		Elapsed: s.elapsed,
 	}
 	return resp, err
 }
@@ -488,6 +492,34 @@ func TestVerifierSpendIsAttributedToTheVerifier(t *testing.T) {
 	for role := range byRole {
 		if role != core.RoleVerifier {
 			t.Errorf("verification charged %v as well", role)
+		}
+	}
+}
+
+// TestAdjudicationRecordsItsDuration. Every stored verifier call carries how
+// long the model took, which is what the later per-stage time fixes measure
+// against.
+func TestAdjudicationRecordsItsDuration(t *testing.T) {
+	r := newRig(t, 2_000_000, distinctClaims(6), judgeEveryPair(verifier.RelNeither))
+	r.llm.elapsed = 1500 * time.Millisecond
+	if _, err := r.v.Run(context.Background(), r.sess.ID); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var calls []*core.ToolCall
+	if err := r.db.Read(context.Background(), func(ctx context.Context, q store.Queries) error {
+		var err error
+		calls, err = q.ListToolCalls(ctx, r.sess.ID, 0)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) == 0 {
+		t.Fatal("no tool call rows recorded")
+	}
+	for _, c := range calls {
+		if c.DurationMS != 1500 {
+			t.Errorf("call %+v: DurationMS = %d, want 1500", c, c.DurationMS)
 		}
 	}
 }

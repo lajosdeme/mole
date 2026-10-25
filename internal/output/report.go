@@ -56,6 +56,9 @@ type Report struct {
 	Cost core.Cost
 	// Model names what wrote it.
 	Model string
+	// Elapsed is how long the synthesis call took, carried through to the
+	// ledger row so the later per-stage time fixes have something to measure.
+	Elapsed time.Duration
 
 	// Findings are the collapsed assertions the body was written from (§11.2):
 	// one per duplicate cluster, each with every source asserting it.
@@ -231,6 +234,7 @@ func (gen *Generator) writeBody(ctx context.Context, req llm.Request, rep *Repor
 			CacheReadTokens:  resp.Usage.CacheReadTokens,
 			CacheWriteTokens: resp.Usage.CacheWriteTokens,
 		}
+		rep.Elapsed = resp.Elapsed
 	}
 	if err == nil && resp == nil {
 		// The nil guard above concedes resp can be nil, which makes every

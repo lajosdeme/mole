@@ -355,6 +355,9 @@ func (v *Verifier) reread(ctx context.Context, sessionID, src string, rep *Groun
 		Type:      core.CallFetch,
 		Input:     src,
 	}
+	if res != nil {
+		call.DurationMS = res.Duration.Milliseconds()
+	}
 	if err != nil {
 		call.Err = err.Error()
 		return "", call, err
@@ -426,6 +429,7 @@ func (v *Verifier) checkOne(ctx context.Context, sessionID string, c *core.Claim
 				InputTokens:  resp.Usage.InputTokens,
 				OutputTokens: resp.Usage.OutputTokens,
 			},
+			DurationMS: resp.Elapsed.Milliseconds(),
 		})
 	}
 	// WithoutCancel plus a release fallback, for the same reason as adjudicate: a

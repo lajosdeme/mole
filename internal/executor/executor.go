@@ -1101,6 +1101,7 @@ func (e *Executor) planWithBudget(ctx context.Context, sess *core.Session, call 
 				CacheReadTokens:  plan.Usage.CacheReadTokens,
 				CacheWriteTokens: plan.Usage.CacheWriteTokens,
 			},
+			DurationMS: plan.Elapsed.Milliseconds(),
 		}
 		if callErr != nil {
 			tc.Err = callErr.Error()

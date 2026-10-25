@@ -539,6 +539,7 @@ func (v *Verifier) adjudicate(ctx context.Context, sessionID string, batch []Pai
 				InputTokens:  resp.Usage.InputTokens,
 				OutputTokens: resp.Usage.OutputTokens,
 			},
+			DurationMS: resp.Elapsed.Milliseconds(),
 		})
 	}
 	// WithoutCancel, and a release if the settle still fails. Ctrl-C during a model
