@@ -55,6 +55,13 @@ type ClaimScore struct {
 	// Grounded is three-state: nil where no grounding check ran, which is most
 	// claims — §11.5's re-fetch is budgeted and reserved for load-bearing ones.
 	Grounded *bool
+
+	// KeepUnverified writes Confidence and Grounded but leaves verified_at as it
+	// was. For a claim whose pairs a pass never judged: it must stay in
+	// ListUnverifiedClaims so the next pass judges them, but dropping its row
+	// entirely left it at confidence 0, and the report's sort put it last. The
+	// zero value marks the claim verified, as every caller did before.
+	KeepUnverified bool
 }
 
 // ClaimGrounding is one §11.5 grounding verdict.

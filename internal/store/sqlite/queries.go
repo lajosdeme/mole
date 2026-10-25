@@ -1316,8 +1316,8 @@ func (t *queries) SetClaimGrounding(ctx context.Context, results []store.ClaimGr
 
 // ScoreClaims writes the Verifier's verdicts.
 //
-// Touches confidence, grounded, and verified_at only. The claim's text, quote and
-// source are evidence — the quote is what §11.5 checks a citation against — and a
+// Touches confidence, grounded, and verified_at only — verified_at not at all on a
+// KeepUnverified row. The claim's text, quote and source are evidence — the quote is what §11.5 checks a citation against — and a
 // verification pass able to rewrite them would make its own grounding check
 // circular.
 func (t *queries) ScoreClaims(ctx context.Context, scores []store.ClaimScore) error {
@@ -1332,9 +1332,19 @@ func (t *queries) ScoreClaims(ctx context.Context, scores []store.ClaimScore) er
 			grounded = sql.NullInt64{Int64: b2i(*s.Grounded), Valid: true}
 		}
 
-		res, err := t.q.ExecContext(ctx, `
-			UPDATE claims SET confidence = ?, grounded = ?, verified_at = ?
-			WHERE id = ?`, s.Confidence, grounded, now, s.ClaimID)
+		var (
+			res sql.Result
+			err error
+		)
+		if s.KeepUnverified {
+			res, err = t.q.ExecContext(ctx, `
+				UPDATE claims SET confidence = ?, grounded = ?
+				WHERE id = ?`, s.Confidence, grounded, s.ClaimID)
+		} else {
+			res, err = t.q.ExecContext(ctx, `
+				UPDATE claims SET confidence = ?, grounded = ?, verified_at = ?
+				WHERE id = ?`, s.Confidence, grounded, now, s.ClaimID)
+		}
 		if err != nil {
 			return fmt.Errorf("sqlite: score claim %d/%d: %w", i+1, len(scores), err)
 		}

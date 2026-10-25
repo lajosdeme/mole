@@ -405,3 +405,79 @@ func TestUnreachedPairsLeaveTheirClaimsUnverified(t *testing.T) {
 		t.Errorf("%d claims still unverified after the second pass", n)
 	}
 }
+
+// TestUnreachedPairsKeepTheirDerivedConfidence. A target whose pairs were never
+// answered stays unverified so the next pass re-judges it — but it used to lose
+// its derived confidence with it. persist pulled it out of the score rows
+// entirely, because ScoreClaims set verified_at on every row, so the claim kept
+// confidence 0 and the report's sort put it last behind claims that merely got
+// their turn. The derivation covers it either way; only verified_at is withheld.
+func TestUnreachedPairsKeepTheirDerivedConfidence(t *testing.T) {
+	ctx := context.Background()
+	claims := idedClaims(6)
+
+	// Same rig as TestUnreachedPairsLeaveTheirClaimsUnverified: allowance for one
+	// of three disjoint pairs.
+	est := verifier.EstimateBatch(&verifier.Verifier{}, core.BudgetTokens, 1)
+	r := newRig(t, 4*est, claims, judgeEveryPair(verifier.RelNeither))
+	r.v.BatchSize = 1
+	r.v.MaxShareOfBudget = 0.25
+	r.v.Retriever = fixedPairRetriever{
+		"c_00": "c_01", "c_01": "c_00",
+		"c_02": "c_03", "c_03": "c_02",
+		"c_04": "c_05", "c_05": "c_04",
+	}
+	r.llm.usage = llm.Usage{InputTokens: est}
+
+	res, err := r.v.Run(ctx, r.sess.ID)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.PairsUnjudged != 2 {
+		t.Fatalf("%d pairs unjudged, want 2 — the rig no longer stops after one batch", res.PairsUnjudged)
+	}
+	derived := map[string]float64{}
+	for _, s := range res.Scores {
+		for _, c := range s.Cluster.Claims {
+			derived[c.ID] = s.Confidence
+		}
+	}
+
+	skipped := map[string]bool{"c_02": true, "c_03": true, "c_04": true, "c_05": true}
+	byID := map[string]*core.Claim{}
+	for _, c := range r.claims(t) {
+		byID[c.ID] = c
+	}
+	for id := range skipped {
+		c := byID[id]
+		if c == nil {
+			t.Fatalf("claim %s not found", id)
+		}
+		if c.VerifiedAt != nil {
+			t.Errorf("claim %s: marked verified, but its pair was never judged", id)
+		}
+		want, ok := derived[id]
+		if !ok {
+			t.Fatalf("claim %s: the derivation did not cover it; the test proves nothing", id)
+		}
+		if want == 0 {
+			t.Fatalf("claim %s: derived confidence is 0, so persisting it is indistinguishable from dropping it", id)
+		}
+		if c.Confidence != want {
+			t.Errorf("claim %s: confidence = %v, want the derived %v", id, c.Confidence, want)
+		}
+	}
+
+	// Still re-judged: keeping the score did not mark the claims.
+	r.v.MaxShareOfBudget = 1
+	second, err := r.v.Run(ctx, r.sess.ID)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if second.PairsJudged != 2 {
+		t.Errorf("second pass judged %d pairs, want the 2 left over", second.PairsJudged)
+	}
+	if n := r.unverified(t); n != 0 {
+		t.Errorf("%d claims still unverified after the second pass", n)
+	}
+}

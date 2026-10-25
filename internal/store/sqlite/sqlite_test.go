@@ -759,6 +759,62 @@ func TestScoringMarksVerifiedWithoutTouchingEvidence(t *testing.T) {
 	}
 }
 
+// TestKeepUnverifiedScoresWithoutMarking. The Verifier persists the derived
+// confidence of a claim whose pairs it never got to judge, so the report does not
+// sink it to the bottom at 0 — but must leave verified_at alone, or the claim drops
+// out of ListUnverifiedClaims and its pairs are never judged.
+func TestKeepUnverifiedScoresWithoutMarking(t *testing.T) {
+	ctx := context.Background()
+	db, _ := open(t)
+	insertSession(t, db, "s_keep", 1_000_000)
+	id := insertClaim(t, db, "s_keep", "Claim A.", "https://a.example/1")
+
+	grounded := true
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.ScoreClaims(ctx, []store.ClaimScore{
+			{ClaimID: id, Confidence: 0.42, Grounded: &grounded, KeepUnverified: true},
+		})
+	}); err != nil {
+		t.Fatalf("score: %v", err)
+	}
+
+	var all, left []*core.Claim
+	if err := db.Read(ctx, func(ctx context.Context, q store.Queries) error {
+		var err error
+		if all, err = q.ListClaims(ctx, "s_keep", 100); err != nil {
+			return err
+		}
+		left, err = q.ListUnverifiedClaims(ctx, "s_keep", 100)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("%d claims, want 1", len(all))
+	}
+	c := all[0]
+	if c.VerifiedAt != nil {
+		t.Error("KeepUnverified set verified_at; the claim's pairs will never be judged")
+	}
+	if c.Confidence != 0.42 {
+		t.Errorf("confidence = %v, want 0.42", c.Confidence)
+	}
+	if c.Grounded == nil || !*c.Grounded {
+		t.Errorf("Grounded = %v, want true", c.Grounded)
+	}
+	if len(left) != 1 || left[0].ID != id {
+		t.Errorf("unverified set = %v, want the claim still in it", left)
+	}
+
+	// A missing claim is still an error with the flag set.
+	err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.ScoreClaims(ctx, []store.ClaimScore{{ClaimID: "c_nope", Confidence: 1, KeepUnverified: true}})
+	})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("scoring a missing claim: err = %v, want ErrNotFound", err)
+	}
+}
+
 // TestAFinishedSessionRecordsWhyItStopped.
 //
 // core.StatusExhausted is the string "budget_exhausted", and FIVE different

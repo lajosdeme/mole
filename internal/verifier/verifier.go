@@ -845,10 +845,9 @@ func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, batch []P
 // would regenerate the same pairs next time and pay for them again; one that
 // marked them without the edges would lose the graph permanently.
 //
-// skip is the targets whose pairs this pass never adjudicated (see Run). They get
-// neither verified_at nor a score row — ScoreClaims sets verified_at on every row
-// it is given, so a skipped claim must not appear in the rows at all, and its
-// existing confidence is left exactly as it was.
+// skip is the targets whose pairs this pass never adjudicated (see Run). They keep
+// their derived confidence but not verified_at, so the next pass judges their pairs
+// again; one the derivation did not cover gets no row at all.
 func (v *Verifier) persist(ctx context.Context, sessionID string, pool, targets []*core.Claim, verdicts []Judged, res *Result, skip map[string]bool) error {
 	newEdges := Edges(sessionID, verdicts, v.StalenessGap)
 
@@ -862,19 +861,18 @@ func (v *Verifier) persist(ctx context.Context, sessionID string, pool, targets 
 	scores, breakdown := DeriveConfidence(pool, all)
 	res.Scores = breakdown
 
-	// A skipped target must not reach ScoreClaims at all: it sets verified_at on
-	// every row it is given, with no way to ask it to touch confidence alone. The
-	// derivation can still have produced a row for it — it is scored as part of
-	// pool regardless of whether this pass could reach its pairs — so it has to be
-	// pulled back out here rather than simply never added.
+	// A skipped target keeps its derived confidence but not verified_at: marking it
+	// would bury the pair the pass never judged. Its row used to be dropped
+	// outright, because ScoreClaims set verified_at on every row — so the claim
+	// kept confidence 0, and the report's sort put it last, behind claims that had
+	// merely had their turn. The derivation covers it either way: it is scored as
+	// part of pool whether or not this pass reached its pairs.
 	if len(skip) > 0 {
-		kept := scores[:0]
-		for _, sc := range scores {
-			if !skip[sc.ClaimID] {
-				kept = append(kept, sc)
+		for i := range scores {
+			if skip[scores[i].ClaimID] {
+				scores[i].KeepUnverified = true
 			}
 		}
-		scores = kept
 	}
 
 	// Every target not skipped must be marked verified, whether or not the
