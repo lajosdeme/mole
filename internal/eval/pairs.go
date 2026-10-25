@@ -636,7 +636,7 @@ func JudgePairFile(ctx context.Context, p llm.Provider, ps *PairSet, opts FileJu
 
 	judged, _ := verifier.JudgePairs(ctx, p, opts.Model, pairs, opts.BatchSize, log)
 	if opts.Confirm {
-		judged = confirmPositives(ctx, p, opts.Model, judged, opts.BatchSize, log)
+		judged = confirmOnce(ctx, p, opts.Model, judged, opts.BatchSize, log)
 	}
 
 	verdict := make(map[string]verifier.Judged, len(judged))
@@ -660,9 +660,9 @@ func JudgePairFile(ctx context.Context, p llm.Provider, ps *PairSet, opts FileJu
 	return out, nil
 }
 
-// confirmPositives re-judges contradicts and duplicate_of verdicts, keeping
-// only the ones a second judgement agrees with and withholding the rest.
-func confirmPositives(ctx context.Context, p llm.Provider, model string, judged []verifier.Judged, batchSize int, log *slog.Logger) []verifier.Judged {
+// confirmOnce re-judges contradicts and duplicate_of verdicts a second time and
+// applies verifier.ApplyConfirmations to the result.
+func confirmOnce(ctx context.Context, p llm.Provider, model string, judged []verifier.Judged, batchSize int, log *slog.Logger) []verifier.Judged {
 	var positives []verifier.Pair
 	for _, j := range judged {
 		if j.Relation.EffectOf() != verifier.EffectInert {
@@ -678,21 +678,7 @@ func confirmPositives(ctx context.Context, p llm.Provider, model string, judged 
 		again[j.Key()] = j.Relation.Normalize()
 	}
 
-	out := make([]verifier.Judged, 0, len(judged))
-	for _, j := range judged {
-		if j.Relation.EffectOf() == verifier.EffectInert {
-			out = append(out, j)
-			continue
-		}
-		got, asked := again[j.Key()]
-		if !asked || got == j.Relation.Normalize() {
-			out = append(out, j)
-			continue
-		}
-		j.Relation = verifier.RelNeither
-		j.Rationale = "withheld: a second judgement did not agree (" + string(got) + ")"
-		out = append(out, j)
-	}
+	out, _, _ := verifier.ApplyConfirmations(judged, again)
 	return out
 }
 
