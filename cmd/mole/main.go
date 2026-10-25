@@ -529,20 +529,31 @@ func reportPricing(r *checks, cfg *config.Config) {
 	}
 
 	var missing []string
-	for _, role := range llm.Roles {
-		m := cfg.LLM.Resolve(string(role)).Model
+	var localUnpriced, hosted bool
+	for _, role := range roleSettings(cfg) {
+		m := role.model
 		if m == "" || contains(missing, m) {
 			continue
 		}
-		if _, ok := tbl.Lookup(m); !ok {
+		local := pricing.IsLocalEndpoint(role.backend.baseURL)
+		hosted = hosted || !local
+		if _, ok := tbl.Lookup(m); ok {
+			continue
+		}
+		if local {
+			localUnpriced = true
+		} else {
 			missing = append(missing, m)
 		}
 	}
-	if len(missing) == 0 {
+	switch {
+	case len(missing) == 0 && !localUnpriced:
 		r.note(true, "pricing", "every configured model has a rate")
 		return
-	}
-	if pricing.IsLocalEndpoint(cfg.LLM.BaseURL) {
+	case len(missing) == 0 && hosted:
+		r.note(true, "pricing", "every hosted model has a rate; local models are billed at zero")
+		return
+	case len(missing) == 0:
 		r.note(true, "pricing", "local endpoint; models are billed at zero because they are free")
 		return
 	}
@@ -1042,21 +1053,41 @@ func reportLLM(report func(bool, string, string), cfg *config.Config) llm.Provid
 	// A local endpoint can be verified for free, so a green tick here is
 	// earned rather than assumed. A hosted one cannot be checked without
 	// spending money; say so instead of implying it works.
-	if base := cfg.LLM.BaseURL; base != "" && llm.IsLoopback(base) {
+	var localURLs []string
+	allLocal := llmConfigured(cfg)
+	if allLocal {
+		for _, role := range roleSettings(cfg) {
+			if base := role.backend.baseURL; base != "" && llm.IsLoopback(base) {
+				if !contains(localURLs, base) {
+					localURLs = append(localURLs, base)
+				}
+			} else {
+				allLocal = false
+			}
+		}
+	}
+	for _, base := range localURLs {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if !llm.Reachable(ctx, base, nil) {
+		up := llm.Reachable(ctx, base, nil)
+		cancel()
+		if !up {
 			report(false, "llm provider", detail+" — NOT REACHABLE (is the runtime started?)")
 			return built
 		}
+	}
+	if allLocal {
 		report(true, "llm provider", detail+", reachable")
 		return built
 	}
 	// An unpriced model is not fatal, but USD budgeting cannot work for it —
 	// and a model name left over from a different provider shows up here
 	// rather than at the first call, twenty leads into a session.
-	if warn := unpricedModels(built); warn != "" {
+	if warn := unpricedModels(cfg, built); warn != "" {
 		report(false, "llm provider", detail+" — "+warn)
+		return built
+	}
+	if len(localURLs) > 0 {
+		report(true, "llm provider", detail+", local endpoint reachable; hosted roles unverified (run: mole config test-llm)")
 		return built
 	}
 	report(true, "llm provider", detail+" (unverified — run: mole config test-llm)")
@@ -1098,12 +1129,8 @@ func llmRoleLines(cfg *config.Config, built llm.Provider) []llmRoleLine {
 			{llm.RoleVerifier, built.Name(), firstNonEmpty(verifierModelFor(cfg), cheapModel), free},
 		}
 	}
-	roles, err := resolveLLMRoles(cfg)
-	if err != nil {
-		return nil
-	}
 	var lines []llmRoleLine
-	for _, r := range roles {
+	for _, r := range roleSettings(cfg) {
 		model := r.model
 		switch r.role {
 		case llm.RoleStrong:
@@ -1195,37 +1222,25 @@ func checkKeyMatches(key string, explicit bool, kind llm.Kind, prefix string) er
 //
 // One implementation for both callers, so the error cannot name a list the
 // caller computed differently.
-func unpricedModelList(p llm.Provider) []string {
+func unpricedModelList(cfg *config.Config, p llm.Provider) []string {
 	if llm.SourceOf(p) == llm.CredentialNotNeeded {
 		return nil // local model, genuinely free
 	}
 	table := pricing.NewTable()
 	var missing []string
-	for _, m := range []string{p.ModelFor(llm.TierStrong), p.ModelFor(llm.TierCheap)} {
-		if m == "" {
+	for _, line := range llmRoleLines(cfg, p) {
+		if line.local || line.model == "" {
 			continue
 		}
-		if _, ok := table.Lookup(m); !ok && !contains(missing, m) {
-			missing = append(missing, m)
+		if _, ok := table.Lookup(line.model); !ok && !contains(missing, line.model) {
+			missing = append(missing, line.model)
 		}
 	}
 	return missing
 }
 
-func unpricedModels(p llm.Provider) string {
-	if llm.SourceOf(p) == llm.CredentialNotNeeded {
-		return "" // local model, genuinely free
-	}
-	table := pricing.NewTable()
-	var missing []string
-	for _, m := range []string{p.ModelFor(llm.TierStrong), p.ModelFor(llm.TierCheap)} {
-		if m == "" {
-			continue
-		}
-		if _, ok := table.Lookup(m); !ok && !contains(missing, m) {
-			missing = append(missing, m)
-		}
-	}
+func unpricedModels(cfg *config.Config, p llm.Provider) string {
+	missing := unpricedModelList(cfg, p)
 	if len(missing) == 0 {
 		return ""
 	}
@@ -1318,8 +1333,9 @@ type llmRole struct {
 	model   string
 }
 
-// resolveLLMRoles resolves every role from config; a verifier with no model follows the cheap role.
-func resolveLLMRoles(cfg *config.Config) ([]llmRole, error) {
+// roleSettings resolves every role without checking it; a verifier with no model and no
+// endpoint of its own follows the cheap role.
+func roleSettings(cfg *config.Config) []llmRole {
 	var out []llmRole
 	for _, role := range llm.Roles {
 		r := cfg.LLM.Resolve(string(role))
@@ -1327,17 +1343,31 @@ func resolveLLMRoles(cfg *config.Config) ([]llmRole, error) {
 		if kind == "" {
 			kind = llm.KindAnthropic
 		}
-		if err := checkRoleKeyMatchesProvider(cfg, role, kind); err != nil {
-			return nil, err
-		}
 		out = append(out, llmRole{role: role, backend: llmBackend{kind, r.APIKey, r.BaseURL}, model: r.Model})
 	}
 	verifier, cheap := &out[2], out[1]
-	if verifier.model == "" && verifier.backend != cheap.backend {
-		if b := cfg.LLM.Verifier; b != nil && (b.Provider != "" || b.APIKey != "" || b.BaseURL != "") {
-			return nil, errors.New("llm.verifier has its own provider but no model (set llm.verifier.model or llm.verifier-model)")
-		}
+	b := cfg.LLM.Verifier
+	ownEndpoint := b != nil && (b.Provider != "" || b.APIKey != "" || b.BaseURL != "")
+	if verifier.model == "" && !ownEndpoint {
 		verifier.backend = cheap.backend
+	}
+	return out
+}
+
+// resolveLLMRoles is roleSettings with each role's key and model checked.
+func resolveLLMRoles(cfg *config.Config) ([]llmRole, error) {
+	out := roleSettings(cfg)
+	for _, r := range out {
+		kind := llm.Kind(cfg.LLM.Resolve(string(r.role)).Provider)
+		if kind == "" {
+			kind = llm.KindAnthropic
+		}
+		if err := checkRoleKeyMatchesProvider(cfg, r.role, kind); err != nil {
+			return nil, err
+		}
+	}
+	if verifier, cheap := out[2], out[1]; verifier.model == "" && verifier.backend != cheap.backend {
+		return nil, errors.New("llm.verifier has its own provider but no model (set llm.verifier.model or llm.verifier-model)")
 	}
 	return out, nil
 }

@@ -252,7 +252,7 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 		return err
 	}
 	if unit == core.BudgetUSD {
-		if err := checkUSDIsEnforceable(actor.LLM); err != nil {
+		if err := checkUSDIsEnforceable(cfg, actor.LLM); err != nil {
 			return err
 		}
 	}
@@ -472,8 +472,8 @@ func buildWebActor(
 //
 // doctor already warns about this. Warning is not enough at the point where
 // money is about to be spent under a limit that does not exist.
-func checkUSDIsEnforceable(p llm.Provider) error {
-	missing := unpricedModelList(p)
+func checkUSDIsEnforceable(cfg *config.Config, p llm.Provider) error {
+	missing := unpricedModelList(cfg, p)
 	if len(missing) == 0 {
 		return nil
 	}
@@ -500,12 +500,16 @@ func pricingFor(cfg *config.Config) *pricing.Table {
 	if cfg == nil {
 		return t
 	}
-	if pricing.IsLocalEndpoint(cfg.LLM.BaseURL) {
-		for _, m := range []string{cfg.LLM.Model, cfg.LLM.CheapModel, cfg.LLM.VerifierModel} {
-			if m != "" {
-				t.RegisterLocal(m)
-			}
+	// Each role's endpoint decides whether its model is free; fallback is a hosted model.
+	var hosted []llmRole
+	for _, r := range roleSettings(cfg) {
+		if !pricing.IsLocalEndpoint(r.backend.baseURL) {
+			hosted = append(hosted, r)
+		} else if r.model != "" {
+			t.RegisterLocal(r.model)
 		}
+	}
+	if len(hosted) == 0 {
 		return t
 	}
 	// The configured model prices a response that names one nobody registered.
@@ -527,8 +531,23 @@ func pricingFor(cfg *config.Config) *pricing.Table {
 	// Best effort. A configured model with no rates of its own leaves the table
 	// strict, which is the state checkUSDIsEnforceable already refuses to start
 	// a USD run in.
-	_ = t.SetFallbackModel(cfg.LLM.Model)
+	_ = t.SetFallbackModel(fallbackModel(hosted))
 	return t
+}
+
+// fallbackModel is the hosted strong model, else the first hosted role's model.
+func fallbackModel(hosted []llmRole) string {
+	for _, r := range hosted {
+		if r.role == llm.RoleStrong {
+			return r.model
+		}
+	}
+	for _, r := range hosted {
+		if r.model != "" {
+			return r.model
+		}
+	}
+	return ""
 }
 
 func userAgent() string {
