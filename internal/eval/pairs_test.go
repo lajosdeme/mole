@@ -1,12 +1,44 @@
 package eval_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/lajosdeme/mole/internal/eval"
+	"github.com/lajosdeme/mole/internal/llm"
 	"github.com/lajosdeme/mole/internal/verifier"
 )
+
+// seqJudge answers each adjudication call with the next of a fixed sequence of
+// relations, one verdict per pair in the batch.
+type seqJudge struct {
+	relations [][]string
+	calls     int
+}
+
+func (f *seqJudge) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	var rels []string
+	if f.calls < len(f.relations) {
+		rels = f.relations[f.calls]
+	}
+	f.calls++
+
+	verdicts := ""
+	for i, r := range rels {
+		if i > 0 {
+			verdicts += ","
+		}
+		verdicts += fmt.Sprintf(`{"pair":%d,"relation":%q,"confidence":0.9,"why":"seq"}`, i+1, r)
+	}
+	return &llm.Response{
+		Text:  fmt.Sprintf(`{"verdicts":[%s]}`, verdicts),
+		Model: "seq-fake",
+		Usage: llm.Usage{InputTokens: 1, OutputTokens: 1},
+	}, nil
+}
+func (f *seqJudge) Name() string             { return "seq-fake" }
+func (f *seqJudge) ModelFor(llm.Tier) string { return "seq-fake" }
 
 func judgedSet(verdicts ...string) *eval.PairSet {
 	ps := &eval.PairSet{}
@@ -188,5 +220,53 @@ func TestARealDisagreementIsStillAnError(t *testing.T) {
 	s := eval.ScorePairs(set)
 	if s.Correct != 0 {
 		t.Errorf("correct = %d of 0; a real disagreement was folded away", s.Correct)
+	}
+}
+
+// TestConfirmKeepsOnlyAgreeingPositives: the first look says "contradicts",
+// the second says "neither", and the output withholds the verdict.
+func TestConfirmKeepsOnlyAgreeingPositives(t *testing.T) {
+	ps := &eval.PairSet{Pairs: []eval.LabelledPair{
+		{Pair: "a|b", A: "X is true.", B: "X is false.", Label: "contradicts"},
+	}}
+	fake := &seqJudge{relations: [][]string{{"contradicts"}, {"neither"}}}
+
+	out, err := eval.JudgePairFile(context.Background(), fake, ps, eval.FileJudgeOptions{
+		Model: "fake", Confirm: true,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.calls != 2 {
+		t.Fatalf("model called %d time(s), want 2 (confirm judges twice)", fake.calls)
+	}
+	if got := out.Pairs[0].Model; got != "neither" {
+		t.Errorf("Model = %q, want %q (the second look did not agree)", got, "neither")
+	}
+	if got := out.Pairs[0].Label; got != "contradicts" {
+		t.Errorf("Label = %q, want the input label carried through unchanged", got)
+	}
+}
+
+// TestRetiredLabelsNormalizeInFileMode. A model answering "supports" out of
+// habit normalizes to "neither" the same way the production path does.
+func TestRetiredLabelsNormalizeInFileMode(t *testing.T) {
+	ps := &eval.PairSet{Pairs: []eval.LabelledPair{
+		{Pair: "a|b", A: "claim a", B: "claim b", Label: "neither"},
+	}}
+	fake := &seqJudge{relations: [][]string{{"supports"}}}
+
+	out, err := eval.JudgePairFile(context.Background(), fake, ps, eval.FileJudgeOptions{
+		Model: "fake",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.Pairs[0].Model; got != "neither" {
+		t.Errorf("Model = %q, want the retired name normalized to %q", got, "neither")
+	}
+	s := eval.ScorePairs(out)
+	if s.Correct != 1 {
+		t.Errorf("Correct = %d, want 1: scoring must not penalise a renamed verdict", s.Correct)
 	}
 }

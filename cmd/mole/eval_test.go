@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -140,5 +143,53 @@ func TestAMetricIsNotRenderedAsANumberItIsNot(t *testing.T) {
 		if got := formatMetric(eval.Metric{Value: v, Unit: "usd"}); strings.HasPrefix(got, "0 ") || got == "0.0 usd" {
 			t.Errorf("a spend of %v rendered as %q", v, got)
 		}
+	}
+}
+
+// TestJudgeFromFileNeedsNoSession: --from judges a labelled pair file with no
+// database, and the output carries the input's label forward.
+func TestJudgeFromFileNeedsNoSession(t *testing.T) {
+	dir := t.TempDir()
+	from := filepath.Join(dir, "pairs.json")
+	if err := eval.WritePairs(from, &eval.PairSet{Pairs: []eval.LabelledPair{
+		{Pair: "c1|c2", A: "X is true.", B: "X is false.", Label: "contradicts"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out.json")
+
+	factory, fake := reportFakeFactory(
+		`{"verdicts":[{"pair":1,"relation":"contradicts","confidence":0.9,"why":"opposite claims"}]}`)
+
+	var stdout bytes.Buffer
+	err := cmdPairsJudgeFile(context.Background(), pairsJudgeFileOpts{
+		from: from, role: "verifier", model: "fake-model", out: out,
+	}, reportTestConfig(), factory, &stdout)
+	if err != nil {
+		t.Fatalf("cmdPairsJudgeFile: %v", err)
+	}
+	if len(fake.got) != 1 {
+		t.Fatalf("%d model call(s), want 1", len(fake.got))
+	}
+
+	got, err := eval.LoadPairs(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Pairs) != 1 {
+		t.Fatalf("%d pair(s) in output, want 1", len(got.Pairs))
+	}
+	if got.Pairs[0].Model != "contradicts" {
+		t.Errorf("Model = %q, want %q", got.Pairs[0].Model, "contradicts")
+	}
+	if !got.Pairs[0].Judged {
+		t.Error("pair was not marked judged")
+	}
+	if got.Pairs[0].Label != "contradicts" {
+		t.Errorf("Label = %q, want the input label carried through", got.Pairs[0].Label)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "session.db")); !os.IsNotExist(err) {
+		t.Error("a database file exists; --from must need no session store")
 	}
 }

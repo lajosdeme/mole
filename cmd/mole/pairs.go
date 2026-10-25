@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"sort"
 	"strings"
 
-	"errors"
 	"github.com/lajosdeme/mole/internal/config"
 	"github.com/lajosdeme/mole/internal/eval"
+	"github.com/lajosdeme/mole/internal/llm"
 	"github.com/lajosdeme/mole/internal/verifier"
 	"github.com/spf13/cobra"
 	"log/slog"
@@ -216,33 +220,47 @@ func sortedKeys(m map[string]int) []string {
 
 func newPairsJudgeCmd() *cobra.Command {
 	var (
-		model  string
-		out    string
-		labels string
-		kinds  []string
-		batch  int
+		model   string
+		role    string
+		from    string
+		out     string
+		labels  string
+		kinds   []string
+		batch   int
+		confirm bool
 	)
 	c := &cobra.Command{
-		Use:   "judge <session-id>",
-		Short: "Re-judge a session's pairs with a different model, without touching the graph",
-		Long: "Runs the adjudication prompt over the pairs a session already judged, with a\n" +
-			"model of your choosing, and writes the verdicts alongside the stored ones.\n\n" +
-			"No research run: the claims and pairs already exist, so comparing two judges is\n" +
-			"a handful of model calls rather than an hour. Nothing is written to the session —\n" +
-			"the stored graph is what is being compared against.\n\n" +
-			"The cost is the evaluator's and is deliberately not charged to the session: doing\n" +
-			"so would inflate the spend and corrupt cost-per-claim for the very session being\n" +
-			"examined.",
-		Args: cobra.ExactArgs(1),
+		Use:   "judge [session-id]",
+		Short: "Re-judge pairs with a different model, without touching the graph",
+		Long: "Runs the adjudication prompt over pairs already judged, with a model of your\n" +
+			"choosing, and writes the verdicts alongside the stored ones.\n\n" +
+			"  mole pairs judge <session-id> --model gemma4:12b   # pairs from a session\n" +
+			"  mole pairs judge --from pairs.json --model gemma4:12b   # pairs from a file,\n" +
+			"                                                           no database at all\n\n" +
+			"Nothing is written to the session — the stored graph is what is being compared\n" +
+			"against. The cost is the evaluator's and is deliberately not charged to the\n" +
+			"session: doing so would inflate the spend and corrupt cost-per-claim for the\n" +
+			"very session being examined.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			if model == "" {
-				return errors.New("--model is required: the point is to compare a different one")
+			if (len(args) == 1) == (from != "") {
+				return errors.New("give a <session-id> or --from <file>, not both")
 			}
 
 			cfg, err := config.Load()
 			if err != nil && !errors.Is(err, config.ErrNotConfigured) {
 				return err
+			}
+
+			if from != "" {
+				return cmdPairsJudgeFile(ctx, pairsJudgeFileOpts{
+					from: from, role: role, model: model, confirm: confirm, batch: batch, out: out,
+				}, cfg, llm.New, cmd.OutOrStdout())
+			}
+
+			if model == "" {
+				return errors.New("--model is required: the point is to compare a different one")
 			}
 			provider, _, err := buildLLM(cfg)
 			if err != nil {
@@ -306,12 +324,73 @@ func newPairsJudgeCmd() *cobra.Command {
 	}
 	f := c.Flags()
 	f.StringVar(&model, "model", "", "model to judge with, e.g. gemma4:12b")
+	f.StringVar(&role, "role", string(llm.RoleVerifier),
+		"role whose provider judges a --from file: strong, cheap or verifier")
+	f.StringVar(&from, "from", "",
+		"judge a labelled pair file instead of a session; needs no database")
 	f.StringVarP(&out, "out", "o", "", "write here instead of stdout")
 	f.StringVar(&labels, "labels", "",
-		"carry labels forward from an earlier set, so the work is done once")
-	f.StringSliceVar(&kinds, "kind", nil, "only re-judge these stored verdicts, e.g. --kind contradicts")
+		"carry labels forward from an earlier set, so the work is done once (session mode only)")
+	f.StringSliceVar(&kinds, "kind", nil,
+		"only re-judge these stored verdicts, e.g. --kind contradicts (session mode only)")
 	f.IntVar(&batch, "batch", 0, "pairs per call; 0 uses the default, lower it if the model times out")
+	f.BoolVar(&confirm, "confirm", false,
+		"judge twice; a contradicts or duplicate_of verdict survives only if both agree")
 	return c
+}
+
+// pairsJudgeFileOpts configures a file-mode judge run.
+type pairsJudgeFileOpts struct {
+	from, role, model, out string
+	confirm                bool
+	batch                  int
+}
+
+// cmdPairsJudgeFile judges a labelled pair file with no store and no ledger.
+func cmdPairsJudgeFile(ctx context.Context, o pairsJudgeFileOpts, cfg *config.Config,
+	newProvider func(llm.Config, *http.Client) (llm.Provider, error), stdout io.Writer) error {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	provider, model, err := buildReportLLM(cfg, nil, llm.ModelRole(o.role), o.model, newProvider)
+	if err != nil {
+		return err
+	}
+
+	ps, err := eval.LoadPairs(o.from)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", o.from, err)
+	}
+
+	result, err := eval.JudgePairFile(ctx, provider, ps, eval.FileJudgeOptions{
+		Model: model, BatchSize: o.batch, Confirm: o.confirm,
+	}, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	if err != nil {
+		return err
+	}
+
+	judged, unjudged := 0, 0
+	for _, p := range result.Pairs {
+		if p.Judged {
+			judged++
+		} else {
+			unjudged++
+		}
+	}
+	fmt.Fprintf(stdout, "%d pair(s) judged by %s", judged, model)
+	if unjudged > 0 {
+		fmt.Fprintf(stdout, ", %d unanswered", unjudged)
+	}
+	fmt.Fprintln(stdout)
+
+	if o.out == "" {
+		return eval.WritePairs("/dev/stdout", result)
+	}
+	if err := eval.WritePairs(o.out, result); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "written to %s\n", o.out)
+	return nil
 }
 
 func newPairsCompareCmd() *cobra.Command {

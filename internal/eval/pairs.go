@@ -43,6 +43,9 @@ type LabelledPair struct {
 	SourceA string `json:"source_a,omitempty"`
 	SourceB string `json:"source_b,omitempty"`
 
+	QuoteA string `json:"quote_a,omitempty"`
+	QuoteB string `json:"quote_b,omitempty"`
+
 	// Model is what the adjudicator said. "unrelated" means no edge was stored, which
 	// covers both "judged unrelated" and "never reached" — Judged distinguishes them.
 	Model string `json:"model"`
@@ -289,6 +292,7 @@ func DumpPairs(ctx context.Context, st store.Store, sessionID string, opts DumpO
 			Pair: key,
 			A:    oneLine(p.A.Text), B: oneLine(p.B.Text),
 			SourceA: p.A.Source, SourceB: p.B.Source,
+			QuoteA: p.A.Quote, QuoteB: p.B.Quote,
 			Model: kind, Why: v.why,
 			// Both ends verified means the pair was reachable by the pass that ran.
 			Judged: p.A.VerifiedAt != nil && p.B.VerifiedAt != nil,
@@ -549,6 +553,7 @@ func JudgeSession(ctx context.Context, st store.Store, p llm.Provider, sessionID
 			Pair: key,
 			A:    oneLine(pr.A.Text), B: oneLine(pr.B.Text),
 			SourceA: pr.A.Source, SourceB: pr.B.Source,
+			QuoteA: pr.A.Quote, QuoteB: pr.B.Quote,
 			Baseline: storedKind[key],
 			Label:    opts.Labels[key],
 		}
@@ -603,6 +608,92 @@ type Agreement struct {
 	// which changes a confidence score and queues a research lead. Acting on 84%
 	// would mean rewriting a prompt to chase six problems when there was one.
 	SameEffect int `json:"same_effect"`
+}
+
+// FileJudgeOptions configure judging a labelled pair file.
+type FileJudgeOptions struct {
+	Model     string
+	BatchSize int
+	// Confirm judges twice and keeps a contradicts or duplicate_of verdict only
+	// when both runs agree.
+	Confirm bool
+}
+
+// JudgePairFile re-judges every pair in a labelled set with no store and no
+// session, carrying each pair's label through unchanged.
+func JudgePairFile(ctx context.Context, p llm.Provider, ps *PairSet, opts FileJudgeOptions, log *slog.Logger) (*PairSet, error) {
+	pairs := make([]verifier.Pair, 0, len(ps.Pairs))
+	for _, lp := range ps.Pairs {
+		a, b, ok := strings.Cut(lp.Pair, "|")
+		if !ok {
+			return nil, fmt.Errorf("eval: pair key %q is not \"idA|idB\"", lp.Pair)
+		}
+		pairs = append(pairs, verifier.Pair{
+			A: &core.Claim{ID: a, Text: lp.A, Quote: lp.QuoteA, Source: lp.SourceA},
+			B: &core.Claim{ID: b, Text: lp.B, Quote: lp.QuoteB, Source: lp.SourceB},
+		})
+	}
+
+	judged, _ := verifier.JudgePairs(ctx, p, opts.Model, pairs, opts.BatchSize, log)
+	if opts.Confirm {
+		judged = confirmPositives(ctx, p, opts.Model, judged, opts.BatchSize, log)
+	}
+
+	verdict := make(map[string]verifier.Judged, len(judged))
+	for _, j := range judged {
+		verdict[j.Key()] = j
+	}
+
+	out := &PairSet{Session: ps.Session, Model: opts.Model}
+	for _, lp := range ps.Pairs {
+		if j, ok := verdict[lp.Pair]; ok {
+			lp.Baseline = lp.Model
+			lp.Model = string(j.Relation)
+			lp.Why = j.Rationale
+			lp.Judged = true
+		} else {
+			lp.Model = ""
+			lp.Judged = false
+		}
+		out.Pairs = append(out.Pairs, lp)
+	}
+	return out, nil
+}
+
+// confirmPositives re-judges contradicts and duplicate_of verdicts, keeping
+// only the ones a second judgement agrees with and withholding the rest.
+func confirmPositives(ctx context.Context, p llm.Provider, model string, judged []verifier.Judged, batchSize int, log *slog.Logger) []verifier.Judged {
+	var positives []verifier.Pair
+	for _, j := range judged {
+		if j.Relation.EffectOf() != verifier.EffectInert {
+			positives = append(positives, j.Pair)
+		}
+	}
+	if len(positives) == 0 {
+		return judged
+	}
+	second, _ := verifier.JudgePairs(ctx, p, model, positives, batchSize, log)
+	again := make(map[string]verifier.Relation, len(second))
+	for _, j := range second {
+		again[j.Key()] = j.Relation.Normalize()
+	}
+
+	out := make([]verifier.Judged, 0, len(judged))
+	for _, j := range judged {
+		if j.Relation.EffectOf() == verifier.EffectInert {
+			out = append(out, j)
+			continue
+		}
+		got, asked := again[j.Key()]
+		if !asked || got == j.Relation.Normalize() {
+			out = append(out, j)
+			continue
+		}
+		j.Relation = verifier.RelNeither
+		j.Rationale = "withheld: a second judgement did not agree (" + string(got) + ")"
+		out = append(out, j)
+	}
+	return out
 }
 
 func (a Agreement) Rate() float64 {
