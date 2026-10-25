@@ -17,8 +17,11 @@ import (
 
 // Result is what one lead produced.
 type Result struct {
-	// Summary is a few paragraphs. The planner sees this; it never sees the
-	// pages behind it.
+	// Summary is a one-line count ("N verified claim(s) from M source(s).") or,
+	// when nothing came back, a line saying why. Nothing downstream reads it —
+	// not the planner, not the report, which is built from the stored claims —
+	// so it stays a deterministic string rather than a model call synthesizing
+	// one nobody consumes.
 	Summary string
 
 	// Claims are atomic facts, each carrying a source and a verbatim quote

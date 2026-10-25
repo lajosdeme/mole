@@ -70,12 +70,11 @@ func (f *fakeFetcher) Fetch(ctx context.Context, rawURL string) (*fetch.Result, 
 // fakeLLM returns scripted responses. The mine response is built from the
 // actual source text so quotes verify, unless a test deliberately fabricates.
 type fakeLLM struct {
-	mu        sync.Mutex
-	mineFunc  func(prompt string) string
-	reduceOut string
-	usage     llm.Usage
-	calls     []llm.Request
-	failNext  error
+	mu       sync.Mutex
+	mineFunc func(prompt string) string
+	usage    llm.Usage
+	calls    []llm.Request
+	failNext error
 }
 
 func (f *fakeLLM) Name() string { return "fake" }
@@ -104,10 +103,6 @@ func (f *fakeLLM) Complete(ctx context.Context, req llm.Request) (*llm.Response,
 		return resp, failure
 	}
 
-	if req.Tier == llm.TierStrong {
-		resp.Text = f.reduceOut
-		return resp, nil
-	}
 	prompt := ""
 	if len(req.Messages) > 0 {
 		prompt = req.Messages[0].Text
@@ -263,7 +258,7 @@ func newHarness(t *testing.T, results []search.Result, pages map[string]*fetch.R
 	if mine == nil {
 		mine = mineFromSource
 	}
-	fl := &fakeLLM{mineFunc: mine, reduceOut: "Sources agree MambaByte reports 1.31 BPB on PG-19."}
+	fl := &fakeLLM{mineFunc: mine}
 	ff := &fakeFetcher{pages: pages}
 	fs := &fakeSearch{results: results, cost: core.Cost{USDMicros: 5000}}
 
@@ -371,6 +366,47 @@ func TestEndToEndProducesCitedClaims(t *testing.T) {
 	}
 }
 
+// TestRunMakesNoStrongTierCall is Quick Win 1: `reduce` spent a TierStrong
+// call synthesizing a paragraph that executor.attempt never reads — it keeps
+// only Result.Claims. Every lead paid for that call and threw the answer
+// away. The summary is now built from the counts the run already has.
+func TestRunMakesNoStrongTierCall(t *testing.T) {
+	const pageURL = "https://arxiv.example/abs/2401.13660"
+
+	h := newHarness(t,
+		[]search.Result{{URL: pageURL, Title: "MambaByte results", Rank: 1}},
+		map[string]*fetch.Result{
+			pageURL: {
+				URL: pageURL, Outcome: fetch.OutcomeOK, StatusCode: 200,
+				ContentType: "text/html", Content: []byte(articleHTML()),
+			},
+		}, nil)
+
+	res, err := h.actor.Run(context.Background(), h.lead)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	h.llm.mu.Lock()
+	for _, c := range h.llm.calls {
+		if c.Tier == llm.TierStrong {
+			t.Errorf("made a TierStrong request: %+v", c)
+		}
+	}
+	h.llm.mu.Unlock()
+
+	for _, c := range res.Costs {
+		if c.Input == "reduce" {
+			t.Errorf("recorded a reduce cost row: %+v", c)
+		}
+	}
+
+	const want = "1 verified claim(s) from 1 source(s)."
+	if res.Summary != want {
+		t.Errorf("summary = %q, want %q", res.Summary, want)
+	}
+}
+
 // TestFabricatedClaimsAreRejected: a model that invents a quote loses the
 // claim. This is the check that separates a claim graph from a pile of
 // assertions with URLs attached.
@@ -460,9 +496,9 @@ func TestCostsSettleAgainstTheLedger(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 
-	// Search + fetch + at least one mine + one reduce.
-	if len(res.Costs) < 4 {
-		t.Fatalf("recorded %d tool calls, want at least 4", len(res.Costs))
+	// Search + fetch + at least one mine.
+	if len(res.Costs) < 3 {
+		t.Fatalf("recorded %d tool calls, want at least 3", len(res.Costs))
 	}
 	var kinds []core.CallType
 	for _, c := range res.Costs {
