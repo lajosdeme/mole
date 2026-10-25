@@ -1130,17 +1130,13 @@ func TestHittingMaxLeadsDoesNotBlockVerification(t *testing.T) {
 //
 // Marking is what drains the work queue, and doing it after a pass that could not
 // adjudicate at all records "we compared these and found nothing" when the truth is "we
-// never compared them".
-//
-// A model that ANSWERS uselessly used to be treated as the other case — marked anyway,
-// on the theory that re-asking pays again for the same non-answer. That theory lost to
-// the rule this package now enforces everywhere else: a pair with no usable verdict was
-// never adjudicated, whatever stopped it from being one, so its claims stay unverified
-// and CandidatePairs retrieves the pair again (it has no edge either way).
+// never compared them". Distinct from a pass whose model answered uselessly — that one
+// HAS asked, and re-asking would pay again for the same answer — and from one whose call
+// errored outright, which got no answer to re-ask for free in the first place.
 func TestAPassThatComparedNothingLeavesClaimsUnverified(t *testing.T) {
 	ctx := context.Background()
 
-	// Allowance far too small for even one batch.
+	// Allowance far too small for even one batch: no call is ever attempted.
 	blocked := newRig(t, 400_000, distinctClaims(6), judgeEveryPair(verifier.RelNeither))
 	blocked.v.MaxShareOfBudget = 0.00001
 	res, err := blocked.v.Run(ctx, blocked.sess.ID)
@@ -1160,26 +1156,33 @@ func TestAPassThatComparedNothingLeavesClaimsUnverified(t *testing.T) {
 		t.Errorf("the reason does not say the claims were left alone: %q", res.Degraded)
 	}
 
-	// A model that answers but gives nothing parseable: the call happens (Calls > 0,
-	// Degraded empty — nothing here looks like the ceiling stop above), yet every batch
-	// comes back with no usable verdict, so the claims are left exactly where the
-	// blocked pass left its own.
+	// A model that ANSWERS uselessly is a different case: the claims are marked,
+	// because re-asking would pay again for the same non-answer.
 	asked := newRig(t, 4_000_000, distinctClaims(6), func(int, string) (string, error) {
 		return "I decline to compare these.", nil
 	})
-	askedRes, err := asked.v.Run(ctx, asked.sess.ID)
+	if _, err := asked.v.Run(ctx, asked.sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n := asked.unverified(t); n != 0 {
+		t.Errorf("%d claims left unverified after the model was asked and answered badly", n)
+	}
+
+	// A call that ERRORS is neither of those: the provider never returned a
+	// response at all, so — unlike a decline — there is no answer being paid for
+	// twice. The claims stay unverified and the pair is retried next pass.
+	errored := newRig(t, 4_000_000, distinctClaims(6), func(int, string) (string, error) {
+		return "", llm.ErrOverloaded
+	})
+	erroredRes, err := errored.v.Run(ctx, errored.sess.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if askedRes.Calls == 0 {
-		t.Fatal("the model was never called, so this is not the case under test")
+	if erroredRes.Calls == 0 {
+		t.Fatal("no call was attempted, so this is not the case under test")
 	}
-	if askedRes.Degraded != "" {
-		t.Fatalf("degraded = %q; this pass should look like one that simply got no answers",
-			askedRes.Degraded)
-	}
-	if n := asked.unverified(t); n != 6 {
-		t.Errorf("%d of 6 claims left unverified after the model was asked and answered uselessly", n)
+	if n := errored.unverified(t); n != 6 {
+		t.Errorf("%d of 6 claims left unverified after every call errored", n)
 	}
 }
 

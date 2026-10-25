@@ -264,13 +264,19 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 
 	verdicts := free
 	var unjudged []Pair
+	// unanswered is the subset of unjudged whose batch never got a response at all —
+	// never launched, or its call errored. Distinct from a batch that answered and
+	// produced nothing usable (a refusal, a parse failure, a short response): that
+	// one WAS asked, so re-asking would pay again for the same non-answer. See the
+	// skip computation below.
+	var unanswered []Pair
 	batches := Batches(pairs, v.BatchSize)
 	// One wave's worth of batches at a time, so each wave's positives are
 	// confirmed before the next wave spends the allowance — the order the serial
 	// loop confirmed in, batch by batch, when Concurrency is 1.
 	for start := 0; start < len(batches); {
 		end := min(start+v.concurrency(), len(batches))
-		groups, missed, _, stop := v.runBatchGroups(ctx, sessionID, batches[start:end], res)
+		groups, missed, missedUnanswered, _, stop := v.runBatchGroups(ctx, sessionID, batches[start:end], res)
 		var judged []Judged
 		// A fatal error fails a second look exactly as it failed the first, and the
 		// wave it came from has already spent its round trips; asking again only
@@ -282,6 +288,7 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		}
 		verdicts = append(verdicts, judged...)
 		unjudged = append(unjudged, missed...)
+		unanswered = append(unanswered, missedUnanswered...)
 
 		if stop != nil {
 			// Out of allowance, out of budget, or a fatal provider error. Keep what
@@ -289,7 +296,9 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 			// claims still need marking verified or the queue never drains.
 			res.Degraded = stop.Error()
 			for _, b := range batches[end:] {
+				// Never launched: no response, by definition.
 				unjudged = append(unjudged, b...)
+				unanswered = append(unanswered, b...)
 			}
 			break
 		}
@@ -318,12 +327,19 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		return res, nil
 	}
 
-	// A target whose pair was never adjudicated is excluded from marking: the pair
+	// A target whose pair was never ANSWERED is excluded from marking: the pair
 	// carries no edge, so CandidatePairs retrieves it again next pass (it skips
 	// only a pair that already has one) — but only as long as the target still
 	// reads as unverified. Marking it anyway, as every pass used to, buried the
-	// pair for good: allowance, wall clock and a fatal provider error all stop a
-	// pass mid-batch, and "we marked it" then meant "we never compared it".
+	// pair for good: a batch never launched (allowance, wall clock, or a fatal
+	// provider error stopped the pass before it) and a batch whose call errored
+	// (no response at all) both mean "we never compared this", not "we compared
+	// it and found nothing".
+	//
+	// A pair whose batch DID get a response — a refusal, a parse failure, a short
+	// batch that omitted it — is judged anyway: the model was asked, and re-asking
+	// would pay again for the same non-answer. Those pairs stay in `unjudged` for
+	// PairsUnjudged, but not in `unanswered`, so they are not in skip.
 	//
 	// Restricted to targets: the pair's other claim can be an already-verified pool
 	// claim, and nothing here withholds ITS confidence — no new edge touches it
@@ -332,8 +348,8 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 	for _, c := range targets {
 		isTarget[c.ID] = true
 	}
-	skip := make(map[string]bool, len(unjudged)*2)
-	for _, p := range unjudged {
+	skip := make(map[string]bool, len(unanswered)*2)
+	for _, p := range unanswered {
 		if isTarget[p.A.ID] {
 			skip[p.A.ID] = true
 		}
@@ -504,7 +520,7 @@ func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Jud
 	// The stop is dropped on purpose: a pair whose second look never happened keeps
 	// its first verdict (see above), and the next first-look wave meets the same
 	// allowance or provider and reports it.
-	again, _, _, _ := v.runBatches(ctx, sessionID, batches, res)
+	again, _, _, _, _ := v.runBatches(ctx, sessionID, batches, res)
 	for _, j := range again {
 		second[j.Pair.Key()] = j.Relation.Normalize()
 	}
@@ -567,7 +583,11 @@ func (v *Verifier) concurrency() int {
 type batchOutcome struct {
 	judged   []Judged
 	unjudged []Pair
-	stop     error
+	// responded is whether this batch's call returned a response at all — true for
+	// a refusal or a response that failed to parse, false for a call that errored
+	// (or was never attempted). See adjudicate.
+	responded bool
+	stop      error
 	// panicked is a recovered panic and its stack, re-raised on the caller's
 	// goroutine once the wave has finished.
 	panicked any
@@ -584,17 +604,18 @@ type batchOutcome struct {
 // wave starts; the in-flight ones cannot be recalled and are kept.
 //
 // unjudged is every pair without a verdict: those a launched batch did not answer,
-// and those in batches never launched. consumed counts the pairs in launched
-// batches only.
-func (v *Verifier) runBatches(ctx context.Context, sessionID string, batches [][]Pair, res *Result) (judged []Judged, unjudged []Pair, consumed int, stop error) {
-	groups, unjudged, consumed, stop := v.runBatchGroups(ctx, sessionID, batches, res)
-	return slices.Concat(groups...), unjudged, consumed, stop
+// and those in batches never launched. unanswered is the subset of unjudged whose
+// batch got no response at all — see runBatchGroups. consumed counts the pairs in
+// launched batches only.
+func (v *Verifier) runBatches(ctx context.Context, sessionID string, batches [][]Pair, res *Result) (judged []Judged, unjudged, unanswered []Pair, consumed int, stop error) {
+	groups, unjudged, unanswered, consumed, stop := v.runBatchGroups(ctx, sessionID, batches, res)
+	return slices.Concat(groups...), unjudged, unanswered, consumed, stop
 }
 
 // runBatchGroups is runBatches with the verdicts kept per batch: groups[i] is
 // batches[i]'s, empty for a batch that was not launched or not answered. confirm
 // needs the grouping to batch each first-look batch's positives on their own.
-func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches [][]Pair, res *Result) (groups [][]Judged, unjudged []Pair, consumed int, stop error) {
+func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches [][]Pair, res *Result) (groups [][]Judged, unjudged, unanswered []Pair, consumed int, stop error) {
 	groups = make([][]Judged, len(batches))
 	next := 0
 	for next < len(batches) && stop == nil {
@@ -626,8 +647,8 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 						outcomes[i].panicked = fmt.Sprintf("%v\n\nadjudication goroutine stack:\n%s", p, debug.Stack())
 					}
 				}()
-				j, u, e := v.adjudicate(ctx, sess, batch, res)
-				outcomes[i] = batchOutcome{judged: j, unjudged: u, stop: e}
+				j, u, responded, e := v.adjudicate(ctx, sess, batch, res)
+				outcomes[i] = batchOutcome{judged: j, unjudged: u, responded: responded, stop: e}
 			}()
 		}
 		wg.Wait()
@@ -640,6 +661,9 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 		for i, o := range outcomes {
 			groups[next+i] = o.judged
 			unjudged = append(unjudged, o.unjudged...)
+			if !o.responded {
+				unanswered = append(unanswered, o.unjudged...)
+			}
 			consumed += len(wave[i])
 			if o.stop != nil && stop == nil {
 				stop = o.stop // the lowest-indexed batch's reason, as a serial pass would report
@@ -648,9 +672,11 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 		next += k
 	}
 	for _, batch := range batches[next:] {
+		// Never launched: no response, by definition.
 		unjudged = append(unjudged, batch...)
+		unanswered = append(unanswered, batch...)
 	}
-	return groups, unjudged, consumed, stop
+	return groups, unjudged, unanswered, consumed, stop
 }
 
 // waveSize is how many of the remaining batches the next wave may launch.
@@ -703,19 +729,26 @@ func (v *Verifier) spentSoFar() int64 {
 //
 // The allowance is checked by runBatches for the whole wave, not here: sess is the
 // wave's snapshot, and adjudicate runs concurrently with the rest of its wave.
-func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, batch []Pair, res *Result) ([]Judged, []Pair, error) {
+//
+// responded reports whether the provider returned a response at all — true for a
+// refusal or a response adjudicate could not parse, false when no call was ever
+// made (insufficient budget, a reservation refused) or the call itself errored.
+// Run uses it to decide which unjudged pairs may still have their claims marked:
+// one the model answered, however uselessly, is not re-asked for free; one that
+// never got an answer is.
+func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, batch []Pair, res *Result) (judged []Judged, unjudged []Pair, responded bool, err error) {
 	sessionID := sess.ID
 	est := v.estimateBatch(sess.BudgetUnit, len(batch))
 	if avail := sess.Available(); est > avail {
 		est = avail
 	}
 	if est <= 0 {
-		return nil, batch, fmt.Errorf("%w: nothing left to verify with", budget.ErrInsufficientBudget)
+		return nil, batch, false, fmt.Errorf("%w: nothing left to verify with", budget.ErrInsufficientBudget)
 	}
 
 	reservation, rerr := v.Ledger.ReserveVerify(ctx, sessionID, est)
 	if rerr != nil {
-		return nil, batch, rerr
+		return nil, batch, false, rerr
 	}
 
 	prompt, _ := adjudicateUserPrompt(batch)
@@ -779,24 +812,30 @@ func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, batch []P
 		// batch identically, and each attempt still takes a reservation and a
 		// round trip — so stop rather than walking the whole list into the same
 		// wall. Anything else is this batch's problem alone.
+		//
+		// Either way, no response came back: responded is false, so Run does not
+		// mark these claims verified.
 		if isFatal(callErr) {
-			return nil, batch, callErr
+			return nil, batch, false, callErr
 		}
 		v.logger().WarnContext(ctx, "verifier: adjudication call failed; skipping batch", "err", callErr)
-		return nil, batch, nil
+		return nil, batch, false, nil
 	}
 	if resp.Refused {
 		v.logger().WarnContext(ctx, "verifier: model refused to compare claims",
 			"category", resp.RefusalCategory)
-		return nil, batch, nil
+		// The model responded; a refusal is its answer, not a missing one.
+		return nil, batch, true, nil
 	}
 
-	judged, unjudged, perr := parseVerdicts(resp.Text, batch)
+	verdicts, missed, perr := parseVerdicts(resp.Text, batch)
 	if perr != nil {
 		v.logger().WarnContext(ctx, "verifier: batch returned no usable verdicts", "err", perr)
 	}
-	logShortBatch(ctx, v.logger(), batch, resp, len(judged))
-	return judged, unjudged, nil
+	logShortBatch(ctx, v.logger(), batch, resp, len(verdicts))
+	// A response came back even where parsing salvaged nothing: these claims were
+	// asked about, so they are judged rather than retried for free.
+	return verdicts, missed, true, nil
 }
 
 // persist writes the edges and marks every target claim verified, except one
