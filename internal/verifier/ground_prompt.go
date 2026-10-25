@@ -146,15 +146,7 @@ func parseGroundVerdict(raw string) (supported bool, why string, ok bool) {
 }
 
 // groundCallEstimate is one judge call's reservation, in the session's unit.
-//
-// It was unit-blind: 4700 was handed to Reserve and compared against the allowance in
-// both units. Safe in the reservation's direction, but it encoded a different policy per
-// unit — in token mode grounding declines on any session whose escrow is under 4700
-// tokens, which is the behaviour a live run hit, while in USD mode 4700 micro-dollars is
-// effectively always affordable. v.estimateBatch already branches; this now matches it,
-// and prices input and output separately rather than one flat rate — see v.estimate.
-//
-// The grounder runs inside this Verifier (v.Grounder), so it prices against the
+// It prices input and output separately through v.estimate, against the
 // same v.Pricing and v.model() the adjudication batches use.
 func (v *Verifier) groundCallEstimate(unit core.BudgetUnit) int64 {
 	in := int64(2 * ((MaxPassageChars+MaxClaimChars)/4 + 400))

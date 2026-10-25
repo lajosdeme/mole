@@ -200,12 +200,6 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 	}
 
 	// 6. Summarize what was found.
-	//
-	// This used to be a TierStrong model call (`reduce`) that synthesized a
-	// paragraph from perSource. Nothing downstream ever read it:
-	// executor.attempt keeps only Result.Claims, and the planner never saw
-	// Result.Summary (actor.go's comment claiming otherwise was wrong). Every
-	// lead was paying a strong-tier call for a string that reached /dev/null.
 	if res.Summary == "" {
 		// Say what actually happened. Claiming no sources were found while
 		// printing claims from those sources directly underneath is worse than
@@ -257,18 +251,12 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 }
 
 // sourceSummary tracks one source's contribution within the run: enough to
-// bound MaxClaimsPerSource (claims and rows share one allowance) and to decide
-// whether the source counted toward the run summary.
-//
-// It used to also carry Title, URL and Excerpt, written every source and read
-// only by the `reduce` call this actor made per lead — a TierStrong request
-// synthesizing a paragraph executor.attempt never read back. Those fields went
-// with it.
+// bound MaxClaimsPerSource (claims and rows share one allowance) and to
+// decide whether the source counted toward the run summary.
 type sourceSummary struct {
 	Claims []core.Claim
-	// Rows counts what dataset mode extracted from this source. A count, not
-	// the rows: dataset mode is an output MODE (M9, §13), not a second thing to
-	// carry alongside claims.
+	// Rows counts what dataset mode extracted from this source, not the rows
+	// themselves.
 	Rows int
 }
 

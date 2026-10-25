@@ -32,11 +32,8 @@ type Verifier struct {
 	LLM    llm.Provider
 
 	// Pricing prices the adjudication and grounding reservations against this
-	// Verifier's own model and the session's real rate table, replacing a flat
-	// 2 micro-dollars per 1k tokens that measured 2-6 micro-dollars of reserved
-	// hold against calls the ledger actually charged ~146 micro-dollars for.
-	// Nil — or a model the table has never heard of — reserves against
-	// fallbackRates instead.
+	// Verifier's own model and the session's real rate table. Nil, or a model
+	// the table has never heard of, reserves against fallbackRates instead.
 	Pricing *pricing.Table
 
 	// Model overrides the tier's default for every call this Verifier makes. Empty
@@ -110,10 +107,8 @@ type Verifier struct {
 	// because a wave's batches settle from their own goroutines.
 	mu sync.Mutex
 
-	// warnUnpriced logs the "no rate for this model" fallback once per Verifier
-	// rather than once per reservation — a batch pass takes one per batch and a
-	// grounding pass one per claim, and either would otherwise fill the log with
-	// the same sentence for the whole run.
+	// warnUnpriced logs the "no rate for this model" fallback once per
+	// Verifier rather than once per reservation.
 	warnUnpriced sync.Once
 }
 
@@ -127,23 +122,12 @@ type Verifier struct {
 // reasons of arithmetic.
 const DefaultMaxShareOfBudget = 0.25
 
-// DefaultConcurrency is how many adjudication batches run at once.
+// DefaultConcurrency is how many adjudication batches run at once, instead
+// of serially.
 //
-// Measured: one Standard run spent its last ~5 of 12 minutes in 291 serial
-// verifier calls, each an independent model call waiting on the one before.
-//
-// Four is a starting point, not a measured optimum: enough to cut that wait
-// roughly fourfold, small enough that a wave's burst — and the reservations it
-// holds before any of them settles — stays modest. Adjudication does not retry, so
-// a provider that rate-limits the burst costs the limited batches their verdicts;
-// that, not throughput, is what would argue for a different number.
-//
-// Two costs of a wave over a serial pass. Its reservations are all taken before
-// any settles, so the verifier's share can be overshot by up to Concurrency
-// calls' estimate error rather than one call's. And under a tight allowance the
-// wave's first looks spend before any of their second looks do, so fewer
-// positives get confirmed than a serial pass, which confirmed batch by batch,
-// would manage.
+// A wave's reservations are all taken before any settle, so it can overshoot
+// the allowance by up to Concurrency calls' worth, and a tight allowance
+// confirms fewer positives per wave than a serial pass would.
 const DefaultConcurrency = 4
 
 // Result reports what one pass did.
@@ -271,31 +255,25 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 
 	verdicts := free
 	var unjudged []Pair
-	// unanswered is the subset of unjudged whose batch never got a response at all —
-	// never launched, or its call errored. Distinct from a batch that answered and
-	// produced nothing usable (a refusal, a parse failure, a short response): that
-	// one WAS asked, so re-asking would pay again for the same non-answer. See the
-	// skip computation below.
+	// unanswered is the subset of unjudged whose batch got no response at all
+	// — never launched or errored — as opposed to one that answered
+	// uselessly, which is not re-asked for free. See the skip computation
+	// below.
 	var unanswered []Pair
 	batches := Batches(pairs, v.BatchSize)
 	// One wave's worth of batches at a time, so each wave's positives are
-	// confirmed before the next wave spends the allowance — the order the serial
-	// loop confirmed in, batch by batch, when Concurrency is 1.
+	// confirmed before the next wave spends the allowance.
 	for start := 0; start < len(batches); {
 		end := min(start+v.concurrency(), len(batches))
 		groups, missed, missedUnanswered, _, stop := v.runBatchGroups(ctx, sessionID, batches[start:end], res)
 		var judged []Judged
-		// A fatal error fails a second look exactly as it failed the first, and the
-		// wave it came from has already spent its round trips; asking again only
-		// adds calls after the stop. The wave's first verdicts are kept unconfirmed.
+		// A fatal error fails a second look the same as the first, so the
+		// wave's verdicts are kept unconfirmed rather than asked again.
 		if stop == nil || !isFatal(stop) {
 			var confirmStop error
 			judged, confirmStop = v.confirm(ctx, sessionID, groups, res)
-			// A fatal second look stops the pass as a fatal first look does: every
-			// call after it fails alike, so the next wave would only pay to find
-			// out. A non-fatal one (the allowance) is left for the next wave's
-			// first look to meet and report — it is that wave's reservation that
-			// says whether there is room.
+			// A fatal second look stops the pass like a fatal first look
+			// would; a non-fatal one is left for the next wave to meet.
 			if stop == nil && confirmStop != nil && isFatal(confirmStop) {
 				stop = confirmStop
 			}
@@ -320,8 +298,8 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		}
 		start = end
 	}
-	// Built from the pairs themselves rather than from len(pairs)-consumed plus each
-	// batch's leftovers, which double-counted the batch that triggered the stop.
+	// Built from the pairs themselves, not from len(pairs)-consumed, which
+	// double-counted the batch that triggered the stop.
 	res.PairsUnjudged += len(unjudged)
 	res.PairsJudged = len(verdicts) - len(free)
 
@@ -343,23 +321,14 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		return res, nil
 	}
 
-	// A target whose pair was never ANSWERED is excluded from marking: the pair
-	// carries no edge, so CandidatePairs retrieves it again next pass (it skips
-	// only a pair that already has one) — but only as long as the target still
-	// reads as unverified. Marking it anyway, as every pass used to, buried the
-	// pair for good: a batch never launched (allowance, wall clock, or a fatal
-	// provider error stopped the pass before it) and a batch whose call errored
-	// (no response at all) both mean "we never compared this", not "we compared
-	// it and found nothing".
+	// A target whose pair was never ANSWERED is excluded from marking, so it
+	// stays unverified and CandidatePairs retrieves it again next pass. A
+	// pair whose batch DID respond — a refusal, a parse failure, an omission
+	// — is judged anyway, since the model was asked; those pairs count in
+	// PairsUnjudged but not in skip.
 	//
-	// A pair whose batch DID get a response — a refusal, a parse failure, a short
-	// batch that omitted it — is judged anyway: the model was asked, and re-asking
-	// would pay again for the same non-answer. Those pairs stay in `unjudged` for
-	// PairsUnjudged, but not in `unanswered`, so they are not in skip.
-	//
-	// Restricted to targets: the pair's other claim can be an already-verified pool
-	// claim, and nothing here withholds ITS confidence — no new edge touches it
-	// either, so there is nothing to withhold.
+	// Restricted to targets: a pair's other claim can be an already-verified
+	// pool claim, and nothing here withholds its confidence.
 	isTarget := make(map[string]bool, len(targets))
 	for _, c := range targets {
 		isTarget[c.ID] = true
@@ -522,11 +491,10 @@ func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Jud
 		return judged, nil
 	}
 
-	// Each first-look batch's positives are batched on their own, never merged with
-	// another batch's: a second look's prompt — and so, with a real model, its
-	// answer — is then the one a serial pass sends, whatever the concurrency. All
-	// the groups' second looks still go through one runBatches call, so they run
-	// concurrently, in group order then sub-batch order.
+	// Each first-look batch's positives are batched on their own, never
+	// merged with another batch's, so a second look's prompt is the one a
+	// serial pass would send. All groups' second looks still run through one
+	// runBatches call, concurrently.
 	var batches [][]Pair
 	for _, g := range groups {
 		batches = append(batches, Batches(positivesOf(g, v.Confirm), v.BatchSize)...)
@@ -595,9 +563,8 @@ func (v *Verifier) concurrency() int {
 	return DefaultConcurrency
 }
 
-// batchOutcome is one batch's adjudicate result, kept by batch index so a wave's
-// results are appended in the order the batches were listed, not the order the
-// calls returned.
+// batchOutcome is one batch's adjudicate result, kept by index so a wave's
+// results are appended in batch order, not completion order.
 type batchOutcome struct {
 	judged   []Judged
 	unjudged []Pair
@@ -613,18 +580,15 @@ type batchOutcome struct {
 
 // runBatches adjudicates batches several at a time, in waves.
 //
-// Each wave is sized once, before it launches, against the allowance as it stands:
-// every call in a wave reserves before any of them settles, so a per-batch check
-// inside the wave would pass all of them against the same unspent figure and let
-// the wave overrun the share. Results are appended in batch-index order, so the
-// verdicts — and from them the edges and every later prompt — are what a serial
-// pass produces. After a wave in which any batch returned a stop error, no further
-// wave starts; the in-flight ones cannot be recalled and are kept.
+// Each wave is sized once, before it launches, against the allowance as it
+// stands, since every call in a wave reserves before any settles. Results
+// are appended in batch order, so the verdicts match what a serial pass
+// would produce. After a wave returns a stop error, no further wave starts;
+// the in-flight batches are kept.
 //
-// unjudged is every pair without a verdict: those a launched batch did not answer,
-// and those in batches never launched. unanswered is the subset of unjudged whose
-// batch got no response at all — see runBatchGroups. consumed counts the pairs in
-// launched batches only.
+// unjudged is every pair without a verdict; unanswered is the subset whose
+// batch got no response at all (see runBatchGroups). consumed counts pairs
+// in launched batches only.
 func (v *Verifier) runBatches(ctx context.Context, sessionID string, batches [][]Pair, res *Result) (judged []Judged, unjudged, unanswered []Pair, consumed int, stop error) {
 	groups, unjudged, unanswered, consumed, stop := v.runBatchGroups(ctx, sessionID, batches, res)
 	return slices.Concat(groups...), unjudged, unanswered, consumed, stop
@@ -655,10 +619,8 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				// Serially, a panic here unwound into the session supervisor's
-				// recover, which fails that one session and releases its holds. A
-				// bare goroutine is invisible to that recover — the executor's lead
-				// pool learned this — so the panic is carried back and re-raised
+				// A bare goroutine's panic is invisible to the session
+				// supervisor's recover, so it's carried back and re-raised
 				// below, on the goroutine that called Run.
 				defer func() {
 					if p := recover(); p != nil {
@@ -697,15 +659,12 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 	return groups, unjudged, unanswered, consumed, stop
 }
 
-// waveSize is how many of the remaining batches the next wave may launch.
-//
-// Bounded by Concurrency, by the verification allowance, by what the session has
-// available, and by max_tool_calls — each counted for the whole wave, because the
-// wave's reservations are all taken before any settles, and a serial pass would
-// have re-checked each of them against the previous call's charge. The first batch
-// is held to the allowance alone, exactly as the serial pass held every batch: it
-// fails with the familiar "allowance exhausted" reason, and adjudicate clamps its
-// reservation to what is available.
+// waveSize is how many of the remaining batches the next wave may launch,
+// bounded by Concurrency, the verification allowance, what the session has
+// available, and max_tool_calls — each counted for the whole wave, since its
+// reservations are all taken before any settle. The first batch alone is
+// held to the allowance, so it fails with the same "allowance exhausted"
+// reason a serial pass would.
 func (v *Verifier) waveSize(ctx context.Context, sess *core.Session, left [][]Pair) (int, error) {
 	limit := min(v.concurrency(), len(left))
 	if sess.MaxToolCalls > 0 {
@@ -745,15 +704,13 @@ func (v *Verifier) spentSoFar() int64 {
 // in the planner: an after-the-fact reserve that gets refused because a ceiling
 // just fired leaves the cost spent and unrecorded.
 //
-// The allowance is checked by runBatches for the whole wave, not here: sess is the
-// wave's snapshot, and adjudicate runs concurrently with the rest of its wave.
+// The allowance is checked by runBatches for the whole wave, not here; sess
+// is the wave's snapshot.
 //
-// responded reports whether the provider returned a response at all — true for a
-// refusal or a response adjudicate could not parse, false when no call was ever
-// made (insufficient budget, a reservation refused) or the call itself errored.
-// Run uses it to decide which unjudged pairs may still have their claims marked:
-// one the model answered, however uselessly, is not re-asked for free; one that
-// never got an answer is.
+// responded reports whether the provider returned a response at all — true
+// for a refusal or an unparsable response, false when no call was made or
+// the call errored. Run uses it to decide which unjudged pairs may still
+// have their claims marked.
 func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, batch []Pair, res *Result) (judged []Judged, unjudged []Pair, responded bool, err error) {
 	sessionID := sess.ID
 	est := v.estimateBatch(sess.BudgetUnit, len(batch))
@@ -879,12 +836,9 @@ func (v *Verifier) persist(ctx context.Context, sessionID string, pool, targets 
 	scores, breakdown := DeriveConfidence(pool, all)
 	res.Scores = breakdown
 
-	// A skipped target keeps its derived confidence but not verified_at: marking it
-	// would bury the pair the pass never judged. Its row used to be dropped
-	// outright, because ScoreClaims set verified_at on every row — so the claim
-	// kept confidence 0, and the report's sort put it last, behind claims that had
-	// merely had their turn. The derivation covers it either way: it is scored as
-	// part of pool whether or not this pass reached its pairs.
+	// A skipped target keeps its derived confidence but not verified_at, so
+	// marking it won't bury the pair the pass never judged. It is scored as
+	// part of pool either way.
 	if len(skip) > 0 {
 		for i := range scores {
 			if skip[scores[i].ClaimID] {
@@ -1007,31 +961,23 @@ func isFatal(err error) bool {
 	return errors.Is(err, llm.ErrUnauthorized) || errors.Is(err, llm.ErrQuotaExceeded)
 }
 
-// fallbackRates price a call whose model this Verifier cannot look up — either
-// because it has no Pricing table at all, or because the table has never heard
-// of the model (a provider rename, or a Verifier run against a fresh table that
-// hasn't registered it yet).
+// fallbackRates prices a call whose model this Verifier cannot look up: no
+// Pricing table, or a table that has never heard of the model.
 //
-// Deliberately high: $5/MTok in, $25/MTok out is this table's own Opus-tier rate
-// (pricing.go's claude-opus-5), not a typical cheap-tier number. A reservation
-// is a hold taken before the call (§8.2); guessing low is the failure that
-// matters, because a hold the settle overruns trips the overshoot detector that
-// is supposed to catch a MISPRICED call, not a merely unidentified one.
+// Deliberately high — $5/MTok in, $25/MTok out — so an unidentified model
+// over-reserves rather than under-reserves and trips the overshoot detector.
 var fallbackRates = pricing.RateConfig{Input: 5, Output: 25}.Rates()
 
-// fallbackTable prices fallbackRates through the same rounding Table.Cost uses
-// for everything else, rather than duplicating its nano-to-micro arithmetic
-// here.
+// fallbackTable prices fallbackRates through the same rounding Table.Cost
+// uses elsewhere.
 var fallbackTable = func() *pricing.Table {
 	t := pricing.NewEmptyTable()
 	t.Register("fallback", fallbackRates)
 	return t
 }()
 
-// model is what this Verifier's calls are actually billed against: v.Model
-// when the caller named an override, else whatever the cheap tier resolves to
-// — the same model adjudicate and the grounding judge pass as llm.Request.Model,
-// which the provider fills in from the tier when that field is empty.
+// model is what this Verifier's calls are billed against: v.Model if set,
+// else whatever the cheap tier resolves to.
 func (v *Verifier) model() string {
 	if v.Model != "" {
 		return v.Model
@@ -1042,20 +988,13 @@ func (v *Verifier) model() string {
 	return ""
 }
 
-// estimate reserves what a call shaped (in, out) tokens is expected to cost, in
-// the session's budget unit.
+// estimate reserves what a call shaped (in, out) tokens is expected to cost,
+// in the session's budget unit.
 //
-// Token mode returns in+out untouched: pricing has no voice in a reservation
-// that token mode is meant to measure directly.
-//
-// USD mode prices the two token counts separately against this Verifier's own
-// model, because input and output are priced differently — the flat
-// 2-micro-dollar-per-1k-tokens rate this replaced was measured at 2-6
-// micro-dollars held against calls the ledger actually charged ~146
-// micro-dollars for, almost two orders of magnitude under. A model this
-// Verifier cannot price — no table, or a table that does not know it — falls
-// back to fallbackRates rather than refusing the reservation; the warning fires
-// once per Verifier, not once per call.
+// Token mode returns in+out untouched. USD mode prices input and output
+// separately against this Verifier's own model, falling back to
+// fallbackRates when the model can't be priced; the warning fires once per
+// Verifier, not once per call.
 func (v *Verifier) estimate(unit core.BudgetUnit, in, out int64) int64 {
 	if unit == core.BudgetTokens {
 		return in + out

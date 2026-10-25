@@ -92,9 +92,9 @@ type Executor struct {
 	// budget unit.
 	Estimator *budget.Estimator
 
-	// FinishReserve is how much of the wall clock research leaves for finishing:
-	// a last verify pass here, then grounding and the report. Zero takes the
-	// default — see finishReserve. Ignored on a session with no wall clock.
+	// FinishReserve is how much of the wall clock research leaves for a last
+	// verify pass, grounding, and the report. Zero uses the default (see
+	// finishReserve); ignored when the session has no wall clock.
 	FinishReserve time.Duration
 
 	// Now and Jitter are injectable for tests.
@@ -291,14 +291,9 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			res.StoppedBecause = which
 			break
 		}
-		// Inside the finishing reserve: verify what research found and stop,
-		// rather than lease work the clock will cut off. Measured on Standard
-		// runs: research ran until max_wallclock fired mid-research, so the last
-		// batch of claims never got a verify pass.
-		//
-		// Reported as max_wallclock — it is the wall clock that stopped research,
-		// only earlier — and mole-backend's runner reports that string. The verify
-		// pass itself runs after the loop, with every other ceiling stop's.
+		// Inside the finishing reserve: stop leasing new work so there is time
+		// left to verify what research already found. Reported as max_wallclock,
+		// since that is the ceiling that would have stopped it anyway.
 		if reserve := finishReserve(sess.MaxWallClock, e.FinishReserve); reserve > 0 &&
 			!now.Before(sess.CreatedAt.Add(sess.MaxWallClock-reserve)) {
 			res.Status = core.StatusExhausted
@@ -502,13 +497,9 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 		}
 	}
 
-	// A ceiling stop verifies what research found, whichever ceiling it was. Only
-	// the finishing reserve used to: a run that hit max_leads or max_tool_calls
-	// between replan boundaries left that batch of claims unverified, and every
-	// one reached the report at confidence 0. One pass, here, covers the finishing
-	// reserve too, so it cannot run twice. A pass the ledger refuses — out of
-	// money, calls or clock — leaves the claims unverified rather than marking
-	// them, and a pass with nothing new to judge returns before any call.
+	// On any ceiling stop, verify what research found before building the
+	// report, so the last batch of claims isn't left unverified. A pass the
+	// ledger refuses, or one with nothing new to judge, is a no-op.
 	if res.Status == core.StatusExhausted && ctx.Err() == nil {
 		e.verify(ctx, digest, res)
 	}
@@ -524,13 +515,11 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 	return res, nil
 }
 
-// finishReserve is how long before the wall clock research stops leasing.
+// finishReserve is how long before the wall clock research stops leasing,
+// leaving room for a verify pass, grounding, and the report.
 //
-// configured if set, else 15% of the clock with a 90-second floor: room for one
-// verify pass, then grounding and the report. A starting guess, like the escrow
-// fraction, to be calibrated from real runs. Always capped at half the clock, so
-// the floor cannot swallow a short run whole, and 0 for a session with no wall
-// clock, which has nothing to reserve time against.
+// It is configured if set, else 15% of the clock with a 90-second floor,
+// capped at half the clock. Zero for a session with no wall clock.
 func finishReserve(maxWall, configured time.Duration) time.Duration {
 	if maxWall <= 0 {
 		return 0

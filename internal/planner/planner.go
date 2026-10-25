@@ -94,7 +94,7 @@ type Plan struct {
 	Usage     llm.Usage
 	Model     string
 	// Elapsed is how long the model call took, carried through to the ledger
-	// row so the later per-stage time fixes have something to measure.
+	// row.
 	Elapsed time.Duration
 	// Done is set when the planner judges the research complete. Only Replan
 	// can set it.

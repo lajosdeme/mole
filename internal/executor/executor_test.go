@@ -1938,10 +1938,8 @@ func wallClockRig(t *testing.T, wall, elapsed time.Duration) *rig {
 	return r
 }
 
-// TestLoopStopsLeasingInsideTheFinishReserve. Measured on Standard runs: research ran
-// until max_wallclock fired mid-batch, so the last batch of claims never got a verify
-// pass, and grounding then started after the ceiling. Inside the reserve the loop
-// verifies what it has and stops, rather than leasing work it cannot finish.
+// TestLoopStopsLeasingInsideTheFinishReserve checks that the loop stops
+// leasing new leads and runs one verify pass once inside the finish reserve.
 func TestLoopStopsLeasingInsideTheFinishReserve(t *testing.T) {
 	r := wallClockRig(t, 10*time.Minute, 9*time.Minute)
 
@@ -1972,11 +1970,8 @@ func TestLoopStopsLeasingInsideTheFinishReserve(t *testing.T) {
 	}
 }
 
-// TestEveryCeilingStopVerifiesWhatResearchFound. Only the finishing reserve used to
-// run a last verify pass; a run that stopped on another ceiling between replan
-// boundaries left that batch of claims unverified, and every one of them reached the
-// report at confidence 0. Here max_leads fires two leads into a three-lead replan
-// cadence, so no in-loop pass ever ran.
+// TestEveryCeilingStopVerifiesWhatResearchFound checks that a max_leads stop
+// between replan boundaries still leaves every gathered claim verified.
 func TestEveryCeilingStopVerifiesWhatResearchFound(t *testing.T) {
 	fl := &verifierLLM{plans: []string{planJSON("a", "b", "c")}, relation: "duplicate_of"}
 	r := newRigFromSpec(t, budget.SessionSpec{
@@ -2019,7 +2014,8 @@ func TestEveryCeilingStopVerifiesWhatResearchFound(t *testing.T) {
 	}
 }
 
-// TestLoopLeasesBeforeTheReserve. A minute into ten, the reserve is far off.
+// TestLoopLeasesBeforeTheReserve checks that research still runs a minute
+// into a ten-minute session, well before the finish reserve.
 func TestLoopLeasesBeforeTheReserve(t *testing.T) {
 	r := wallClockRig(t, 10*time.Minute, time.Minute)
 
@@ -2031,8 +2027,8 @@ func TestLoopLeasesBeforeTheReserve(t *testing.T) {
 	}
 }
 
-// TestNoWallClockNoReserve. A session with no wall clock has nothing to reserve
-// time against, and must not stop on an arithmetic accident at zero.
+// TestNoWallClockNoReserve checks that a session with no wall clock gets no
+// finish reserve and never stops research for one.
 func TestNoWallClockNoReserve(t *testing.T) {
 	if got := executor.FinishReserveFor(0, 0); got != 0 {
 		t.Errorf("finishReserve(0, 0) = %s, want 0", got)
@@ -2050,8 +2046,8 @@ func TestNoWallClockNoReserve(t *testing.T) {
 	}
 }
 
-// TestReserveIsCappedAtHalfTheClock. The 90-second floor would otherwise swallow
-// most of a short run, or all of one under 90 seconds.
+// TestReserveIsCappedAtHalfTheClock checks that the reserve never exceeds
+// half the wall clock, even under the 90-second floor.
 func TestReserveIsCappedAtHalfTheClock(t *testing.T) {
 	cases := []struct {
 		wall, configured, want time.Duration

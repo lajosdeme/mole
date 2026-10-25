@@ -50,11 +50,8 @@ type Finding struct {
 	// Superseded is set when a later-published finding supersedes this one.
 	Superseded bool
 
-	// relevance is how well this finding bears on the question that was asked,
-	// in [0,1] — the max over its cluster of relevanceScores' per-claim score.
-	// Confidence alone cannot tell a decisive, on-topic finding from a
-	// confidently-reported fact about something else; see Findings' comment for
-	// the run that measured the difference.
+	// relevance is how well this finding bears on the question asked, in
+	// [0,1]: the max over its cluster of relevanceScores' per-claim score.
 	relevance float64
 
 	// cluster is every claim collapsed into this finding, so a citation can carry
@@ -70,31 +67,19 @@ type Finding struct {
 
 // Findings collapses claims into what the report should say.
 //
-// Ordered by DERIVED confidence (§11.3) weighted by relevance to question, never by
-// the extractor's self-report. This ordering replaced a function that sorted by the
-// latter under the same field name, so an uncalibrated number — one §11.3 describes
-// as "mostly encoding fluency" — decided which claims led the answer and which were
-// dropped at the cap. A fluent claim from one anonymous page outranked a claim three
-// independent publishers agreed on.
-//
-// Confidence alone is still not enough: a microplastics run's cap admitted OECD
-// workshop dates at 0.45 confidence while "adults ingest 4.1 micrograms per week —
-// one millionth of the viral 5 gram claim" was cut at the same 0.45, because nothing
-// in the key asked whether a finding bears on the question at all. The sort key is now
-// Confidence * (0.5 + 0.5*relevance): relevance TEMPERS confidence rather than
-// overriding it, so a well-evidenced off-topic finding still outranks a barely-
-// evidenced on-topic one (0.95*0.5 > 0.30*1.0), but two equally-confident findings
+// Ordered by DERIVED confidence (§11.3) weighted by relevance to the
+// question, never by the extractor's self-report. The sort key is
+// Confidence * (0.5 + 0.5*relevance): relevance tempers confidence rather
+// than overriding it, so a well-evidenced off-topic finding can still
+// outrank a barely-evidenced on-topic one, but equally-confident findings
 // are told apart by which one the question was actually about.
 //
-// Before the Verifier scores a session every derived confidence is 0, which zeroes
-// the key for everyone — relevance then decides ties by itself, ahead of publisher
-// breadth. Assertion strength is still the wrong tie-break — preferring it is the
-// exact behaviour that was removed — so after relevance, ties fall back to publisher
-// breadth, which is mechanical and claims nothing.
+// Before the Verifier scores a session every derived confidence is 0, which
+// zeroes the key for everyone, so relevance decides ties first, then
+// publisher breadth.
 //
-// Truncated to max AFTER collapsing. Collapsing first is what lets the cap count
-// distinct assertions rather than repetitions; a cap applied to raw claims spends its
-// whole budget on one page saying one thing eight ways.
+// Truncated to max AFTER collapsing, so the cap counts distinct assertions
+// rather than repetitions.
 func Findings(question string, claims []*core.Claim, edges []*core.ClaimEdge, max int) []Finding {
 	if len(claims) == 0 {
 		return nil
@@ -224,21 +209,13 @@ func Findings(question string, claims []*core.Claim, edges []*core.ClaimEdge, ma
 	return out
 }
 
-// sortFindings ranks by confidence weighted by relevance to the question, then
-// relevance alone, then publisher breadth, then source breadth, then input position.
+// sortFindings ranks by confidence weighted by relevance to the question
+// (Confidence * (0.5 + 0.5*relevance)), then relevance alone, then publisher
+// breadth, then source breadth, then input position.
 //
-// The weighted key is Confidence * (0.5 + 0.5*relevance): relevance tempers
-// confidence rather than overriding it, so a well-evidenced finding about something
-// else still beats a barely-evidenced one about the question, but it no longer takes
-// an OECD workshop date over the decisive figure at the same confidence — see
-// Findings' comment for the run that measured this.
-//
-// Ordered by DERIVED confidence (§11.3), never by the extractor's self-report — a
-// function that sorted by the latter under the same field name let an uncalibrated
-// number decide which claims led the answer. Before the Verifier scores a session
-// every derived confidence is 0, which zeroes the weighted key for everyone, so
-// relevance decides first; assertion strength is still the wrong tie-break after
-// that, so remaining ties fall back to breadth: mechanical, and it claims nothing.
+// Before the Verifier scores a session every derived confidence is 0, which
+// zeroes the weighted key for everyone, so relevance decides first; ties
+// after that fall back to breadth.
 func sortFindings(out []Finding) {
 	key := func(f Finding) float64 { return f.Confidence * (0.5 + 0.5*f.relevance) }
 	sort.SliceStable(out, func(i, j int) bool {
@@ -343,8 +320,8 @@ func corroborationNote(f Finding) string {
 	var parts []string
 	switch {
 	case f.Publishers > 1:
-		// Not "independent publishers": distinct domains are not evidence the
-		// coverage is independent, only that it is not one site (task 7).
+		// Not "independent": distinct domains show the coverage isn't one
+		// site, not that it's independent.
 		parts = append(parts, fmt.Sprintf("%d publishers", f.Publishers))
 	case len(f.Sources) > 1:
 		// Several URLs, one publisher. Worth saying: it looks like corroboration

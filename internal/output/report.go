@@ -57,7 +57,7 @@ type Report struct {
 	// Model names what wrote it.
 	Model string
 	// Elapsed is how long the synthesis call took, carried through to the
-	// ledger row so the later per-stage time fixes have something to measure.
+	// ledger row.
 	Elapsed time.Duration
 
 	// Findings are the collapsed assertions the body was written from (§11.2):

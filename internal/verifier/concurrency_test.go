@@ -1,9 +1,8 @@
 package verifier_test
 
-// Adjudication batches run several at a time. Measured: one Standard run spent
-// its last ~5 of 12 minutes in 291 serial verifier calls, each an independent
-// model call. These tests pin that the batches overlap, and that overlapping them
-// changes nothing else — not the graph, not the allowance, not the fatal stop.
+// Adjudication batches run several at a time. These tests check that batches
+// overlap, and that overlapping them changes nothing else — not the graph,
+// not the allowance, not the fatal stop.
 
 import (
 	"context"
@@ -22,11 +21,8 @@ import (
 	"github.com/lajosdeme/mole/internal/verifier"
 )
 
-// TestBatchesRunConcurrently. Each call blocks until four are in flight (or
-// 1 s passes), so a serial loop shows a peak of one and an unbounded one more
-// than four. A second rather than 200 ms, so a slow scheduler (-race, a loaded
-// CI machine) cannot time the first three out before the fourth starts and
-// report a peak below four for a pool that is working.
+// TestBatchesRunConcurrently checks that batches run at a concurrency of
+// four rather than serially.
 func TestBatchesRunConcurrently(t *testing.T) {
 	const want = 4
 
@@ -84,12 +80,10 @@ func TestBatchesRunConcurrently(t *testing.T) {
 // requires "b", which the instructions' shape example does not carry.
 var promptPairRE = regexp.MustCompile(`\{"pair":(\d+),"a":"((?:[^"\\]|\\.)*)","b":"((?:[^"\\]|\\.)*)"\}`)
 
-// pairAnswerer answers each pair by its text alone, never by call order, after a
-// random 0-20 ms sleep — so a run that judges batches in a different order, or
-// batches its second looks differently, still gets the same answer for each pair.
-//
-// The second time a pair is asked about (the confirm pass), some pairs change
-// their answer, so both the confirmed and the withheld path are exercised.
+// pairAnswerer answers each pair by its text, not call order, after a random
+// 0-20ms sleep, so batch order never changes a pair's answer. The second
+// time a pair is asked (the confirm pass), some answers flip, to exercise
+// both the confirmed and the withheld path.
 type pairAnswerer struct {
 	mu    sync.Mutex
 	asked map[string]int
@@ -149,9 +143,9 @@ func idedClaims(n int) []core.Claim {
 	return cs
 }
 
-// TestConcurrentRunMatchesSerialRun. Results are appended in batch order, not
-// completion order, so the graph a concurrent pass writes is the serial pass's
-// graph exactly.
+// TestConcurrentRunMatchesSerialRun checks that a concurrent pass writes the
+// same edges as a serial one, since results are appended in batch order, not
+// completion order.
 func TestConcurrentRunMatchesSerialRun(t *testing.T) {
 	type outcome struct {
 		edges   []string
@@ -196,10 +190,9 @@ func TestConcurrentRunMatchesSerialRun(t *testing.T) {
 		t.Errorf("edge sets differ.\nserial:\n  %s\nconcurrent:\n  %s",
 			strings.Join(serial.edges, "\n  "), strings.Join(concurrent.edges, "\n  "))
 	}
-	// The same prompts, first looks and second looks alike, in any order. A real
-	// model's answer depends on what else shares its batch, so a second look that
-	// mixed pairs from several first-look batches could change the graph even
-	// though this answerer, judging each pair alone, would not show it.
+	// The same prompts too: a second look that mixed pairs from different
+	// first-look batches could change the graph even though this answerer,
+	// judging each pair alone, wouldn't show it.
 	if len(serial.prompts) != len(concurrent.prompts) {
 		t.Errorf("%d prompts serially, %d concurrently", len(serial.prompts), len(concurrent.prompts))
 	} else {
@@ -228,13 +221,11 @@ func TestConcurrentRunMatchesSerialRun(t *testing.T) {
 	}
 }
 
-// TestAllowanceBoundsTheWave. Every call in a wave reserves before any settles,
-// so the wave itself must fit the allowance: four launched against room for two
-// would all pass a per-batch check and spend twice the share.
+// TestAllowanceBoundsTheWave checks that a wave's calls together, not
+// individually, respect the allowance.
 func TestAllowanceBoundsTheWave(t *testing.T) {
-	// Each call charges exactly its reservation, and the share is exactly two of
-	// them, so the allowance is gone after two calls whatever order they run in.
-	// Token mode, so the estimate does not depend on the Verifier's pricing.
+	// The allowance covers exactly two calls. Token mode, so the estimate
+	// doesn't depend on the Verifier's pricing.
 	est := verifier.EstimateBatch(&verifier.Verifier{}, core.BudgetTokens, 1)
 	r := newRig(t, 4*est, distinctClaims(4), judgeEveryPair(verifier.RelNeither))
 	r.v.BatchSize = 1 // four related claims make six one-pair batches
@@ -260,9 +251,8 @@ func TestAllowanceBoundsTheWave(t *testing.T) {
 	r.assertNothingHeld(t, "allowance")
 }
 
-// TestFatalErrorStopsLaterWaves. A bad credential fails every batch alike; the
-// wave already in flight cannot be recalled, but nothing after it may start —
-// neither a later wave nor the confirm pass over the wave's own verdicts.
+// TestFatalErrorStopsLaterWaves checks that a fatal error stops every wave
+// after the one already in flight, including the confirm pass.
 func TestFatalErrorStopsLaterWaves(t *testing.T) {
 	r := newRig(t, 2_000_000, distinctClaims(6), func(call int, prompt string) (string, error) {
 		if call == 0 {
@@ -290,11 +280,8 @@ func TestFatalErrorStopsLaterWaves(t *testing.T) {
 	r.assertNothingHeld(t, "fatal")
 }
 
-// TestABatchPanicReachesTheCaller. Serially, a panic in adjudication unwound into
-// the session supervisor's recover, which fails that one session and releases its
-// holds. A bare wave goroutine is invisible to that recover — the executor's lead
-// pool hit exactly this — so the panic must be carried back to the goroutine that
-// called Run rather than taking the process down.
+// TestABatchPanicReachesTheCaller checks that a panic inside a wave goroutine
+// is carried back to the caller of Run rather than crashing the process.
 func TestABatchPanicReachesTheCaller(t *testing.T) {
 	r := newRig(t, 2_000_000, distinctClaims(5), func(call int, prompt string) (string, error) {
 		if call == 1 {
@@ -340,13 +327,8 @@ func (f fixedPairRetriever) Candidates(_ context.Context, target *core.Claim, po
 	return nil, nil
 }
 
-// TestUnreachedPairsLeaveTheirClaimsUnverified. A pass that stops partway through
-// its batches — allowance, wall clock, or a fatal error — must not mark the claims
-// in a pair it never adjudicated. Marking them anyway would be permanent: the
-// pair has no edge, but persist's old behaviour treated every target as settled,
-// so CandidatePairs would never surface that pair's claims again either (their
-// VerifiedAt disqualifies them as targets) and the comparison that should have
-// happened never does.
+// TestUnreachedPairsLeaveTheirClaimsUnverified checks that claims in a pair
+// the pass never reached stay unverified rather than marked settled.
 func TestUnreachedPairsLeaveTheirClaimsUnverified(t *testing.T) {
 	ctx := context.Background()
 	claims := idedClaims(6)
@@ -389,9 +371,8 @@ func TestUnreachedPairsLeaveTheirClaimsUnverified(t *testing.T) {
 		}
 	}
 
-	// A second pass with an ample allowance re-retrieves exactly the pairs left
-	// unjudged: CandidatePairs only skips a pair that already carries an edge, and
-	// an unjudged pair has none.
+	// A second pass re-retrieves the unjudged pairs, since CandidatePairs only
+	// skips a pair that already carries an edge.
 	r.v.MaxShareOfBudget = 1
 	second, err := r.v.Run(ctx, r.sess.ID)
 	if err != nil {
@@ -408,12 +389,9 @@ func TestUnreachedPairsLeaveTheirClaimsUnverified(t *testing.T) {
 	}
 }
 
-// TestUnreachedPairsKeepTheirDerivedConfidence. A target whose pairs were never
-// answered stays unverified so the next pass re-judges it — but it used to lose
-// its derived confidence with it. persist pulled it out of the score rows
-// entirely, because ScoreClaims set verified_at on every row, so the claim kept
-// confidence 0 and the report's sort put it last behind claims that merely got
-// their turn. The derivation covers it either way; only verified_at is withheld.
+// TestUnreachedPairsKeepTheirDerivedConfidence checks that a claim whose
+// pairs were never judged keeps its derived confidence instead of reverting
+// to 0.
 func TestUnreachedPairsKeepTheirDerivedConfidence(t *testing.T) {
 	ctx := context.Background()
 	claims := idedClaims(6)
@@ -484,11 +462,8 @@ func TestUnreachedPairsKeepTheirDerivedConfidence(t *testing.T) {
 	}
 }
 
-// TestAFatalSecondLookStopsLaterWaves. confirm dropped its stop error, on the
-// reasoning that the next first-look wave would meet the same failure and report
-// it. True, but only by paying for that wave: a bad credential on a second look
-// fails every call after it alike, so the pass must stop there, as it does for a
-// fatal first look.
+// TestAFatalSecondLookStopsLaterWaves checks that a fatal error on a second
+// look stops later waves, the same as a fatal first look.
 func TestAFatalSecondLookStopsLaterWaves(t *testing.T) {
 	var (
 		mu    sync.Mutex

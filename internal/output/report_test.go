@@ -401,10 +401,8 @@ func listClaimTexts(t *testing.T, st store.Store, sid string) []string {
 	return out
 }
 
-// TestDisagreementIsInstructed. §13: contradictions are rendered explicitly
-// rather than silently resolved by whichever claim the model liked, and the
-// rule says to lead with whichever conflict bears most on the question rather
-// than listing them in whatever order they were found.
+// TestDisagreementIsInstructed checks that the prompt requires conflicts to
+// be rendered explicitly, with the one most relevant to the question leading.
 func TestDisagreementIsInstructed(t *testing.T) {
 	st, sid := newStore(t, []core.Claim{
 		claim("The value is 1.31.", "https://a.example", "reports 1.31"),
@@ -422,10 +420,8 @@ func TestDisagreementIsInstructed(t *testing.T) {
 	}
 }
 
-// TestReportPromptSaysWhatToLeadWith. Measured: reports opened with the
-// most-repeated figure and buried the decisive correction near the end. The
-// rules must tell the model to open with the answer and the dispute that
-// bears on it, that repetition across publishers is not corroboration, and to
+// TestReportPromptSaysWhatToLeadWith checks that the prompt tells the model
+// to open with the answer, treat repetition as not corroboration, and
 // distinguish what a source measured from what it merely reports or cites.
 func TestReportPromptSaysWhatToLeadWith(t *testing.T) {
 	claims := []core.Claim{
@@ -664,8 +660,8 @@ func TestUnverifiedClaimsFallBackToSourceBreadth(t *testing.T) {
 	}
 }
 
-// TestReportCarriesElapsed. A report's wall-clock time has to reach the caller
-// before anything can measure or budget against it.
+// TestReportCarriesElapsed checks that Generate copies the synthesis call's
+// elapsed time onto the report.
 func TestReportCarriesElapsed(t *testing.T) {
 	st, sid := newStore(t, []core.Claim{
 		claim("MambaByte reports 1.31 BPB.", "https://arxiv.org/abs/2401.13660", "It achieves 1.31 bits per byte"),

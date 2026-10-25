@@ -809,13 +809,8 @@ func TestSweepSurvivesAnUnreleasableReservation(t *testing.T) {
 	}
 }
 
-// TestReserveGroundIgnoresTheWallClock. Grounding runs after research has stopped —
-// on a Standard run, usually BECAUSE max_wallclock fired — so a policy that honours
-// the clock refuses every judge call it makes. Measured: each reservation came back
-// "session … hit max_wallclock" and the re-fetch it had already paid for was wasted.
-//
-// Money and the call ceiling still bind: grounding is bounded by its escrow share and
-// MaxGroundChecks, and a fetch MaxToolCalls cannot see is the hole §8.5 closes.
+// TestReserveGroundIgnoresTheWallClock checks that ReserveGround ignores
+// MaxWallClock and MaxLeads but still enforces MaxToolCalls and the money.
 func TestReserveGroundIgnoresTheWallClock(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
@@ -883,11 +878,8 @@ func TestReserveGroundIgnoresTheWallClock(t *testing.T) {
 	}
 }
 
-// TestMaxLeadsDoesNotMaskTheWallClock. ReserveVerify and ReserveForRetry exempt
-// max_leads, and the exemption used to be a filter on HitCeiling's answer. HitCeiling
-// names only the FIRST ceiling it finds and checks max_leads before max_wallclock, so
-// a session at MaxLeads reported "max_leads", the filter waved it through, and the
-// clock was never read: verify and retry calls ran on past the wall clock.
+// TestMaxLeadsDoesNotMaskTheWallClock checks that a session at MaxLeads still
+// has MaxWallClock enforced on ReserveVerify and ReserveForRetry.
 func TestMaxLeadsDoesNotMaskTheWallClock(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)

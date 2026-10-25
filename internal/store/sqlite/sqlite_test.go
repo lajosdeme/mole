@@ -759,10 +759,8 @@ func TestScoringMarksVerifiedWithoutTouchingEvidence(t *testing.T) {
 	}
 }
 
-// TestKeepUnverifiedScoresWithoutMarking. The Verifier persists the derived
-// confidence of a claim whose pairs it never got to judge, so the report does not
-// sink it to the bottom at 0 — but must leave verified_at alone, or the claim drops
-// out of ListUnverifiedClaims and its pairs are never judged.
+// TestKeepUnverifiedScoresWithoutMarking checks that ScoreClaims with
+// KeepUnverified writes confidence and grounded but leaves verified_at unset.
 func TestKeepUnverifiedScoresWithoutMarking(t *testing.T) {
 	ctx := context.Background()
 	db, _ := open(t)

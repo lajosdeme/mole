@@ -7,10 +7,8 @@ import (
 	"github.com/lajosdeme/mole/internal/pricing"
 )
 
-// TestBatchReservationCoversARealCall prices an 8-pair batch against the same
-// table a real session would carry, and checks the reservation sits between
-// the actual call's cost and a generous multiple of it — covering §8.2's hold
-// without reserving so much the share cap starves every other batch.
+// TestBatchReservationCoversARealCall checks that an 8-pair batch's
+// reservation covers the real call's cost without being wildly oversized.
 func TestBatchReservationCoversARealCall(t *testing.T) {
 	tbl := pricing.NewEmptyTable()
 	tbl.Register("m", pricing.RateConfig{Input: 1, Output: 5}.Rates())
@@ -39,8 +37,8 @@ func TestBatchReservationCoversARealCall(t *testing.T) {
 	}
 }
 
-// TestTokenModeEstimateIgnoresPricing. In token mode the reservation IS the
-// budgeted quantity; pricing has no vote in it, priced or not.
+// TestTokenModeEstimateIgnoresPricing checks that in token mode the estimate
+// ignores the pricing table.
 func TestTokenModeEstimateIgnoresPricing(t *testing.T) {
 	v := &Verifier{Model: "m", Pricing: pricing.NewEmptyTable()}
 	const pairs = 8
@@ -51,10 +49,8 @@ func TestTokenModeEstimateIgnoresPricing(t *testing.T) {
 	}
 }
 
-// TestFreeModelStillReservesSomething. A model registered at $0 (a self-hosted
-// deployment, RegisterFree) must still take a nonzero hold: a reservation of 0
-// reserves nothing, and the ledger's ReserveVerify treats it as "nothing to
-// verify with".
+// TestFreeModelStillReservesSomething checks that a model registered at $0
+// still reserves a nonzero amount.
 func TestFreeModelStillReservesSomething(t *testing.T) {
 	tbl := pricing.NewEmptyTable()
 	tbl.RegisterFree("m")
@@ -66,11 +62,8 @@ func TestFreeModelStillReservesSomething(t *testing.T) {
 	}
 }
 
-// TestUnpricedModelUsesConservativeRate. A Verifier with no pricing table at
-// all — or a table that does not know this model — cannot look up a real rate,
-// so it reserves against fallbackRates: $5/MTok in, $25/MTok out. Deliberately
-// high, so an unidentified model errs toward over-reserving rather than
-// under-reserving and tripping the overshoot detector.
+// TestUnpricedModelUsesConservativeRate checks that a Verifier with no
+// pricing table falls back to the $5/$25 per-MTok conservative rate.
 func TestUnpricedModelUsesConservativeRate(t *testing.T) {
 	v := &Verifier{Model: "m"} // no Pricing at all
 	const in, out = int64(1000), int64(500)
@@ -90,10 +83,8 @@ func TestUnpricedModelUsesConservativeRate(t *testing.T) {
 	}
 }
 
-// TestUnknownModelInANonNilTableAlsoFallsBack. The table exists but has never
-// heard of this model — the common case once a provider renames a model out
-// from under a config. Same fallback applies, logged once rather than erroring
-// the reservation.
+// TestUnknownModelInANonNilTableAlsoFallsBack checks that a model missing
+// from a non-nil pricing table also falls back to the conservative rate.
 func TestUnknownModelInANonNilTableAlsoFallsBack(t *testing.T) {
 	tbl := pricing.NewEmptyTable() // "m" never registered
 	v := &Verifier{Model: "m", Pricing: tbl}
@@ -112,9 +103,8 @@ func TestUnknownModelInANonNilTableAlsoFallsBack(t *testing.T) {
 	}
 }
 
-// TestGroundCallEstimateMatchesTokenTotal. The USD/token split must not change
-// the total tokens reserved in token mode — only how the total is PRICED in USD
-// mode, by giving input and output their own rates instead of one blended one.
+// TestGroundCallEstimateMatchesTokenTotal checks that groundCallEstimate's
+// token total in token mode matches the input/output split used for pricing.
 func TestGroundCallEstimateMatchesTokenTotal(t *testing.T) {
 	v := &Verifier{Model: "m", Pricing: pricing.NewEmptyTable()}
 	got := v.groundCallEstimate(core.BudgetTokens)

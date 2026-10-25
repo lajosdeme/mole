@@ -299,11 +299,9 @@ func TestVerificationCannotOutspendItsShare(t *testing.T) {
 	if res.PairsUnjudged == 0 {
 		t.Error("degraded but reported every pair judged")
 	}
-	// The pairs that DID get judged still mark their claims — the ceiling does not
-	// erase work already done. But with this little allowance against 20 mutually
-	// related claims, almost every claim has at least one candidate pair the ceiling
-	// never reached, so almost none of them may be marked: see
-	// TestUnreachedPairsLeaveTheirClaimsUnverified for the rule and why.
+	// Pairs that were judged still mark their claims; pairs the ceiling never
+	// reached leave theirs unverified (see
+	// TestUnreachedPairsLeaveTheirClaimsUnverified).
 	if n := r.unverified(t); n == 0 {
 		t.Error("every claim marked verified despite the ceiling leaving pairs unjudged")
 	}
@@ -357,8 +355,8 @@ func TestAFatalProviderErrorStopsRatherThanRepeating(t *testing.T) {
 		return "", llm.ErrUnauthorized
 	})
 	r.v.BatchSize = 2
-	// Serial, so "one call" is exact. Concurrently the first wave is already in
-	// flight when the error comes back; TestFatalErrorStopsLaterWaves pins that.
+	// Serial, so "one call" is exact; TestFatalErrorStopsLaterWaves covers the
+	// concurrent case.
 	r.v.Concurrency = 1
 
 	res, err := r.v.Run(context.Background(), r.sess.ID)
@@ -515,9 +513,8 @@ func TestVerifierSpendIsAttributedToTheVerifier(t *testing.T) {
 	}
 }
 
-// TestAdjudicationRecordsItsDuration. Every stored verifier call carries how
-// long the model took, which is what the later per-stage time fixes measure
-// against.
+// TestAdjudicationRecordsItsDuration checks that every stored verifier call
+// records how long the model call took.
 func TestAdjudicationRecordsItsDuration(t *testing.T) {
 	r := newRig(t, 2_000_000, distinctClaims(6), judgeEveryPair(verifier.RelNeither))
 	r.llm.elapsed = 1500 * time.Millisecond
@@ -785,13 +782,9 @@ func TestPastTheStoreLimitClaimsStillGetVerified(t *testing.T) {
 			Source: fmt.Sprintf("https://s%03d.example/p", i),
 		})
 	}
-	// Unlimited tool calls: 505 claims need 501 batches of 8 to fully adjudicate, one
-	// more than newRig's default max_tool_calls of 500 — a hard, session-wide
-	// ceiling that (unlike the budget share) never has room again once it is hit.
-	// Binding it here would be testing that ceiling, not the store limit this test
-	// is for, and the five claims caught behind it would stay unverified forever
-	// (correctly, per TestUnreachedPairsLeaveTheirClaimsUnverified) rather than
-	// draining over the three passes below.
+	// Unlimited tool calls: 505 claims need 501 batches of 8, one more than
+	// newRig's default max_tool_calls of 500, which would test that ceiling
+	// instead of the store limit this test is for.
 	r := newRigWithCeilings(t, 40_000_000, 50, 0, claims, judgeEveryPair(verifier.RelNeither))
 	r.v.BatchSize = 8
 	r.v.MaxShareOfBudget = 0.9
@@ -1131,8 +1124,8 @@ func TestHittingMaxLeadsDoesNotBlockVerification(t *testing.T) {
 // Marking is what drains the work queue, and doing it after a pass that could not
 // adjudicate at all records "we compared these and found nothing" when the truth is "we
 // never compared them". Distinct from a pass whose model answered uselessly — that one
-// HAS asked, and re-asking would pay again for the same answer — and from one whose call
-// errored outright, which got no answer to re-ask for free in the first place.
+// HAS asked, and re-asking would pay again for the same answer — not a call
+// that errored outright, which has no answer to repay for.
 func TestAPassThatComparedNothingLeavesClaimsUnverified(t *testing.T) {
 	ctx := context.Background()
 
@@ -1168,9 +1161,9 @@ func TestAPassThatComparedNothingLeavesClaimsUnverified(t *testing.T) {
 		t.Errorf("%d claims left unverified after the model was asked and answered badly", n)
 	}
 
-	// A call that ERRORS is neither of those: the provider never returned a
-	// response at all, so — unlike a decline — there is no answer being paid for
-	// twice. The claims stay unverified and the pair is retried next pass.
+	// A call that ERRORS is neither of those: no response came back, so there's
+	// nothing to re-ask for free. The claims stay unverified and the pair
+	// retries next pass.
 	errored := newRig(t, 4_000_000, distinctClaims(6), func(int, string) (string, error) {
 		return "", llm.ErrOverloaded
 	})

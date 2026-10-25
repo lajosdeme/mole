@@ -233,19 +233,9 @@ func (l *Ledger) ReserveVerify(ctx context.Context, sessionID string, amount int
 	return l.reserveWith(ctx, sessionID, amount, ceilingsExceptLeads, nil, false)
 }
 
-// ReserveGround reserves for the grounding pass (§11.5.2): exempt from MaxLeads and
-// MaxWallClock, bound by MaxToolCalls and the money.
-//
-// Grounding runs after research has stopped, between the escrow release and the
-// report, and on a Standard run research usually stops BECAUSE max_wallclock fired.
-// Under ReserveVerify every judge call was then refused — measured: "budget:
-// insufficient: session … hit max_wallclock" on each one, after the re-fetch it
-// was meant to judge had already been paid for.
-//
-// It may run past the clock for the same reason the report does (ReserveOutput):
-// it is bounded otherwise. In money by its share of the escrow, in count by
-// MaxGroundChecks. MaxToolCalls still applies, because each check is a fetch the
-// money cannot see in token mode, and that is the hole §8.5's call ceiling closes.
+// ReserveGround reserves for the grounding pass (§11.5.2). Grounding runs
+// after research has already stopped, so it is exempt from MaxLeads and
+// MaxWallClock, bound instead by MaxToolCalls and its share of the escrow.
 func (l *Ledger) ReserveGround(ctx context.Context, sessionID string, amount int64) (*core.Reservation, error) {
 	return l.reserveWith(ctx, sessionID, amount, ceilingsMoneyAndCalls, nil, false)
 }
@@ -288,17 +278,13 @@ func (l *Ledger) reserveWith(ctx context.Context, sessionID string, amount int64
 		switch policy {
 		case noCeilings:
 		case ceilingsMoneyAndCalls:
-			// Checked directly rather than by filtering HitCeiling, which names only
-			// the FIRST ceiling hit, so a filter on its answer depends on the order
-			// it checks in. Here the one ceiling that binds is named outright.
+			// Checked directly: HitCeiling reports only the first ceiling it
+			// finds hit, which depends on check order, not on which one applies.
 			if s.MaxToolCalls > 0 && s.ToolCallCount >= s.MaxToolCalls {
 				return fmt.Errorf("%w: session %s hit max_tool_calls", ErrInsufficientBudget, sessionID)
 			}
 		case ceilingsExceptLeads:
-			// Checked directly for the same reason. Filtering HitCeiling's answer
-			// for "max_leads" let a session AT MaxLeads mask its wall clock:
-			// HitCeiling checks leads before the clock, reported max_leads, and the
-			// filter passed verify and retry calls on past max_wallclock.
+			// Checked directly, for the same reason.
 			if s.MaxToolCalls > 0 && s.ToolCallCount >= s.MaxToolCalls {
 				return fmt.Errorf("%w: session %s hit max_tool_calls", ErrInsufficientBudget, sessionID)
 			}

@@ -19,10 +19,8 @@ func relClaim(text, source string, confidence float64) *core.Claim {
 	}
 }
 
-// TestRelevantFindingOutranksEquallyConfidentOffTopicOne is the measured bug: a
-// microplastics run's 95-finding cap admitted OECD workshop dates while "4.1
-// micrograms per week, one millionth of the 5 gram claim" was cut. Same
-// confidence; only one of them bears on the question.
+// TestRelevantFindingOutranksEquallyConfidentOffTopicOne checks that, at
+// equal confidence, the on-topic finding ranks first.
 func TestRelevantFindingOutranksEquallyConfidentOffTopicOne(t *testing.T) {
 	question := "How much microplastic does the average person ingest per week?"
 	offTopic := relClaim("The OECD workshop was held on 12-14 November 2025.", "https://oecd.example/a", 0.45)
@@ -37,9 +35,8 @@ func TestRelevantFindingOutranksEquallyConfidentOffTopicOne(t *testing.T) {
 	}
 }
 
-// TestStrongEvidenceStillBeatsWeakRelevantEvidence pins that relevance tempers
-// confidence rather than overriding it: 0.95*(0.5+0.5*0) = 0.475 still beats
-// 0.30*(0.5+0.5*1) = 0.30.
+// TestStrongEvidenceStillBeatsWeakRelevantEvidence checks that strong
+// off-topic evidence still outranks weak on-topic evidence.
 func TestStrongEvidenceStillBeatsWeakRelevantEvidence(t *testing.T) {
 	question := "How much microplastic does the average person ingest per week?"
 	offTopicStrong := relClaim("The OECD workshop was held on 12-14 November 2025.", "https://oecd.example/a", 0.95)
@@ -54,10 +51,8 @@ func TestStrongEvidenceStillBeatsWeakRelevantEvidence(t *testing.T) {
 	}
 }
 
-// TestCapAdmitsTheRelevantFinding reproduces the measured failure directly: at a
-// tied confidence, a cap of 2 must keep the finding relevant to the question
-// over an off-topic one the old key (confidence, publishers, breadth, order)
-// would have kept instead.
+// TestCapAdmitsTheRelevantFinding checks that, at tied confidence, a cap
+// keeps the on-topic finding over an off-topic one.
 func TestCapAdmitsTheRelevantFinding(t *testing.T) {
 	question := "How much microplastic does the average person ingest per week?"
 	off1 := relClaim("The OECD workshop was held on 12-14 November 2025.", "https://oecd.example/a", 0.45)
@@ -76,9 +71,9 @@ func TestCapAdmitsTheRelevantFinding(t *testing.T) {
 	t.Errorf("the relevant finding was cut by the cap: %+v", findings)
 }
 
-// TestNoOverlapLeavesOrderUnchanged: a question sharing no content word with any
-// claim gives everyone relevance 0, so Findings must order exactly as the old
-// key (confidence, publishers, breadth, order) did.
+// TestNoOverlapLeavesOrderUnchanged checks that a question sharing no content
+// word with any claim falls back to confidence, publisher breadth, source
+// breadth, then order.
 func TestNoOverlapLeavesOrderUnchanged(t *testing.T) {
 	a := relClaim("Adults ingest about 4.1 micrograms of microplastic per week.", "https://a.example/x", 0.30)
 	b := relClaim("The OECD workshop was held on 12-14 November 2025.", "https://b.example/y", 0.80)

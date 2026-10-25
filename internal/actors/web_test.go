@@ -366,10 +366,8 @@ func TestEndToEndProducesCitedClaims(t *testing.T) {
 	}
 }
 
-// TestRunMakesNoStrongTierCall is Quick Win 1: `reduce` spent a TierStrong
-// call synthesizing a paragraph that executor.attempt never reads — it keeps
-// only Result.Claims. Every lead paid for that call and threw the answer
-// away. The summary is now built from the counts the run already has.
+// TestRunMakesNoStrongTierCall checks that Run never issues a TierStrong
+// request and builds its summary from claim and source counts.
 func TestRunMakesNoStrongTierCall(t *testing.T) {
 	const pageURL = "https://arxiv.example/abs/2401.13660"
 
