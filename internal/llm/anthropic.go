@@ -28,10 +28,18 @@ type anthropicProvider struct {
 	cfg    Config
 	source CredentialSource
 
-	// thinkingMu guards thinkingCache, the per-model answer to whether the
-	// model accepts {"type":"disabled"} thinking, learned from the Models API.
-	thinkingMu    sync.Mutex
-	thinkingCache map[string]bool
+	// thinkingMu guards thinkingCache and thinkingInFlight, the per-model
+	// answer to whether the model accepts {"type":"disabled"} thinking.
+	thinkingMu       sync.Mutex
+	thinkingCache    map[string]bool
+	thinkingInFlight map[string]*thinkingLookup
+}
+
+// thinkingLookup is one in-progress Models API call, shared by every caller
+// that asks about the same model while it is outstanding.
+type thinkingLookup struct {
+	done   chan struct{}
+	result bool
 }
 
 // newAnthropic builds the client.
@@ -60,10 +68,11 @@ func newAnthropic(cfg Config, httpClient *http.Client) (*anthropicProvider, erro
 	}
 
 	return &anthropicProvider{
-		client:        anthropic.NewClient(opts...),
-		cfg:           cfg,
-		source:        source,
-		thinkingCache: make(map[string]bool),
+		client:           anthropic.NewClient(opts...),
+		cfg:              cfg,
+		source:           source,
+		thinkingCache:    make(map[string]bool),
+		thinkingInFlight: make(map[string]*thinkingLookup),
 	}, nil
 }
 
@@ -199,12 +208,20 @@ var disabledThinkingPrefixes = []string{
 
 // disabledThinkingSupported reports whether model accepts {"type":"disabled"}
 // thinking, asking the Models API once per model and caching the answer.
+// Concurrent callers for the same uncached model share one lookup.
 func (p *anthropicProvider) disabledThinkingSupported(ctx context.Context, model string) bool {
 	p.thinkingMu.Lock()
 	if v, ok := p.thinkingCache[model]; ok {
 		p.thinkingMu.Unlock()
 		return v
 	}
+	if lookup, ok := p.thinkingInFlight[model]; ok {
+		p.thinkingMu.Unlock()
+		<-lookup.done
+		return lookup.result
+	}
+	lookup := &thinkingLookup{done: make(chan struct{})}
+	p.thinkingInFlight[model] = lookup
 	p.thinkingMu.Unlock()
 
 	supported := fallbackDisabledThinkingSupported(model)
@@ -214,13 +231,15 @@ func (p *anthropicProvider) disabledThinkingSupported(ctx context.Context, model
 
 	p.thinkingMu.Lock()
 	p.thinkingCache[model] = supported
+	delete(p.thinkingInFlight, model)
 	p.thinkingMu.Unlock()
+	lookup.result = supported
+	close(lookup.done)
 	return supported
 }
 
-// fallbackDisabledThinkingSupported is used when the Models API lookup fails:
-// known-bad model families are assumed unsupported, everything else assumed
-// supported since that was the behaviour before this check existed.
+// fallbackDisabledThinkingSupported reports the default answer used when the
+// Models API lookup fails.
 func fallbackDisabledThinkingSupported(model string) bool {
 	for _, prefix := range disabledThinkingPrefixes {
 		if strings.HasPrefix(model, prefix) {
@@ -231,9 +250,7 @@ func fallbackDisabledThinkingSupported(model string) bool {
 }
 
 // disabledSupportedFromCapabilities reads capabilities.thinking.types.disabled
-// from the Models API response. The SDK's ThinkingTypes struct has no field
-// for "disabled" yet, so this parses the type's raw JSON instead of a
-// hand-rolled HTTP call.
+// out of the Models API response's raw JSON for that field.
 func disabledSupportedFromCapabilities(typesRawJSON string) bool {
 	var types struct {
 		Disabled struct {

@@ -8,16 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/lajosdeme/mole/internal/llm"
 )
 
-// Anthropic rejects {"type":"disabled"} outright on some models, rather than
-// ignoring it. §-: mole asks the Models API once per model and caches the
-// answer, instead of hard-coding a model list that goes stale.
-
+// sseEvent formats one Server-Sent Event for the fake /v1/messages stream.
 func sseEvent(name, data string) string {
 	return "event: " + name + "\ndata: " + data + "\n\n"
 }
@@ -55,17 +54,37 @@ func modelInfoBody(model string, disabledSupported bool) string {
 	}`, model, disabledSupported)
 }
 
-// fakeAnthropicServer answers /v1/models/{id} with modelsStatus/modelsBody and
-// /v1/messages with a canned successful stream, capturing every message body
-// sent.
+// fakeAnthropicServer answers /v1/models/{id} and /v1/messages, capturing
+// every message body sent.
 type fakeAnthropicServer struct {
 	modelsStatus int
 	modelsBody   string
+	// modelsRelease, if set, blocks every /v1/models/{id} response until
+	// closed — used to hold several lookups in flight at once.
+	modelsRelease chan struct{}
 
 	modelsCalls atomic.Int32
-	mu          struct {
-		bodies []map[string]any
-	}
+
+	mu     sync.Mutex
+	bodies []map[string]any
+}
+
+func (f *fakeAnthropicServer) addBody(body map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bodies = append(f.bodies, body)
+}
+
+func (f *fakeAnthropicServer) firstBody() map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.bodies[0]
+}
+
+func (f *fakeAnthropicServer) bodyCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.bodies)
 }
 
 func (f *fakeAnthropicServer) start(t *testing.T) *httptest.Server {
@@ -73,6 +92,9 @@ func (f *fakeAnthropicServer) start(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/models/"):
+			if f.modelsRelease != nil {
+				<-f.modelsRelease
+			}
 			f.modelsCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(f.modelsStatus)
@@ -81,7 +103,7 @@ func (f *fakeAnthropicServer) start(t *testing.T) *httptest.Server {
 			raw, _ := io.ReadAll(r.Body)
 			var body map[string]any
 			_ = json.Unmarshal(raw, &body)
-			f.mu.bodies = append(f.mu.bodies, body)
+			f.addBody(body)
 			model, _ := body["model"].(string)
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
@@ -123,10 +145,10 @@ func TestModelsAPISaysDisabledUnsupported(t *testing.T) {
 		t.Fatalf("complete: %v", err)
 	}
 
-	if len(f.mu.bodies) != 1 {
-		t.Fatalf("got %d message calls, want 1", len(f.mu.bodies))
+	if got := f.bodyCount(); got != 1 {
+		t.Fatalf("got %d message calls, want 1", got)
 	}
-	body := f.mu.bodies[0]
+	body := f.firstBody()
 	if _, ok := body["thinking"]; ok {
 		t.Errorf("thinking sent = %v, want omitted", body["thinking"])
 	}
@@ -148,7 +170,7 @@ func TestModelsAPISaysDisabledSupported(t *testing.T) {
 		t.Fatalf("complete: %v", err)
 	}
 
-	body := f.mu.bodies[0]
+	body := f.firstBody()
 	thinking, _ := body["thinking"].(map[string]any)
 	if thinking["type"] != "disabled" {
 		t.Errorf("thinking.type = %v, want %q", thinking["type"], "disabled")
@@ -195,7 +217,7 @@ func TestLookupFailureFallsBackToKnownModels(t *testing.T) {
 				t.Fatalf("complete: %v", err)
 			}
 
-			body := f.mu.bodies[0]
+			body := f.firstBody()
 			_, hasThinking := body["thinking"]
 			if hasThinking != c.wantThinking {
 				t.Errorf("model %q: thinking present = %v, want %v", c.model, hasThinking, c.wantThinking)
@@ -222,12 +244,52 @@ func TestExplicitEffortIsKept(t *testing.T) {
 		t.Fatalf("complete: %v", err)
 	}
 
-	body := f.mu.bodies[0]
+	body := f.firstBody()
 	if _, ok := body["thinking"]; ok {
 		t.Errorf("thinking sent = %v, want omitted", body["thinking"])
 	}
 	oc, _ := body["output_config"].(map[string]any)
 	if oc["effort"] != "high" {
 		t.Errorf("output_config.effort = %v, want %q (kept, not overridden)", oc["effort"], "high")
+	}
+}
+
+// TestConcurrentLookupsAreCoalesced: N callers racing on the same uncached
+// model must share one Models API call, not each issue their own.
+func TestConcurrentLookupsAreCoalesced(t *testing.T) {
+	release := make(chan struct{})
+	f := &fakeAnthropicServer{
+		modelsStatus:  200,
+		modelsBody:    modelInfoBody("claude-x", true),
+		modelsRelease: release,
+	}
+	srv := f.start(t)
+	p := anthropicProvider(t, srv, "claude-x")
+
+	const n = 20
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := p.Complete(context.Background(), llm.Request{
+				Tier: llm.TierStrong, Messages: []llm.Message{llm.User("hi")},
+			})
+			if err != nil {
+				t.Errorf("complete: %v", err)
+			}
+		}()
+	}
+	// Give every goroutine time to reach the lookup and queue behind the one
+	// in-flight call before the models endpoint is allowed to answer.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if got := f.modelsCalls.Load(); got != 1 {
+		t.Errorf("models calls = %d, want 1 (concurrent lookups not coalesced)", got)
+	}
+	if got := f.bodyCount(); got != n {
+		t.Errorf("message calls = %d, want %d", got, n)
 	}
 }
