@@ -404,7 +404,15 @@ func TestDisagreementsSurviveReordering(t *testing.T) {
 		// Inserted FIRST, lowest confidence: sorted last.
 		mk("Subword tokenization improves accuracy.", "a.example", 0.10),
 		mk("Subword tokenization does not improve accuracy.", "b.example", 0.10),
-		mk("Byte-level models handle long documents.", "c.example", 0.90),
+		// Shares no content word with newStore's question ("what is the
+		// consensus on byte-level LLMs?"). Findings now weighs relevance, and
+		// "Byte-level models..." used to share "byte"/"level" with that
+		// question, giving it relevance 1.0 on top of being the highest
+		// confidence here — the test passed, but only because the two never
+		// disagreed about the order. This fixture's whole point is that
+		// CONFIDENCE puts these three ahead of the disputed pair, so the text
+		// must not also be the most relevant one.
+		mk("Kernel fusion improves GPU throughput.", "c.example", 0.90),
 		mk("Inference latency drops with speculative decoding.", "d.example", 0.80),
 		mk("The PG-19 corpus measures long-document perplexity.", "e.example", 0.70),
 	}
@@ -473,10 +481,15 @@ func TestTheCapNeverShowsOneSideOfADisagreement(t *testing.T) {
 		return c
 	}
 	// The disputed pair scores lowest, so the cap reaches it first.
+	//
+	// Neither of the other two shares a content word with newStore's question
+	// ("what is the consensus on byte-level LLMs?") — see the matching comment
+	// in TestDisagreementsSurviveReordering. This fixture's point is that
+	// CONFIDENCE, not relevance, puts them ahead of the disputed pair.
 	claims := []core.Claim{
 		mk("Subword tokenization improves accuracy.", "a.example", 0.10),
 		mk("Subword tokenization does not improve accuracy.", "b.example", 0.10),
-		mk("Byte-level models handle long documents.", "c.example", 0.90),
+		mk("Kernel fusion improves GPU throughput.", "c.example", 0.90),
 		mk("Inference latency drops with speculative decoding.", "d.example", 0.80),
 	}
 	st, sid := newStore(t, claims)
