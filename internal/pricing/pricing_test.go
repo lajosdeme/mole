@@ -379,3 +379,49 @@ func TestDeclaringAPriceMakesUsdUsable(t *testing.T) {
 		t.Error("priced at zero; --usd would not bind")
 	}
 }
+
+// TestCurrentClaudeRates validates that current Claude models are priced correctly.
+func TestCurrentClaudeRates(t *testing.T) {
+	tbl := pricing.NewTable()
+
+	// Claude Sonnet 5: $2/MTok input, $10/MTok output.
+	// 1M input + 1M output = $2 + $10 = $12.
+	c, err := tbl.Cost("claude-sonnet-5", pricing.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000})
+	if err != nil {
+		t.Fatalf("claude-sonnet-5 cost: %v", err)
+	}
+	if want := int64(12_000_000); c.USDMicros != want {
+		t.Errorf("sonnet-5 1M in + 1M out = %d micros, want %d", c.USDMicros, want)
+	}
+
+	// Claude Opus 5-5: $4/MTok input, $20/MTok output.
+	// 1M input + 1M output = $4 + $20 = $24.
+	c, err = tbl.Cost("claude-opus-5-5", pricing.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000})
+	if err != nil {
+		t.Fatalf("claude-opus-5-5 cost: %v", err)
+	}
+	if want := int64(24_000_000); c.USDMicros != want {
+		t.Errorf("opus-5-5 1M in + 1M out = %d micros, want %d", c.USDMicros, want)
+	}
+
+	// Claude Opus 5-5 cache read: $0.4/MTok input * 0.1 = $0.04/MTok cache read.
+	// No wait, the brief says CacheRead 200 nano-dollars per token.
+	// 1M cache-read tokens * 200 nano-dollars / 1000 = 200_000 micros.
+	c, err = tbl.Cost("claude-opus-5-5", pricing.Usage{CacheReadTokens: 1_000_000})
+	if err != nil {
+		t.Fatalf("opus-5-5 cache read: %v", err)
+	}
+	if want := int64(200_000); c.USDMicros != want {
+		t.Errorf("opus-5-5 1M cache-read = %d micros, want %d", c.USDMicros, want)
+	}
+
+	// Claude Fable 5-1: $10/MTok input, $50/MTok output.
+	// 1M input + 1M output = $10 + $50 = $60.
+	c, err = tbl.Cost("claude-fable-5-1", pricing.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000})
+	if err != nil {
+		t.Fatalf("claude-fable-5-1 cost: %v", err)
+	}
+	if want := int64(60_000_000); c.USDMicros != want {
+		t.Errorf("fable-5-1 1M in + 1M out = %d micros, want %d", c.USDMicros, want)
+	}
+}
