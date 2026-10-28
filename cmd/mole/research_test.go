@@ -102,6 +102,30 @@ func TestNegativeBudgetRefused(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Lead cap
+// ---------------------------------------------------------------------------
+
+func TestMaxLeadsFlagOverridesTheDerivedCap(t *testing.T) {
+	got := maxLeadsFor(researchOpts{maxDepth: 2, maxLeads: 30})
+	if got != 30 {
+		t.Errorf("got %d, want 30", got)
+	}
+}
+
+func TestZeroMaxLeadsKeepsTheDerivedCap(t *testing.T) {
+	got := maxLeadsFor(researchOpts{maxDepth: 2})
+	if got != 12 {
+		t.Errorf("got %d, want 12", got)
+	}
+}
+
+func TestNegativeMaxLeadsIsRefused(t *testing.T) {
+	if err := checkMaxLeadsIsValid(-1); err == nil {
+		t.Error("a negative --max-leads was accepted")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Output
 // ---------------------------------------------------------------------------
 //
