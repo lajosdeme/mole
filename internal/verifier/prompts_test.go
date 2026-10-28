@@ -3,10 +3,12 @@ package verifier
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/llm"
@@ -634,6 +636,136 @@ func TestThePromptOffersOnlyTheRelationsTheGraphReads(t *testing.T) {
 		if strings.Contains(prompt, string(rel)) {
 			t.Errorf("the prompt still mentions the retired relation %q", rel)
 		}
+	}
+}
+
+// TestPromptCarriesQuoteSourceAndDate. The quote often carries the qualifier
+// the claim text lost, so the judge needs it alongside the claim.
+func TestPromptCarriesQuoteSourceAndDate(t *testing.T) {
+	published := time.Date(2024, 5, 1, 0, 0, 0, 0, time.UTC)
+	withDetails := []Pair{{
+		A: &core.Claim{
+			ID: "c_a", Text: "claim A",
+			Quote: "the exact wording", Source: "https://www.example.com/a",
+			PublishedAt: &published,
+		},
+		B: &core.Claim{ID: "c_b", Text: "claim B"},
+	}}
+	prompt, _ := adjudicateUserPrompt(withDetails)
+	for _, want := range []string{
+		`"quote":"the exact wording"`,
+		`"source":"www.example.com"`,
+		`"published":"2024-05-01"`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %s:\n%s", want, prompt)
+		}
+	}
+
+	bare := []Pair{{
+		A: &core.Claim{ID: "c_a", Text: "claim A"},
+		B: &core.Claim{ID: "c_b", Text: "claim B"},
+	}}
+	barePrompt, _ := adjudicateUserPrompt(bare)
+	for _, absent := range []string{`"quote"`, `"source"`, `"published"`} {
+		if strings.Contains(barePrompt, absent) {
+			t.Errorf("prompt renders %s for a claim that has none:\n%s", absent, barePrompt)
+		}
+	}
+}
+
+// TestQuoteIsClamped mirrors TestAnEnormousClaimCannotSetTheBatchSize for the
+// quote field.
+func TestQuoteIsClamped(t *testing.T) {
+	batch := []Pair{{
+		A: &core.Claim{ID: "c_a", Text: "claim A", Quote: strings.Repeat("q", 1000)},
+		B: &core.Claim{ID: "c_b", Text: "claim B"},
+	}}
+	prompt, fence := adjudicateUserPrompt(batch)
+
+	open := "<pairs-" + fence + ">\n"
+	closeTag := "\n</pairs-" + fence + ">"
+	start := strings.LastIndex(prompt, open) + len(open)
+	end := strings.LastIndex(prompt, closeTag)
+	if start < 0 || end < 0 || end < start {
+		t.Fatalf("could not find the data block in:\n%s", prompt)
+	}
+
+	var wire []struct {
+		A struct {
+			Quote string `json:"quote"`
+		} `json:"a"`
+	}
+	if err := json.Unmarshal([]byte(prompt[start:end]), &wire); err != nil {
+		t.Fatalf("could not parse the pairs JSON: %v", err)
+	}
+	if len(wire) != 1 {
+		t.Fatalf("got %d pairs, want 1", len(wire))
+	}
+	// clampTo appends an ellipsis after cutting at the limit, so a clamped
+	// quote is the limit plus that marker's few bytes, never the full 1,000.
+	if n := len(wire[0].A.Quote); n > MaxQuoteChars+len("…") {
+		t.Errorf("quote is %d chars, want <= %d", n, MaxQuoteChars)
+	}
+}
+
+// TestPromptNamesTheCompatibleCasesAndCritique checks the new quote-aware
+// instructions and compatible-pair examples are all present.
+func TestPromptNamesTheCompatibleCasesAndCritique(t *testing.T) {
+	prompt, _ := adjudicateUserPrompt(testBatch(2))
+	for _, want := range []string{
+		"Absence of evidence is not evidence against",
+		"gross against net",
+		"arithmetically consistent",
+		"unmeasured, overstated, retracted",
+		"same_quantity",
+		"cannot both be right",
+		"even when they come from different studies",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt is missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "estimation methods") {
+		t.Errorf("prompt still mentions estimation methods as a compatible case:\n%s", prompt)
+	}
+}
+
+// TestContradictsOnDifferentQuantitiesIsDowngraded. "contradicts" requires
+// same_quantity; a false value downgrades the verdict to "neither".
+func TestContradictsOnDifferentQuantitiesIsDowngraded(t *testing.T) {
+	batch := testBatch(1)
+	raw := `{"verdicts":[{"pair":1,"relation":"contradicts","quantity_a":"gross revenue",` +
+		`"quantity_b":"net revenue","same_quantity":false,"why":"both give a revenue figure"}]}`
+
+	judged, unjudged, err := parseVerdicts(raw, batch)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(judged) != 1 || len(unjudged) != 0 {
+		t.Fatalf("%d judged, %d unjudged; want 1 and 0", len(judged), len(unjudged))
+	}
+	if judged[0].Relation != RelNeither {
+		t.Errorf("relation = %q, want %q", judged[0].Relation, RelNeither)
+	}
+	want := "different quantities: gross revenue / net revenue"
+	if judged[0].Rationale != want {
+		t.Errorf("rationale = %q, want %q", judged[0].Rationale, want)
+	}
+}
+
+// TestMissingSameQuantityKeepsTheRelation. A model that omits same_quantity has
+// not asserted a mismatch, so "contradicts" stands.
+func TestMissingSameQuantityKeepsTheRelation(t *testing.T) {
+	batch := testBatch(1)
+	raw := `{"verdicts":[{"pair":1,"relation":"contradicts","why":"cannot both be true"}]}`
+
+	judged, _, err := parseVerdicts(raw, batch)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(judged) != 1 || judged[0].Relation != RelContradicts {
+		t.Fatalf("got %+v, want a single contradicts verdict", judged)
 	}
 }
 

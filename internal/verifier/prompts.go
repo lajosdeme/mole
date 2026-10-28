@@ -3,7 +3,9 @@ package verifier
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/llm/jsonish"
@@ -58,16 +60,38 @@ const adjudicatePrompt = `You are given %d numbered pairs. For each one, decide 
 relates to claim B, and return %d verdicts — one per pair, no fewer.
 
 Return JSON only, matching this shape:
-{"verdicts":[{"pair":1,"relation":"neither","confidence":0.0,"why":"..."}]}
+{"verdicts":[{"pair":1,"quantity_a":"...","quantity_b":"...","same_quantity":false,"relation":"neither","confidence":0.0,"why":"..."}]}
+
+Each claim comes with the verbatim quote it was taken from and, when known, its
+source and publication date. Read the quote: it often carries the qualifier the
+claim lost (net, per 100,000, adults only, in 2019).
+
+For each pair, first write what each claim measures or asserts in a few words —
+the thing, the population or place, the period, the unit — as quantity_a and
+quantity_b. Set same_quantity to true when both describe the same thing for the
+same population, place and period, even if their sources, studies, methods or
+units differ.
 
 Relations, and nothing else:
 - "duplicate_of" — the same assertion, in different words. Not merely the same
   topic: swapping one for the other would lose nothing.
-- "contradicts" — both cannot be true. Read carefully for negation and for
-  scope: "improves accuracy" and "does not improve accuracy" contradict, while
-  "improves accuracy on short inputs" and "does not improve accuracy on long
-  inputs" do not.
+- "contradicts" — both cannot be true. Only possible when same_quantity is true.
+  Two sources giving values for the same quantity that cannot both be right —
+  micrograms against grams per week, 62%% against 80%% — contradict,
+  even when they come from different studies, surveys or methods. Values
+  whose ranges overlap do not. Also "contradicts": one claim says the other's
+  figure or finding is wrong, unmeasured, overstated, retracted, or not
+  supported by the source it cites.
 - "neither" — everything else, and the answer for most pairs.
+
+These are "neither", not "contradicts":
+- "a study does not show" or "found no evidence about" X, against a claim that X.
+  Absence of evidence is not evidence against.
+- gross against net, a total against a subset, a peak against another year.
+- different populations, places or periods.
+- figures that are arithmetically consistent with each other, such as 3.8 and 68
+  per 100,000 against "about 18 times".
+- a general definition against "there is no standard definition".
 
 You are being asked TWO yes-or-no questions per pair — are these the same
 assertion, and can they both be true — not asked to characterise the
@@ -102,9 +126,44 @@ closing tag does.
 
 // promptPair is the wire shape of one pair. Claim IDs are deliberately absent.
 type promptPair struct {
-	Pair int    `json:"pair"`
-	A    string `json:"a"`
-	B    string `json:"b"`
+	Pair int         `json:"pair"`
+	A    promptClaim `json:"a"`
+	B    promptClaim `json:"b"`
+}
+
+// promptClaim is the wire shape of one side of a pair.
+type promptClaim struct {
+	Claim     string `json:"claim"`
+	Quote     string `json:"quote,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Published string `json:"published,omitempty"`
+}
+
+// newPromptClaim builds one side of a wire pair from a claim.
+func newPromptClaim(c *core.Claim) promptClaim {
+	return promptClaim{
+		Claim:     clampClaim(c.Text),
+		Quote:     clampQuote(c.Quote),
+		Source:    claimHost(c.Source),
+		Published: publishedDate(c.PublishedAt),
+	}
+}
+
+// claimHost returns the host of a claim's source URL, or "" when it has none.
+func claimHost(source string) string {
+	u, err := url.Parse(source)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Host
+}
+
+// publishedDate formats a claim's publication date, or "" when unknown.
+func publishedDate(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.Format("2006-01-02")
 }
 
 // adjudicateUserPrompt renders one batch.
@@ -117,8 +176,8 @@ func adjudicateUserPrompt(pairs []Pair) (string, string) {
 	for i, p := range pairs {
 		wire = append(wire, promptPair{
 			Pair: i + 1,
-			A:    clampClaim(p.A.Text),
-			B:    clampClaim(p.B.Text),
+			A:    newPromptClaim(p.A),
+			B:    newPromptClaim(p.B),
 		})
 	}
 	// Marshal cannot fail on a slice of strings, and a fallback that silently
@@ -141,15 +200,23 @@ const MaxClaimChars = 600
 
 func clampClaim(s string) string { return clampTo(s, MaxClaimChars) }
 
+// MaxQuoteChars bounds one claim's quote in the prompt.
+const MaxQuoteChars = 400
+
+func clampQuote(s string) string { return clampTo(s, MaxQuoteChars) }
+
 // ---------------------------------------------------------------------------
 // Response parsing
 // ---------------------------------------------------------------------------
 
 type wireVerdict struct {
-	Pair       int     `json:"pair"`
-	Relation   string  `json:"relation"`
-	Confidence float64 `json:"confidence"`
-	Why        string  `json:"why"`
+	Pair         int     `json:"pair"`
+	QuantityA    string  `json:"quantity_a"`
+	QuantityB    string  `json:"quantity_b"`
+	SameQuantity *bool   `json:"same_quantity"`
+	Relation     string  `json:"relation"`
+	Confidence   float64 `json:"confidence"`
+	Why          string  `json:"why"`
 }
 
 type wireResponse struct {
@@ -193,12 +260,19 @@ func parseVerdicts(raw string, batch []Pair) (judged []Judged, unjudged []Pair, 
 			// not a verdict.
 			continue
 		}
+		rationale := oneLine(v.Why)
+		// "contradicts" requires the same quantity; a model that says otherwise is
+		// downgraded to "neither" rather than trusted on the relation it gave.
+		if rel == RelContradicts && v.SameQuantity != nil && !*v.SameQuantity {
+			rel = RelNeither
+			rationale = oneLine("different quantities: " + v.QuantityA + " / " + v.QuantityB)
+		}
 		seen[idx] = true
 		judged = append(judged, Judged{
 			Pair:      batch[idx],
 			Relation:  rel,
 			Weight:    clamp01(v.Confidence),
-			Rationale: oneLine(v.Why),
+			Rationale: rationale,
 			DecidedBy: "model",
 		})
 	}

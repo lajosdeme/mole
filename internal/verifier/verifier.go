@@ -978,10 +978,10 @@ func (v *Verifier) estimate(unit core.BudgetUnit, in, out int64) int64 {
 // matters: §8.2's whole point is that the hold is taken before the call, so a hold
 // smaller than the call trips the overshoot detector.
 func (v *Verifier) estimateBatch(unit core.BudgetUnit, pairs int) int64 {
-	// ~350 tokens of instructions, ~120 in and ~60 out per pair, doubled for
+	// ~600 tokens of instructions, ~250 in and ~120 out per pair, doubled for
 	// headroom; split for USD mode's per-rate pricing.
-	in := int64(2 * (350 + pairs*120))
-	out := int64(2 * 60 * pairs)
+	in := int64(2 * (600 + pairs*250))
+	out := int64(2 * 120 * pairs)
 	return v.estimate(unit, in, out)
 }
 
@@ -1004,7 +1004,7 @@ func (v *Verifier) estimateBatch(unit core.BudgetUnit, pairs int) int64 {
 //
 // Generous on purpose: unused output tokens are not billed.
 func maxTokensForBatch(pairs int) int {
-	return 4000 + pairs*200
+	return 4000 + pairs*300
 }
 
 // logShortBatch reports a batch that came back with fewer verdicts than pairs.
