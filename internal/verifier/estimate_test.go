@@ -18,8 +18,8 @@ func TestBatchReservationCoversARealCall(t *testing.T) {
 	got := v.estimateBatch(core.BudgetUSD, pairs)
 
 	real, err := tbl.Cost("m", pricing.Usage{
-		InputTokens:  350 + pairs*120,
-		OutputTokens: pairs * 60,
+		InputTokens:  600 + pairs*250,
+		OutputTokens: pairs * 120,
 	})
 	if err != nil {
 		t.Fatalf("Cost: %v", err)
@@ -43,7 +43,7 @@ func TestTokenModeEstimateIgnoresPricing(t *testing.T) {
 	v := &Verifier{Model: "m", Pricing: pricing.NewEmptyTable()}
 	const pairs = 8
 	got := v.estimateBatch(core.BudgetTokens, pairs)
-	want := int64(2 * (350 + pairs*180))
+	want := int64(2 * (600 + pairs*370))
 	if got != want {
 		t.Errorf("estimateBatch(tokens, %d) = %d, want %d", pairs, got, want)
 	}
