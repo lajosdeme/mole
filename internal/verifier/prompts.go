@@ -68,21 +68,27 @@ claim lost (net, per 100,000, adults only, in 2019).
 
 For each pair, first write what each claim measures or asserts in a few words —
 the thing, the population or place, the period, the unit — as quantity_a and
-quantity_b. Set same_quantity to true only when they match on all of these.
+quantity_b. Set same_quantity to true when both describe the same thing for the
+same population, place and period, even if their sources, studies, methods or
+units differ.
 
 Relations, and nothing else:
 - "duplicate_of" — the same assertion, in different words. Not merely the same
   topic: swapping one for the other would lose nothing.
 - "contradicts" — both cannot be true. Only possible when same_quantity is true.
-  Also "contradicts": one claim says the other's figure or finding is wrong,
-  unmeasured, overstated, retracted, or not supported by the source it cites.
+  Two sources giving values for the same quantity that cannot both be right —
+  micrograms against grams per week, 62%% against 80%% — contradict,
+  even when they come from different studies, surveys or methods. Values
+  whose ranges overlap do not. Also "contradicts": one claim says the other's
+  figure or finding is wrong, unmeasured, overstated, retracted, or not
+  supported by the source it cites.
 - "neither" — everything else, and the answer for most pairs.
 
 These are "neither", not "contradicts":
 - "a study does not show" or "found no evidence about" X, against a claim that X.
   Absence of evidence is not evidence against.
 - gross against net, a total against a subset, a peak against another year.
-- different populations, places, periods, editions, units or estimation methods.
+- different populations, places or periods.
 - figures that are arithmetically consistent with each other, such as 3.8 and 68
   per 100,000 against "about 18 times".
 - a general definition against "there is no standard definition".

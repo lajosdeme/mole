@@ -719,10 +719,15 @@ func TestPromptNamesTheCompatibleCasesAndCritique(t *testing.T) {
 		"arithmetically consistent",
 		"unmeasured, overstated, retracted",
 		"same_quantity",
+		"cannot both be right",
+		"even when they come from different studies",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt is missing %q:\n%s", want, prompt)
 		}
+	}
+	if strings.Contains(prompt, "estimation methods") {
+		t.Errorf("prompt still mentions estimation methods as a compatible case:\n%s", prompt)
 	}
 }
 
