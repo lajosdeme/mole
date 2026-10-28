@@ -382,3 +382,196 @@ func TestTheSessionClockHasAConfigDefault(t *testing.T) {
 		t.Error("the session clock and the per-call timeout are the same field")
 	}
 }
+
+func TestConfigSetRoleKeys(t *testing.T) {
+	isolate(t)
+
+	cfg := &config.Config{}
+	for _, kv := range [][2]string{
+		{"llm.provider", "anthropic"},
+		{"llm.cheap-model", "claude-haiku-4-5"},
+		{"llm.cheap.provider", "OpenAI-Compatible"},
+		{"llm.cheap.model", "deepseek-chat"},
+		{"llm.verifier.api-key", "sk-ant-api03-verifiersecretvalue"},
+	} {
+		if err := cfg.Set(kv[0], kv[1]); err != nil {
+			t.Fatalf("set %s: %v", kv[0], err)
+		}
+	}
+	if err := cfg.Set("llm.cheap.provider", "hotdog"); err == nil {
+		t.Error("unknown role provider accepted")
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"llm.cheap.provider":   "openai-compatible",
+		"llm.cheap.model":      "deepseek-chat",
+		"llm.verifier.api-key": "sk-ant-api03-verifiersecretvalue",
+		"llm.cheap-model":      "claude-haiku-4-5",
+		"llm.strong.model":     "",
+	} {
+		if got, err := loaded.Get(key); err != nil || got != want {
+			t.Errorf("%s = %q (err %v), want %q", key, got, err, want)
+		}
+	}
+	if loaded.LLM.Cheap == nil || loaded.LLM.Cheap.Model != "deepseek-chat" {
+		t.Errorf("cheap block = %+v", loaded.LLM.Cheap)
+	}
+	if loaded.LLM.Strong != nil {
+		t.Errorf("an unset role grew a block: %+v", loaded.LLM.Strong)
+	}
+
+	var sawKey bool
+	for _, f := range config.Fields() {
+		shown := config.Display(f, loaded)
+		if strings.Contains(shown, "verifiersecret") {
+			t.Errorf("%s leaked the key: %q", f.Name, shown)
+		}
+		if f.Name == "llm.verifier.api-key" {
+			sawKey = true
+			if !strings.Contains(shown, "*") {
+				t.Errorf("role key not masked: %q", shown)
+			}
+		}
+	}
+	if !sawKey {
+		t.Fatal("llm.verifier.api-key is missing from the field table")
+	}
+}
+
+func TestRoleOnAnotherEndpointNeverInheritsTheTopLevelKey(t *testing.T) {
+	llm := config.LLMConfig{Provider: "", APIKey: "sk-ant-api03-topsecret", BaseURL: ""}
+	cases := []struct {
+		name  string
+		block config.LLMRole
+		want  string
+	}{
+		{"other base url", config.LLMRole{BaseURL: "https://api.deepseek.com/v1", Model: "deepseek-chat"}, ""},
+		{"other provider", config.LLMRole{Provider: "openai-compatible", Model: "x"}, ""},
+		{"own key on other endpoint", config.LLMRole{BaseURL: "https://api.deepseek.com/v1", APIKey: "sk-own"}, "sk-own"},
+		{"model only", config.LLMRole{Model: "claude-haiku-4-5"}, "sk-ant-api03-topsecret"},
+		{"same provider spelled out", config.LLMRole{Provider: "anthropic"}, "sk-ant-api03-topsecret"},
+	}
+	for _, tc := range cases {
+		l := llm
+		block := tc.block
+		l.Cheap = &block
+		if got := l.Resolve("cheap").APIKey; got != tc.want {
+			t.Errorf("%s: key = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestRoleOnAnotherProviderInheritsNothing checks a provider switch drops the top-level URL, key and model.
+func TestRoleOnAnotherProviderInheritsNothing(t *testing.T) {
+	top := config.LLMConfig{
+		Provider: "openai-compatible", APIKey: "sk-deepseek-top", BaseURL: "https://api.deepseek.com/v1",
+		Model: "deepseek-chat", CheapModel: "deepseek-chat", VerifierModel: "deepseek-chat",
+	}
+	cases := []struct {
+		name  string
+		block config.LLMRole
+	}{
+		{"no key, no model", config.LLMRole{Provider: "anthropic"}},
+		{"own key, no model", config.LLMRole{Provider: "anthropic", APIKey: "sk-ant-api03-own"}},
+		{"no key, own model", config.LLMRole{Provider: "anthropic", Model: "claude-opus-5-5"}},
+		{"own key, own model", config.LLMRole{Provider: "anthropic", APIKey: "sk-ant-api03-own", Model: "claude-opus-5-5"}},
+	}
+	for _, role := range []string{"strong", "verifier"} {
+		for _, tc := range cases {
+			l := top
+			block := tc.block
+			if role == "strong" {
+				l.Strong = &block
+			} else {
+				l.Verifier = &block
+			}
+			got := l.Resolve(role)
+			want := config.LLMRole{Provider: "anthropic", APIKey: tc.block.APIKey, Model: tc.block.Model}
+			if got != want {
+				t.Errorf("%s %s: resolved %+v, want %+v", role, tc.name, got, want)
+			}
+		}
+	}
+}
+
+// TestAnthropicEnvKeyStaysOffAnotherProvider checks ANTHROPIC_API_KEY never fills an openai-compatible top-level key.
+func TestAnthropicEnvKeyStaysOffAnotherProvider(t *testing.T) {
+	for _, fileKey := range []string{"sk-deepseek-file", ""} {
+		isolate(t)
+		cfg := &config.Config{}
+		cfg.LLM = config.LLMConfig{
+			Provider: "openai-compatible", APIKey: fileKey,
+			BaseURL: "https://api.deepseek.com/v1", Model: "deepseek-chat",
+		}
+		if err := cfg.Save(); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api03-env")
+
+		loaded, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.LLM.APIKey != fileKey {
+			t.Errorf("file key %q: top-level key = %q, want the file key", fileKey, loaded.LLM.APIKey)
+		}
+	}
+}
+
+// TestAnthropicEnvKeyFillsAnAnthropicTopLevel checks ANTHROPIC_API_KEY applies when the provider is anthropic or unset.
+func TestAnthropicEnvKeyFillsAnAnthropicTopLevel(t *testing.T) {
+	for _, provider := range []string{"anthropic", ""} {
+		isolate(t)
+		cfg := &config.Config{}
+		cfg.LLM = config.LLMConfig{Provider: provider, APIKey: "sk-ant-api03-file", Model: "claude-opus-5-5"}
+		if err := cfg.Save(); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api03-env")
+
+		loaded, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.LLM.APIKey != "sk-ant-api03-env" {
+			t.Errorf("provider %q: top-level key = %q, want the environment value", provider, loaded.LLM.APIKey)
+		}
+	}
+
+	isolate(t)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api03-env")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("env-only config: %v", err)
+	}
+	if cfg.LLM.APIKey != "sk-ant-api03-env" {
+		t.Errorf("no file: top-level key = %q, want the environment value", cfg.LLM.APIKey)
+	}
+}
+
+// TestMoleLLMKeyAppliesWhateverTheProvider checks MOLE_LLM_API_KEY still sets the top-level key on any provider.
+func TestMoleLLMKeyAppliesWhateverTheProvider(t *testing.T) {
+	isolate(t)
+	cfg := &config.Config{}
+	cfg.LLM = config.LLMConfig{Provider: "openai-compatible", APIKey: "sk-deepseek-file"}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MOLE_LLM_API_KEY", "sk-deepseek-env")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api03-env")
+
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LLM.APIKey != "sk-deepseek-env" {
+		t.Errorf("top-level key = %q, want MOLE_LLM_API_KEY", loaded.LLM.APIKey)
+	}
+}

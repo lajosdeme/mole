@@ -189,6 +189,94 @@ type LLMConfig struct {
 	// against a default chunk of roughly 8000. Left unset, chunking targets a
 	// context window and every chunk fails.
 	MaxInputTokens int64 `json:"max_input_tokens,omitempty"`
+
+	// Strong, Cheap and Verifier override the settings above for one role each.
+	Strong   *LLMRole `json:"strong,omitempty"`
+	Cheap    *LLMRole `json:"cheap,omitempty"`
+	Verifier *LLMRole `json:"verifier,omitempty"`
+}
+
+// LLMRole is one role's provider and model; empty fields inherit the top level,
+// except that a role on another provider inherits nothing and another endpoint no key.
+type LLMRole struct {
+	Provider string `json:"provider,omitempty"`
+	APIKey   string `json:"api_key,omitempty"`
+	BaseURL  string `json:"base_url,omitempty"`
+	Model    string `json:"model,omitempty"`
+}
+
+// RoleNames lists the roles that accept an llm.<role>.* block.
+var RoleNames = []string{"strong", "cheap", "verifier"}
+
+// block returns the address of a role's override pointer.
+func (l *LLMConfig) block(role string) **LLMRole {
+	switch role {
+	case "strong":
+		return &l.Strong
+	case "cheap":
+		return &l.Cheap
+	case "verifier":
+		return &l.Verifier
+	}
+	return nil
+}
+
+// Resolve returns a role's settings: the top level overlaid with its block.
+func (l LLMConfig) Resolve(role string) LLMRole {
+	r := LLMRole{Provider: l.Provider, APIKey: l.APIKey, BaseURL: l.BaseURL}
+	switch role {
+	case "strong":
+		r.Model = l.Model
+	case "cheap":
+		r.Model = l.CheapModel
+	case "verifier":
+		r.Model = l.VerifierModel
+	}
+	if p := l.block(role); p != nil && *p != nil {
+		b := **p
+		// A role on another provider takes nothing from the top level.
+		if b.Provider != "" && providerKind(b.Provider) != providerKind(l.Provider) {
+			return b
+		}
+		r.Provider = firstNonEmpty(b.Provider, r.Provider)
+		r.BaseURL = firstNonEmpty(b.BaseURL, r.BaseURL)
+		r.Model = firstNonEmpty(b.Model, r.Model)
+		// A role on another provider or endpoint uses only its own key, never the top-level one.
+		if providerKind(r.Provider) != providerKind(l.Provider) || r.BaseURL != l.BaseURL {
+			r.APIKey = b.APIKey
+		} else {
+			r.APIKey = firstNonEmpty(b.APIKey, r.APIKey)
+		}
+	}
+	return r
+}
+
+// providerKind returns the provider name with the anthropic default applied.
+func providerKind(p string) string {
+	if p == "" {
+		return "anthropic"
+	}
+	return p
+}
+
+// Block returns a role's override block, or nil when it has none.
+func (l LLMConfig) Block(role string) *LLMRole {
+	if p := l.block(role); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// HasRoleBlocks reports whether any role overrides the top level.
+func (l LLMConfig) HasRoleBlocks() bool {
+	return l.Strong != nil || l.Cheap != nil || l.Verifier != nil
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +354,12 @@ func (c *Config) applyEnv() {
 	setIf(&c.Search.Provider, "MOLE_SEARCH_PROVIDER")
 	setIf(&c.Search.BraveKey, "MOLE_BRAVE_API_KEY", "BRAVE_API_KEY")
 	setIf(&c.Search.TavilyKey, "MOLE_TAVILY_API_KEY", "TAVILY_API_KEY")
-	setIf(&c.LLM.APIKey, "MOLE_LLM_API_KEY", "ANTHROPIC_API_KEY")
+	// ANTHROPIC_API_KEY fills the top-level key only for an anthropic or unset provider.
+	llmKeys := []string{"MOLE_LLM_API_KEY"}
+	if providerKind(c.LLM.Provider) == "anthropic" {
+		llmKeys = append(llmKeys, "ANTHROPIC_API_KEY")
+	}
+	setIf(&c.LLM.APIKey, llmKeys...)
 	setIf(&c.LLM.BaseURL, "MOLE_LLM_BASE_URL")
 	setIf(&c.LLM.Model, "MOLE_LLM_MODEL")
 	setIf(&c.ContactEmail, "MOLE_CONTACT_EMAIL")
@@ -339,7 +432,7 @@ type Field struct {
 
 // Fields enumerates everything `mole config set` accepts.
 func Fields() []Field {
-	return []Field{
+	fields := []Field{
 		{
 			Name: "search.provider", Help: "search backend: brave | tavily",
 			get: func(c *Config) string { return c.Search.Provider },
@@ -565,6 +658,59 @@ func Fields() []Field {
 				return nil
 			},
 		},
+	}
+	for _, role := range RoleNames {
+		fields = append(fields, roleFields(role)...)
+	}
+	return fields
+}
+
+// roleFields declares the llm.<role>.* keys for one role.
+func roleFields(role string) []Field {
+	prefix := "llm." + role + "."
+	field := func(name, help string, secret bool, pick func(*LLMRole) *string, check func(string) (string, error)) Field {
+		return Field{
+			Name: prefix + name, Help: help, Secret: secret,
+			get: func(c *Config) string {
+				if b := c.LLM.Block(role); b != nil {
+					return *pick(b)
+				}
+				return ""
+			},
+			set: func(c *Config, v string) error {
+				v, err := check(strings.TrimSpace(v))
+				if err != nil {
+					return err
+				}
+				p := c.LLM.block(role)
+				if *p == nil {
+					*p = &LLMRole{}
+				}
+				*pick(*p) = v
+				if **p == (LLMRole{}) {
+					*p = nil
+				}
+				return nil
+			},
+		}
+	}
+	keep := func(v string) (string, error) { return v, nil }
+	return []Field{
+		field("provider", role+" role backend: anthropic | openai-compatible; empty inherits llm.provider", false,
+			func(r *LLMRole) *string { return &r.Provider },
+			func(v string) (string, error) {
+				v = strings.ToLower(v)
+				if v != "" && v != "anthropic" && v != "openai-compatible" {
+					return "", fmt.Errorf("%sprovider must be anthropic or openai-compatible, got %q", prefix, v)
+				}
+				return v, nil
+			}),
+		field("api-key", role+" role API key; empty inherits llm.api-key", true,
+			func(r *LLMRole) *string { return &r.APIKey }, keep),
+		field("base-url", role+" role endpoint; empty inherits llm.base-url", false,
+			func(r *LLMRole) *string { return &r.BaseURL }, keep),
+		field("model", role+" role model; wins over the top-level model setting", false,
+			func(r *LLMRole) *string { return &r.Model }, keep),
 	}
 }
 

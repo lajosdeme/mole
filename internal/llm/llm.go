@@ -51,6 +51,9 @@ const (
 	TierStrong Tier = "strong"
 )
 
+// StrongEffort is the effort planning and report synthesis request.
+const StrongEffort = "medium"
+
 // Request is one completion.
 type Request struct {
 	// Tier picks the model when Model is empty.

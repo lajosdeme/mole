@@ -106,6 +106,8 @@ type Generator struct {
 	MaxClaims int
 	// MaxTokens bounds the response.
 	MaxTokens int
+	// Effort is the synthesis call's effort; empty sends llm.StrongEffort.
+	Effort string
 }
 
 const (
@@ -127,6 +129,9 @@ func (g *Generator) withDefaults() *Generator {
 		if out.MaxTokens < DefaultMaxTokens {
 			out.MaxTokens = DefaultMaxTokens
 		}
+	}
+	if out.Effort == "" {
+		out.Effort = llm.StrongEffort
 	}
 	return &out
 }
@@ -198,6 +203,7 @@ func (g *Generator) Generate(ctx context.Context, st store.Store, sessionID stri
 	fence := fenceToken()
 	gen.writeBody(ctx, llm.Request{
 		Tier:      llm.TierStrong,
+		Effort:    gen.Effort,
 		System:    reportSystemPrompt,
 		Messages:  []llm.Message{llm.User(reportPrompt(fence, sess.Prompt, findings, index))},
 		MaxTokens: gen.MaxTokens,

@@ -492,7 +492,8 @@ func reportConfig(r *checks) {
 		}
 	}
 
-	reportLLM(report, cfg)
+	built := reportLLM(report, cfg)
+	reportLLMRoles(r, cfg, built)
 
 	// Reported from the same rule that GATES the providers, not a second
 	// hand-written check beside it. §10.3 makes this a startup check rather than
@@ -528,19 +529,31 @@ func reportPricing(r *checks, cfg *config.Config) {
 	}
 
 	var missing []string
-	for _, m := range []string{cfg.LLM.Model, cfg.LLM.CheapModel, cfg.LLM.VerifierModel} {
-		if m == "" {
+	var localUnpriced, hosted bool
+	for _, role := range roleSettings(cfg) {
+		m := role.model
+		if m == "" || contains(missing, m) {
 			continue
 		}
-		if _, ok := tbl.Lookup(m); !ok {
+		local := pricing.IsLocalEndpoint(role.backend.baseURL)
+		hosted = hosted || !local
+		if _, ok := tbl.Lookup(m); ok {
+			continue
+		}
+		if local {
+			localUnpriced = true
+		} else {
 			missing = append(missing, m)
 		}
 	}
-	if len(missing) == 0 {
+	switch {
+	case len(missing) == 0 && !localUnpriced:
 		r.note(true, "pricing", "every configured model has a rate")
 		return
-	}
-	if pricing.IsLocalEndpoint(cfg.LLM.BaseURL) {
+	case len(missing) == 0 && hosted:
+		r.note(true, "pricing", "every hosted model has a rate; local models are billed at zero")
+		return
+	case len(missing) == 0:
 		r.note(true, "pricing", "local endpoint; models are billed at zero because they are free")
 		return
 	}
@@ -904,7 +917,7 @@ func newConfigCmd() *cobra.Command {
 		},
 		&cobra.Command{
 			Use: "test-llm", Short: "Make one cheap call and report model + cost", Args: cobra.NoArgs,
-			RunE: func(cmd *cobra.Command, _ []string) error { return cmdConfigTestLLM(cmd.Context()) },
+			RunE: func(cmd *cobra.Command, _ []string) error { return cmdConfigTestLLM(cmd.Context(), cmd.OutOrStdout()) },
 		},
 	)
 	return c
@@ -1011,24 +1024,24 @@ func lookupConfigField(name string) (config.Field, bool) {
 // resolving an `ant auth login` profile — and "which one is this actually
 // using" otherwise becomes a debugging session. Auto-detection means the answer
 // is frequently one the user never typed.
-func reportLLM(report func(bool, string, string), cfg *config.Config) {
+func reportLLM(report func(bool, string, string), cfg *config.Config) llm.Provider {
 	built, reason, err := buildLLM(cfg)
 	if err != nil {
 		report(false, "llm provider", err.Error())
-		return
+		return nil
 	}
 	if built == nil {
 		report(false, "llm provider",
 			"none found — set one with `mole config set llm.api-key ...`, "+
 				"run `ant auth login`, or start a local model (ollama serve)")
-		return
+		return nil
 	}
 
 	detail := fmt.Sprintf("%s via %s", built.ModelFor(llm.TierStrong), llm.SourceOf(built))
 	if cheap := built.ModelFor(llm.TierCheap); cheap != built.ModelFor(llm.TierStrong) {
 		detail += fmt.Sprintf(" (cheap tier: %s)", cheap)
 	}
-	if v := cfg.LLM.VerifierModel; v != "" {
+	if v := verifierModelFor(cfg); v != "" {
 		// Named separately because it is the stage whose errors are hardest to see: a
 		// bad adjudicator does not fail, it produces a confident graph of wrong edges.
 		detail += fmt.Sprintf(" (verifier: %s)", v)
@@ -1040,24 +1053,101 @@ func reportLLM(report func(bool, string, string), cfg *config.Config) {
 	// A local endpoint can be verified for free, so a green tick here is
 	// earned rather than assumed. A hosted one cannot be checked without
 	// spending money; say so instead of implying it works.
-	if base := cfg.LLM.BaseURL; base != "" && llm.IsLoopback(base) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if !llm.Reachable(ctx, base, nil) {
-			report(false, "llm provider", detail+" — NOT REACHABLE (is the runtime started?)")
-			return
+	var localURLs []string
+	allLocal := llmConfigured(cfg)
+	if allLocal {
+		for _, role := range roleSettings(cfg) {
+			if base := role.backend.baseURL; base != "" && llm.IsLoopback(base) {
+				if !contains(localURLs, base) {
+					localURLs = append(localURLs, base)
+				}
+			} else {
+				allLocal = false
+			}
 		}
+	}
+	for _, base := range localURLs {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		up := llm.Reachable(ctx, base, nil)
+		cancel()
+		if !up {
+			report(false, "llm provider", detail+" — NOT REACHABLE (is the runtime started?)")
+			return built
+		}
+	}
+	if allLocal {
 		report(true, "llm provider", detail+", reachable")
-		return
+		return built
 	}
 	// An unpriced model is not fatal, but USD budgeting cannot work for it —
 	// and a model name left over from a different provider shows up here
 	// rather than at the first call, twenty leads into a session.
-	if warn := unpricedModels(built); warn != "" {
+	if warn := unpricedModels(cfg, built); warn != "" {
 		report(false, "llm provider", detail+" — "+warn)
-		return
+		return built
+	}
+	if len(localURLs) > 0 {
+		report(true, "llm provider", detail+", local endpoint reachable; hosted roles unverified (run: mole config test-llm)")
+		return built
 	}
 	report(true, "llm provider", detail+" (unverified — run: mole config test-llm)")
+	return built
+}
+
+// reportLLMRoles prints one line per role: provider, model and whether it is priced, never the key.
+func reportLLMRoles(r *checks, cfg *config.Config, built llm.Provider) {
+	if built == nil {
+		return
+	}
+	tbl := pricing.NewTable()
+	_ = tbl.Declare(cfg.Pricing)
+	for _, line := range llmRoleLines(cfg, built) {
+		priced := "no"
+		if _, ok := tbl.Lookup(line.model); ok {
+			priced = "yes"
+		} else if line.local {
+			priced = "local, free"
+		}
+		r.print(priced != "no", "llm "+string(line.role), fmt.Sprintf("%s %s, priced %s", line.provider, line.model, priced))
+	}
+}
+
+type llmRoleLine struct {
+	role            llm.ModelRole
+	provider, model string
+	local           bool
+}
+
+// llmRoleLines describes each role as the built provider will serve it.
+func llmRoleLines(cfg *config.Config, built llm.Provider) []llmRoleLine {
+	cheapModel := built.ModelFor(llm.TierCheap)
+	if !llmConfigured(cfg) {
+		free := llm.SourceOf(built) == llm.CredentialNotNeeded
+		return []llmRoleLine{
+			{llm.RoleStrong, built.Name(), built.ModelFor(llm.TierStrong), free},
+			{llm.RoleCheap, built.Name(), cheapModel, free},
+			{llm.RoleVerifier, built.Name(), firstNonEmpty(verifierModelFor(cfg), cheapModel), free},
+		}
+	}
+	var lines []llmRoleLine
+	for _, r := range roleSettings(cfg) {
+		model := r.model
+		switch r.role {
+		case llm.RoleStrong:
+			model = firstNonEmpty(model, built.ModelFor(llm.TierStrong))
+		default:
+			model = firstNonEmpty(model, cheapModel)
+		}
+		lines = append(lines, llmRoleLine{r.role, string(r.backend.kind), model, pricing.IsLocalEndpoint(r.backend.baseURL)})
+	}
+	return lines
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // checkKeyMatchesProvider refuses a key that plainly belongs elsewhere.
@@ -1070,26 +1160,50 @@ func reportLLM(report func(bool, string, string), cfg *config.Config) {
 // Only an unambiguous mismatch is refused. An unrecognized prefix is fine —
 // self-hosted and proxy keys look like anything.
 func checkKeyMatchesProvider(cfg *config.Config, kind llm.Kind) error {
-	vendor, known := llm.VendorFromKey(cfg.LLM.APIKey)
+	return checkKeyMatches(cfg.LLM.APIKey, cfg.LLM.Provider != "", kind, "llm.")
+}
+
+// checkRoleKeyMatchesProvider runs the key check for one role's resolved settings.
+func checkRoleKeyMatchesProvider(cfg *config.Config, role llm.ModelRole, kind llm.Kind) error {
+	block := cfg.LLM.Block(string(role))
+	if block == nil || block.APIKey == "" {
+		return checkKeyMatches(cfg.LLM.Resolve(string(role)).APIKey,
+			cfg.LLM.Provider != "" || (block != nil && block.Provider != ""), kind, "llm.")
+	}
+	return checkKeyMatches(block.APIKey, block.Provider != "", kind, "llm."+string(role)+".")
+}
+
+// checkKeyMatches refuses a key whose vendor contradicts a provider nobody chose explicitly.
+func checkKeyMatches(key string, explicit bool, kind llm.Kind, prefix string) error {
+	vendor, known := llm.VendorFromKey(key)
 	if !known || vendor.Kind == kind {
 		return nil
 	}
 	// An explicitly chosen provider is the user's decision to make; only the
 	// silent default is worth blocking on.
-	if cfg.LLM.Provider != "" {
+	if explicit {
 		return nil
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "llm.api-key looks like a %s key, but llm.provider is unset so it defaults to anthropic.\n",
-		vendor.Name)
-	b.WriteString("Set the provider explicitly:\n")
-	fmt.Fprintf(&b, "  mole config set llm.provider %s\n", vendor.Kind)
-	if vendor.BaseURL != "" {
-		fmt.Fprintf(&b, "  mole config set llm.base-url %s\n", vendor.BaseURL)
+	if prefix == "llm." {
+		fmt.Fprintf(&b, "llm.api-key looks like a %s key, but llm.provider is unset so it defaults to anthropic.\n",
+			vendor.Name)
+	} else {
+		fmt.Fprintf(&b, "%sapi-key looks like a %s key, but %sprovider is unset so it uses %s.\n",
+			prefix, vendor.Name, prefix, kind)
 	}
-	b.WriteString("  mole config set llm.model <name>\n")
-	b.WriteString("  mole config set llm.cheap-model <name>")
+	b.WriteString("Set the provider explicitly:\n")
+	fmt.Fprintf(&b, "  mole config set %sprovider %s\n", prefix, vendor.Kind)
+	if vendor.BaseURL != "" {
+		fmt.Fprintf(&b, "  mole config set %sbase-url %s\n", prefix, vendor.BaseURL)
+	}
+	if prefix == "llm." {
+		b.WriteString("  mole config set llm.model <name>\n")
+		b.WriteString("  mole config set llm.cheap-model <name>")
+	} else {
+		fmt.Fprintf(&b, "  mole config set %smodel <name>", prefix)
+	}
 	if vendor.Models != "" {
 		fmt.Fprintf(&b, "        # e.g. %s", vendor.Models)
 	}
@@ -1108,37 +1222,25 @@ func checkKeyMatchesProvider(cfg *config.Config, kind llm.Kind) error {
 //
 // One implementation for both callers, so the error cannot name a list the
 // caller computed differently.
-func unpricedModelList(p llm.Provider) []string {
+func unpricedModelList(cfg *config.Config, p llm.Provider) []string {
 	if llm.SourceOf(p) == llm.CredentialNotNeeded {
 		return nil // local model, genuinely free
 	}
 	table := pricing.NewTable()
 	var missing []string
-	for _, m := range []string{p.ModelFor(llm.TierStrong), p.ModelFor(llm.TierCheap)} {
-		if m == "" {
+	for _, line := range llmRoleLines(cfg, p) {
+		if line.local || line.model == "" {
 			continue
 		}
-		if _, ok := table.Lookup(m); !ok && !contains(missing, m) {
-			missing = append(missing, m)
+		if _, ok := table.Lookup(line.model); !ok && !contains(missing, line.model) {
+			missing = append(missing, line.model)
 		}
 	}
 	return missing
 }
 
-func unpricedModels(p llm.Provider) string {
-	if llm.SourceOf(p) == llm.CredentialNotNeeded {
-		return "" // local model, genuinely free
-	}
-	table := pricing.NewTable()
-	var missing []string
-	for _, m := range []string{p.ModelFor(llm.TierStrong), p.ModelFor(llm.TierCheap)} {
-		if m == "" {
-			continue
-		}
-		if _, ok := table.Lookup(m); !ok && !contains(missing, m) {
-			missing = append(missing, m)
-		}
-	}
+func unpricedModels(cfg *config.Config, p llm.Provider) string {
+	missing := unpricedModelList(cfg, p)
 	if len(missing) == 0 {
 		return ""
 	}
@@ -1173,23 +1275,8 @@ func buildLLMWithClient(cfg *config.Config, client *http.Client) (provider llm.P
 	// model names. Omitting them meant `mole config set llm.model …` on its own
 	// was silently discarded in favour of whatever autodetection found — the
 	// exact surprise this precedence rule exists to prevent.
-	if cfg.LLM.APIKey != "" || cfg.LLM.BaseURL != "" || cfg.LLM.Provider != "" ||
-		cfg.LLM.Model != "" || cfg.LLM.CheapModel != "" {
-		kind := llm.Kind(cfg.LLM.Provider)
-		if kind == "" {
-			kind = llm.KindAnthropic
-		}
-		if err := checkKeyMatchesProvider(cfg, kind); err != nil {
-			return nil, "", err
-		}
-		p, err := llm.New(llm.Config{
-			Kind:        kind,
-			APIKey:      cfg.LLM.APIKey,
-			BaseURL:     cfg.LLM.BaseURL,
-			StrongModel: cfg.LLM.Model,
-			CheapModel:  cfg.LLM.CheapModel,
-			Timeout:     cfg.LLM.Timeout,
-		}, client)
+	if llmConfigured(cfg) {
+		p, err := buildConfiguredLLM(cfg, client, llm.New)
 		if err != nil {
 			return nil, "", err
 		}
@@ -1220,16 +1307,198 @@ func buildLLMWithClient(cfg *config.Config, client *http.Client) (provider llm.P
 	return p, suffix, nil
 }
 
-// cmdConfigTestLLM makes the smallest possible real call.
-//
-// Auth, model name, and endpoint are all things that fail at the first call
-// rather than at configuration time. Discovering that twenty leads into a
-// session wastes the search spend already incurred, so this exists to fail
-// early and cheaply.
-func cmdConfigTestLLM(ctx context.Context) error {
+// llmConfigured reports whether any llm setting is explicit, which turns auto-detection off.
+func llmConfigured(cfg *config.Config) bool {
+	l := cfg.LLM
+	return l.APIKey != "" || l.BaseURL != "" || l.Provider != "" ||
+		l.Model != "" || l.CheapModel != "" || l.HasRoleBlocks()
+}
+
+// verifierModelFor returns the verifier role's model; empty means the cheap model.
+func verifierModelFor(cfg *config.Config) string {
+	return cfg.LLM.Resolve(string(llm.RoleVerifier)).Model
+}
+
+// kindOf returns a provider setting as a Kind, empty meaning anthropic.
+func kindOf(provider string) llm.Kind {
+	if provider == "" {
+		return llm.KindAnthropic
+	}
+	return llm.Kind(provider)
+}
+
+// llmBackend identifies one provider to build: roles sharing it share the provider.
+type llmBackend struct {
+	kind    llm.Kind
+	key     string
+	baseURL string
+}
+
+// llmRole is one role's resolved provider settings.
+type llmRole struct {
+	role    llm.ModelRole
+	backend llmBackend
+	model   string
+}
+
+// roleSettings resolves every role without checking it; a verifier with no model and no
+// endpoint of its own follows the cheap role.
+func roleSettings(cfg *config.Config) []llmRole {
+	var out []llmRole
+	for _, role := range llm.Roles {
+		r := cfg.LLM.Resolve(string(role))
+		out = append(out, llmRole{role: role, backend: llmBackend{kindOf(r.Provider), r.APIKey, r.BaseURL}, model: r.Model})
+	}
+	verifier, cheap := &out[2], out[1]
+	b := cfg.LLM.Verifier
+	ownEndpoint := b != nil && (b.Provider != "" || b.APIKey != "" || b.BaseURL != "")
+	if verifier.model == "" && !ownEndpoint {
+		verifier.backend = cheap.backend
+	}
+	return out
+}
+
+// resolveLLMRoles is roleSettings with each role's key and model checked.
+func resolveLLMRoles(cfg *config.Config) ([]llmRole, error) {
+	out := roleSettings(cfg)
+	for _, r := range out {
+		kind := kindOf(cfg.LLM.Resolve(string(r.role)).Provider)
+		if err := checkRoleKeyMatchesProvider(cfg, r.role, kind); err != nil {
+			return nil, err
+		}
+		if err := refuseAnthropicKeyElsewhere(cfg, r); err != nil {
+			return nil, err
+		}
+	}
+	if verifier, cheap := out[2], out[1]; verifier.model == "" && verifier.backend != cheap.backend {
+		return nil, errors.New("llm.verifier has its own provider but no model (set llm.verifier.model or llm.verifier-model)")
+	}
+	return out, nil
+}
+
+// refuseAnthropicKeyElsewhere refuses an Anthropic key on an openai-compatible
+// backend, naming the setting the key came from and never the key.
+func refuseAnthropicKeyElsewhere(cfg *config.Config, r llmRole) error {
+	if r.backend.kind != llm.KindOpenAICompatible || !strings.HasPrefix(r.backend.key, "sk-ant-") {
+		return nil
+	}
+	setting := "llm.api-key"
+	if b := cfg.LLM.Block(string(r.role)); b != nil && b.APIKey != "" {
+		setting = "llm." + string(r.role) + ".api-key"
+	}
+	return fmt.Errorf("%s holds an Anthropic key, but the %s role uses provider %s; "+
+		"set a key for that provider instead", setting, r.role, llm.KindOpenAICompatible)
+}
+
+// llmGroup is one built backend and the model of each role it serves.
+type llmGroup struct {
+	backend  llmBackend
+	members  map[llm.ModelRole]string
+	provider llm.Provider
+}
+
+// buildLLMGroups builds one provider per distinct backend and returns the resolved roles.
+func buildLLMGroups(cfg *config.Config, client *http.Client,
+	newProvider func(llm.Config, *http.Client) (llm.Provider, error)) ([]*llmGroup, []llmRole, error) {
+	roles, err := resolveLLMRoles(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	var groups []*llmGroup
+	topLevel := llmBackend{kindOf(cfg.LLM.Provider), cfg.LLM.APIKey, cfg.LLM.BaseURL}
+	for _, r := range roles {
+		var g *llmGroup
+		for _, existing := range groups {
+			if existing.backend == r.backend {
+				g = existing
+			}
+		}
+		if g == nil {
+			g = &llmGroup{backend: r.backend, members: map[llm.ModelRole]string{}}
+			groups = append(groups, g)
+		}
+		g.members[r.role] = r.model
+	}
+
+	for _, g := range groups {
+		c := llm.Config{Kind: g.backend.kind, APIKey: g.backend.key, BaseURL: g.backend.baseURL, Timeout: cfg.LLM.Timeout}
+		strong, hasStrong := g.members[llm.RoleStrong]
+		c.StrongModel = strong
+		if m, ok := g.members[llm.RoleCheap]; ok {
+			c.CheapModel = m
+		} else {
+			c.CheapModel = g.members[llm.RoleVerifier]
+		}
+		if !hasStrong {
+			c.StrongModel = c.CheapModel
+		}
+		// A top-level backend left by the strong role keeps llm.model as its tier default.
+		if c.StrongModel == "" && g.backend == topLevel {
+			c.StrongModel = cfg.LLM.Model
+		}
+		p, err := newProvider(c, client)
+		if err != nil {
+			if len(groups) > 1 {
+				return nil, nil, fmt.Errorf("%s role: %w", strings.Join(roleNames(g.members), "/"), err)
+			}
+			return nil, nil, err
+		}
+		g.provider = p
+	}
+	return groups, roles, nil
+}
+
+// buildConfiguredLLM builds one provider per distinct backend, routing roles when there is more than one.
+func buildConfiguredLLM(cfg *config.Config, client *http.Client,
+	newProvider func(llm.Config, *http.Client) (llm.Provider, error)) (llm.Provider, error) {
+	groups, roles, err := buildLLMGroups(cfg, client, newProvider)
+	if err != nil {
+		return nil, err
+	}
+	if len(groups) == 1 {
+		return groups[0].provider, nil
+	}
+
+	providers := map[llm.ModelRole]llm.Provider{}
+	models := map[llm.ModelRole]string{}
+	for _, r := range roles {
+		var p llm.Provider
+		for _, g := range groups {
+			if g.backend == r.backend {
+				p = g.provider
+			}
+		}
+		providers[r.role] = p
+		models[r.role] = r.model
+		switch {
+		case r.model != "":
+		case r.role == llm.RoleStrong:
+			models[r.role] = p.ModelFor(llm.TierStrong)
+		case r.role == llm.RoleCheap:
+			models[r.role] = p.ModelFor(llm.TierCheap)
+		}
+	}
+	return llm.NewRouter(providers, models), nil
+}
+
+func roleNames(members map[llm.ModelRole]string) []string {
+	var names []string
+	for _, role := range llm.Roles {
+		if _, ok := members[role]; ok {
+			names = append(names, string(role))
+		}
+	}
+	return names
+}
+
+// cmdConfigTestLLM makes the smallest possible real call to each configured backend.
+func cmdConfigTestLLM(ctx context.Context, w io.Writer) error {
 	cfg, err := loadConfigForEdit()
 	if err != nil {
 		return err
+	}
+	if llmConfigured(cfg) {
+		return testLLMBackends(ctx, w, cfg, nil, llm.New)
 	}
 
 	provider, reason, err := buildLLM(cfg)
@@ -1239,13 +1508,49 @@ func cmdConfigTestLLM(ctx context.Context) error {
 	if provider == nil {
 		return errors.New("no model provider configured or detected (run: mole doctor)")
 	}
+	return pingLLM(ctx, w, cfg, "strong/cheap/verifier", provider, provider.ModelFor(llm.TierCheap), reason)
+}
 
-	model := provider.ModelFor(llm.TierCheap)
+// testLLMBackends pings each distinct backend once, printing a line per backend;
+// it fails when any ping fails.
+func testLLMBackends(ctx context.Context, w io.Writer, cfg *config.Config, client *http.Client,
+	newProvider func(llm.Config, *http.Client) (llm.Provider, error)) error {
+	groups, _, err := buildLLMGroups(cfg, client, newProvider)
+	if err != nil {
+		return err
+	}
+	var failed []string
+	for _, g := range groups {
+		roles := strings.Join(roleNames(g.members), "/")
+		if err := pingLLM(ctx, w, cfg, roles, g.provider, pingModel(g), ""); err != nil {
+			fmt.Fprintf(w, "✗ %s: %v\n", roles, err)
+			failed = append(failed, roles)
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("model check failed for %s", strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+// pingModel picks the cheapest-tier model a backend serves: cheap, then verifier, then strong.
+func pingModel(g *llmGroup) string {
+	for _, role := range []llm.ModelRole{llm.RoleCheap, llm.RoleVerifier} {
+		if m, ok := g.members[role]; ok {
+			return firstNonEmpty(m, g.provider.ModelFor(llm.TierCheap))
+		}
+	}
+	return firstNonEmpty(g.members[llm.RoleStrong], g.provider.ModelFor(llm.TierStrong))
+}
+
+// pingLLM makes one tiny call to model on provider and prints the reply, tokens and cost.
+func pingLLM(ctx context.Context, w io.Writer, cfg *config.Config, roles string, provider llm.Provider,
+	model, reason string) error {
 	src := llm.SourceOf(provider)
 	if reason != "" {
-		fmt.Printf("using %s via %s (%s)\n", model, src, reason)
+		fmt.Fprintf(w, "%s: %s via %s (%s)\n", roles, model, src, reason)
 	} else {
-		fmt.Printf("using %s via %s\n", model, src)
+		fmt.Fprintf(w, "%s: %s via %s\n", roles, model, src)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -1253,12 +1558,11 @@ func cmdConfigTestLLM(ctx context.Context) error {
 
 	resp, err := provider.Complete(ctx, llm.Request{
 		Tier:      llm.TierCheap,
+		Model:     model,
 		MaxTokens: 16,
 		Messages:  []llm.Message{llm.User("Reply with the single word: ok")},
 	})
 	if err != nil {
-		// Distinguish "your credential is wrong" from "the service hiccuped",
-		// because the fix is completely different.
 		switch {
 		case errors.Is(err, llm.ErrUnauthorized):
 			return fmt.Errorf("credential rejected by the provider: %w", err)
@@ -1273,28 +1577,28 @@ func cmdConfigTestLLM(ctx context.Context) error {
 		return fmt.Errorf("provider refused the request (category %q)", resp.RefusalCategory)
 	}
 
-	cost, perr := pricing.NewTable().Cost(resp.Model, pricing.Usage{
+	tbl := pricing.NewTable()
+	_ = tbl.Declare(cfg.Pricing)
+	cost, perr := tbl.Cost(resp.Model, pricing.Usage{
 		InputTokens:      resp.Usage.InputTokens,
 		OutputTokens:     resp.Usage.OutputTokens,
 		CacheReadTokens:  resp.Usage.CacheReadTokens,
 		CacheWriteTokens: resp.Usage.CacheWriteTokens,
 	})
 
-	fmt.Printf("✓ reply: %q\n", strings.TrimSpace(resp.Text))
-	fmt.Printf("  model: %s · %d in / %d out tokens · %v\n",
+	fmt.Fprintf(w, "✓ reply: %q\n", strings.TrimSpace(resp.Text))
+	fmt.Fprintf(w, "  model: %s · %d in / %d out tokens · %v\n",
 		resp.Model, resp.Usage.InputTokens, resp.Usage.OutputTokens,
 		resp.Elapsed.Round(time.Millisecond))
 
 	switch {
 	case perr != nil:
-		// An unpriced model is not a failure, but it does mean USD budgeting
-		// cannot work for it — better said now than discovered mid-session.
-		fmt.Printf("  cost:  unpriced — %v\n", perr)
-		fmt.Printf("         USD budgets will not work with this model; use --tokens\n")
+		fmt.Fprintf(w, "  cost:  unpriced — %v\n", perr)
+		fmt.Fprintf(w, "         USD budgets will not work with this model; use --tokens\n")
 	case cost.USDMicros == 0:
-		fmt.Printf("  cost:  free (local model)\n")
+		fmt.Fprintf(w, "  cost:  free (local model)\n")
 	default:
-		fmt.Printf("  cost:  %s\n", core.FormatUSD(cost.USDMicros))
+		fmt.Fprintf(w, "  cost:  %s\n", core.FormatUSD(cost.USDMicros))
 	}
 	return nil
 }

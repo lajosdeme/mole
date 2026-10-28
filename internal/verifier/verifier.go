@@ -509,10 +509,10 @@ func positivesOf(judged []Judged, mode ConfirmMode) []Pair {
 	return out
 }
 
-// applyConfirmations is the rule, separated from the calls so it can be tested
-// without a provider.
-func (v *Verifier) applyConfirmations(judged []Judged, second map[string]Relation, res *Result) []Judged {
-	out := make([]Judged, 0, len(judged))
+// ApplyConfirmations keeps a positive verdict second agrees with and sets "neither" where it
+// disagrees; a pair absent from second (keyed by Pair.Key) keeps its first verdict.
+func ApplyConfirmations(judged []Judged, second map[string]Relation) (out []Judged, confirmed, unconfirmed int) {
+	out = make([]Judged, 0, len(judged))
 	for _, j := range judged {
 		if j.Relation.EffectOf() == EffectInert {
 			out = append(out, j)
@@ -521,20 +521,25 @@ func (v *Verifier) applyConfirmations(judged []Judged, second map[string]Relatio
 		got, asked := second[j.Pair.Key()]
 		switch {
 		case !asked:
-			// Never re-judged. Keep the first verdict; see the doc comment.
 			out = append(out, j)
 		case got == j.Relation.Normalize():
-			res.PairsConfirmed++
+			confirmed++
 			out = append(out, j)
 		default:
-			// The second look disagreed. The edge is not written, and the pair
-			// falls back to the relation that changes nothing.
-			res.PairsUnconfirmed++
+			unconfirmed++
 			j.Relation = RelNeither
 			j.Rationale = "withheld: a second judgement did not agree (" + string(got) + ")"
 			out = append(out, j)
 		}
 	}
+	return out, confirmed, unconfirmed
+}
+
+// applyConfirmations runs ApplyConfirmations and tallies the counts onto res.
+func (v *Verifier) applyConfirmations(judged []Judged, second map[string]Relation, res *Result) []Judged {
+	out, confirmed, unconfirmed := ApplyConfirmations(judged, second)
+	res.PairsConfirmed += confirmed
+	res.PairsUnconfirmed += unconfirmed
 	return out
 }
 

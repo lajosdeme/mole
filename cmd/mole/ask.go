@@ -113,7 +113,7 @@ func cmdAsk(ctx context.Context, w io.Writer, o askOpts) error {
 	// as $0.0000 and mean "not measured", which is worth saying out loud.
 	unpriced := ""
 	if model != nil {
-		if missing := unpricedModelList(model); len(missing) > 0 {
+		if missing := unpricedModelList(cfg, model); len(missing) > 0 {
 			unpriced = missing[0]
 		}
 	}

@@ -120,6 +120,7 @@ func (p *Planner) InitialLeads(ctx context.Context, sess *core.Session) (*Plan, 
 	fence := fenceToken()
 	req := llm.Request{
 		Tier:      llm.TierStrong,
+		Effort:    llm.StrongEffort,
 		System:    plannerSystemPrompt,
 		Messages:  []llm.Message{llm.User(decomposePrompt(fence, sess.Prompt, pl.MaxInitialLeads))},
 		MaxTokens: plannerMaxTokens,
@@ -212,6 +213,7 @@ func (p *Planner) Replan(ctx context.Context, sess *core.Session, d *Digest, dep
 	fence := fenceToken()
 	resp, err := pl.LLM.Complete(ctx, llm.Request{
 		Tier:      llm.TierStrong,
+		Effort:    llm.StrongEffort,
 		System:    plannerSystemPrompt,
 		Messages:  []llm.Message{llm.User(replanPrompt(fence, d, pl.MaxNewLeadsPerReplan))},
 		MaxTokens: plannerMaxTokens,

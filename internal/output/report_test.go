@@ -22,6 +22,7 @@ type fakeLLM struct {
 	err     error
 	refused bool
 	calls   int
+	effort  string
 	// elapsed is what Complete reports as the call's wall-clock time. Zero
 	// unless a test sets it, so every existing test is unaffected.
 	elapsed time.Duration
@@ -31,6 +32,7 @@ func (f *fakeLLM) Name() string               { return "fake" }
 func (f *fakeLLM) ModelFor(t llm.Tier) string { return "fake-model" }
 func (f *fakeLLM) Complete(ctx context.Context, req llm.Request) (*llm.Response, error) {
 	f.calls++
+	f.effort = req.Effort
 	if len(req.Messages) > 0 {
 		f.prompt = req.Messages[0].Text
 	}
@@ -673,5 +675,29 @@ func TestReportCarriesElapsed(t *testing.T) {
 	}
 	if rep.Elapsed != 2*time.Second {
 		t.Errorf("rep.Elapsed = %v, want 2s", rep.Elapsed)
+	}
+}
+
+// TestReportSynthesisSendsMediumEffortByDefault checks the generator's default effort.
+func TestReportSynthesisSendsMediumEffortByDefault(t *testing.T) {
+	st, sid := newStore(t, []core.Claim{claim("A finding.", "https://example.com/a", "a finding")})
+	f := &fakeLLM{reply: func(string) string { return "A finding [1]." }}
+	if _, err := (&output.Generator{LLM: f}).Generate(context.Background(), st, sid); err != nil {
+		t.Fatal(err)
+	}
+	if f.effort != "medium" {
+		t.Errorf("effort = %q, want medium", f.effort)
+	}
+}
+
+// TestReportSynthesisSendsTheGivenEffort checks a set Effort reaches the request.
+func TestReportSynthesisSendsTheGivenEffort(t *testing.T) {
+	st, sid := newStore(t, []core.Claim{claim("A finding.", "https://example.com/a", "a finding")})
+	f := &fakeLLM{reply: func(string) string { return "A finding [1]." }}
+	if _, err := (&output.Generator{LLM: f, Effort: "xhigh"}).Generate(context.Background(), st, sid); err != nil {
+		t.Fatal(err)
+	}
+	if f.effort != "xhigh" {
+		t.Errorf("effort = %q, want xhigh", f.effort)
 	}
 }

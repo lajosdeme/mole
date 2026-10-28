@@ -401,3 +401,23 @@ func TestHiddenReasoningTokensAreCharged(t *testing.T) {
 		})
 	}
 }
+
+// TestOpenAICompatibleIgnoresEffort checks a set Effort neither fails the call nor reaches the body.
+func TestOpenAICompatibleIgnoresEffort(t *testing.T) {
+	var gotBody []byte
+	srv := serve(t, 200, openAIFixture, func(_ *http.Request, b []byte) { gotBody = b })
+	p, err := llm.New(llm.Config{
+		Kind: llm.KindOpenAICompatible, APIKey: "sk-test", BaseURL: srv.URL, StrongModel: "deepseek-chat",
+	}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Complete(context.Background(), llm.Request{
+		Tier: llm.TierStrong, Effort: "medium", Messages: []llm.Message{llm.User("hi")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(gotBody), "effort") {
+		t.Errorf("effort reached the request body: %s", gotBody)
+	}
+}

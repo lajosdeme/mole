@@ -173,7 +173,7 @@ func cmdServe(ctx context.Context, o serveOpts) error {
 	runner := &session.Runner{
 		Store:             db,
 		Actor:             actor,
-		VerifierModel:     cfg.LLM.VerifierModel,
+		VerifierModel:     verifierModelFor(cfg),
 		VerifierBatchSize: cfg.LLM.VerifierBatchSize,
 		Owner:             "daemon",
 		Log:               actor.Log,
