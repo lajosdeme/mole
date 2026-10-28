@@ -76,8 +76,7 @@ func TestBatchesRunConcurrently(t *testing.T) {
 }
 
 // promptPairRE reads the numbered data pairs out of an adjudication prompt,
-// capturing each side's "claim" field and ignoring its other members. It
-// requires "b", which the instructions' shape example does not carry.
+// capturing each side's "claim" field and ignoring its other members.
 var promptPairRE = regexp.MustCompile(
 	`\{"pair":(\d+),"a":\{"claim":"((?:[^"\\]|\\.)*)"[^}]*\},"b":\{"claim":"((?:[^"\\]|\\.)*)"[^}]*\}\}`)
 
