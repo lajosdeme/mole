@@ -167,11 +167,12 @@ func (a *LocalComputeActor) Run(ctx context.Context, lead core.Lead) (*Result, e
 
 		inputUsed += llm.EstimateTokens(len(text))
 		out, err := miner.Mine(ctx, MineInput{
-			Lead:      lead,
-			SourceURL: cite,
-			Title:     evidenceTitle(p),
-			Text:      text,
-			MaxClaims: maxClaims,
+			Lead:          lead,
+			SourceURL:     cite,
+			Title:         evidenceTitle(p),
+			Text:          text,
+			MaxClaims:     maxClaims,
+			MaxQualifiers: budget.withDefaults().MaxQualifiersPerSource,
 		})
 		if out.HasCall {
 			res.Costs = append(res.Costs, out.Call)

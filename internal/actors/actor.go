@@ -103,6 +103,9 @@ type Budget struct {
 	// MaxClaimsPerSource bounds a single page's contribution, so one verbose
 	// document cannot dominate the graph.
 	MaxClaimsPerSource int
+	// MaxQualifiersPerSource bounds a source's corrections and caveats, which do
+	// not count toward MaxClaimsPerSource.
+	MaxQualifiersPerSource int
 
 	// AlwaysFetch ignores content the search provider supplied and fetches the
 	// page itself.
@@ -150,6 +153,9 @@ func (b Budget) ChunkOptions() llm.ChunkOptions {
 	return o
 }
 
+// defaultQualifiersPerSource is the qualifier ceiling when a budget sets none.
+const defaultQualifiersPerSource = 4
+
 func (b Budget) withDefaults() Budget {
 	if b.MaxInputTokens <= 0 {
 		b.MaxInputTokens = 60_000
@@ -159,6 +165,9 @@ func (b Budget) withDefaults() Budget {
 	}
 	if b.MaxClaimsPerSource <= 0 {
 		b.MaxClaimsPerSource = 8
+	}
+	if b.MaxQualifiersPerSource <= 0 {
+		b.MaxQualifiersPerSource = defaultQualifiersPerSource
 	}
 	return b
 }

@@ -58,6 +58,8 @@ type AcademicActor struct {
 	Rank func(question string, passages []string, n int) []int
 
 	SessionID string
+	// Question is the session's root question, shown to the miner beside the lead.
+	Question string
 }
 
 func (a *AcademicActor) Type() core.ActorType { return core.ActorAcademic }
@@ -132,9 +134,11 @@ func (a *AcademicActor) Run(ctx context.Context, lead core.Lead) (*Result, error
 			SourceURL: citationURL(p),
 			Title:     p.Title,
 			// Exact, from the provider — not guessed from a page.
-			PublishedAt: p.PublishedAt,
-			Text:        abstract,
-			MaxClaims:   maxClaims,
+			PublishedAt:   p.PublishedAt,
+			Text:          abstract,
+			MaxClaims:     maxClaims,
+			MaxQualifiers: budget.withDefaults().MaxQualifiersPerSource,
+			Question:      a.Question,
 		})
 		if out.HasCall {
 			res.Costs = append(res.Costs, out.Call)

@@ -51,6 +51,10 @@ type MineInput struct {
 	Offset int
 
 	MaxClaims int
+	// MaxQualifiers caps claims marked as corrections or caveats, apart from MaxClaims.
+	MaxQualifiers int
+	// Question is the session's root question; empty shows only the lead.
+	Question string
 }
 
 // MineOutput is what one passage yielded.
@@ -63,6 +67,8 @@ type MineOutput struct {
 	HasCall  bool
 	Proposed int
 	Rejected int
+	// Qualifiers counts the returned claims marked as corrections or caveats.
+	Qualifiers int
 }
 
 func (m *Miner) logger() *slog.Logger {
@@ -80,11 +86,13 @@ func (m *Miner) logger() *slog.Logger {
 // and citing it would put mole's name behind something a model composed.
 func (m *Miner) Mine(ctx context.Context, in MineInput) (MineOutput, error) {
 	var out MineOutput
-	if in.MaxClaims <= 0 {
+	if in.MaxClaims <= 0 && in.MaxQualifiers <= 0 {
 		in.MaxClaims = 8
 	}
+	in.MaxClaims, in.MaxQualifiers = max(in.MaxClaims, 0), max(in.MaxQualifiers, 0)
 
-	prompt := mineUserPrompt(fenceToken(), in.Lead.Query, in.MaxClaims, in.Title, in.SourceURL, in.Text)
+	prompt := mineUserPrompt(fenceToken(), in.Question, in.Lead.Query, in.MaxClaims, in.MaxQualifiers,
+		in.Title, in.SourceURL, in.Text)
 	resp, err := m.LLM.Complete(ctx, llm.Request{
 		Tier:      llm.TierCheap,
 		System:    mineSystemPrompt,
@@ -111,7 +119,15 @@ func (m *Miner) Mine(ctx context.Context, in MineInput) (MineOutput, error) {
 	}
 
 	now := time.Now().UTC()
+	regular := 0
 	for _, candidate := range mined {
+		if regular >= in.MaxClaims && out.Qualifiers >= in.MaxQualifiers {
+			break
+		}
+		qualifier := candidate.qualifier()
+		if (qualifier && out.Qualifiers >= in.MaxQualifiers) || (!qualifier && regular >= in.MaxClaims) {
+			continue
+		}
 		out.Proposed++
 
 		if strings.TrimSpace(candidate.Text) == "" {
@@ -145,8 +161,10 @@ func (m *Miner) Mine(ctx context.Context, in MineInput) (MineOutput, error) {
 			RootClaimID: rootClaimOf(in.Lead),
 			VerifyDepth: in.Lead.VerifyDepth,
 		})
-		if len(out.Claims) >= in.MaxClaims {
-			break
+		if qualifier {
+			out.Qualifiers++
+		} else {
+			regular++
 		}
 	}
 	return out, nil

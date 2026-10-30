@@ -42,6 +42,8 @@ type WebActor struct {
 
 	// SessionID scopes the claims and fetch outcomes this actor records.
 	SessionID string
+	// Question is the session's root question, shown to the miner beside the lead.
+	Question string
 
 	// Cache, when set, holds documents already fetched in this session. The
 	// nested check §9.3 describes: two distinct queries converging on one page
@@ -146,8 +148,13 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 			// stayed pinned at the full allowance for every chunk — which is
 			// verbatim the failure the comment above says was already fixed once,
 			// reintroduced by the mode that does not use the field it counts.
-			remainingClaims := budget.MaxClaimsPerSource - len(summary.Claims) - summary.Rows
-			if remainingClaims <= 0 {
+			remainingClaims := budget.MaxClaimsPerSource - (len(summary.Claims) - summary.Qualifiers) - summary.Rows
+			// Qualifiers have their own ceiling; dataset mode extracts none.
+			remainingQualifiers := budget.MaxQualifiersPerSource - summary.Qualifiers
+			if a.Rows != nil {
+				remainingQualifiers = 0
+			}
+			if remainingClaims <= 0 && remainingQualifiers <= 0 {
 				break
 			}
 
@@ -168,7 +175,8 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 				continue
 			}
 
-			claims, usage, err := a.mineChunk(ctx, lead, src, doc, chunk, remainingClaims, budget, res)
+			claims, qualifiers, usage, err := a.mineChunk(ctx, lead, src, doc, chunk,
+				max(remainingClaims, 0), remainingQualifiers, res)
 			inputTokensUsed += usage.InputTokens + usage.CacheReadTokens
 			if err != nil {
 				// One bad chunk does not fail the lead; the others may still
@@ -182,6 +190,7 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 			}
 			res.Claims = append(res.Claims, claims...)
 			summary.Claims = append(summary.Claims, claims...)
+			summary.Qualifiers += qualifiers
 		}
 
 		if len(summary.Claims) > 0 || summary.Rows > 0 || doc.Excerpt != "" {
@@ -323,6 +332,8 @@ func mergeByURL(lists [][]search.Result) []search.Result {
 // MaxClaimsPerSource, and whether it counted toward the run summary.
 type sourceSummary struct {
 	Claims []core.Claim
+	// Qualifiers counts the claims in Claims marked as corrections or caveats.
+	Qualifiers int
 	// Rows counts what dataset mode extracted from this source, not the rows
 	// themselves.
 	Rows int
@@ -459,19 +470,21 @@ func (a *WebActor) mineChunk(
 	doc *extract.Document,
 	chunk llm.Chunk,
 	maxClaims int,
-	budget Budget,
+	maxQualifiers int,
 	res *Result,
-) ([]core.Claim, llm.Usage, error) {
+) ([]core.Claim, int, llm.Usage, error) {
 	miner := &Miner{LLM: a.LLM, Pricing: a.Pricing, Log: a.Log, SessionID: a.SessionID}
 
 	out, err := miner.Mine(ctx, MineInput{
-		Lead:        lead,
-		SourceURL:   src.url,
-		Title:       doc.Title,
-		PublishedAt: doc.PublishedAt,
-		Text:        chunk.Text,
-		Offset:      chunk.Start,
-		MaxClaims:   maxClaims,
+		Lead:          lead,
+		SourceURL:     src.url,
+		Title:         doc.Title,
+		PublishedAt:   doc.PublishedAt,
+		Text:          chunk.Text,
+		Offset:        chunk.Start,
+		MaxClaims:     maxClaims,
+		MaxQualifiers: maxQualifiers,
+		Question:      a.Question,
 	})
 	if out.HasCall {
 		// Recorded before the error is returned: the tokens were spent whether
@@ -480,7 +493,7 @@ func (a *WebActor) mineChunk(
 	}
 	res.Stats.ClaimsProposed += out.Proposed
 	res.Stats.ClaimsRejected += out.Rejected
-	return out.Claims, out.Usage, err
+	return out.Claims, out.Qualifiers, out.Usage, err
 }
 
 // toolCall prices a model response into a ledger row.

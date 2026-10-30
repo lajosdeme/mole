@@ -408,6 +408,7 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 	// limiters global. Only the per-session fields are replaced.
 	actor := *r.Actor
 	actor.SessionID = sess.ID
+	actor.Question = sess.Prompt
 	// Dataset mode: the actor extracts rows instead of claims (M9, §13). Built
 	// here rather than by the caller because it needs the session id, exactly as
 	// the actor's own copy does.
@@ -802,6 +803,7 @@ func (r *Runner) actorsFor(spec Spec, web *actors.WebActor) map[core.ActorType]a
 			// claims to another.
 			academic := *r.Academic
 			academic.SessionID = web.SessionID
+			academic.Question = web.Question
 			academic.Store = r.Store
 			out[core.ActorAcademic] = &academic
 		}
