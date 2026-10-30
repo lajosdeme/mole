@@ -475,8 +475,8 @@ func TestDecomposeAsksToTraceTheHeadlineFigure(t *testing.T) {
 	}
 }
 
-// TestReplanJudgesAnsweredOnAgreementAndOrigin checks replan no longer counts claims to answer.
-func TestReplanJudgesAnsweredOnAgreementAndOrigin(t *testing.T) {
+// TestReplanJudgesAnsweredFromTheDigest checks the answered rule uses only what the state shows.
+func TestReplanJudgesAnsweredFromTheDigest(t *testing.T) {
 	f := &fakeLLM{reply: func(string) string { return `{"done":false}` }}
 	p := &planner.Planner{LLM: f}
 	if _, err := p.Replan(context.Background(), session("q"), planner.NewDigest("q", 0), 0); err != nil {
@@ -486,8 +486,17 @@ func TestReplanJudgesAnsweredOnAgreementAndOrigin(t *testing.T) {
 	if strings.Contains(prompt, "several claims is") {
 		t.Errorf("replan prompt still answers on claim count:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "agree on the figure AND its origin") {
-		t.Errorf("replan prompt lacks the agreement-and-origin rule:\n%s", prompt)
+	for _, want := range []string{
+		"has claims and the state reports no contradiction",
+		"stays open until it has claims of its own",
+		"Where the sub-question asks for a figure",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("replan prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "origin\n  is known") || strings.Contains(prompt, "its origin is known") {
+		t.Errorf("replan prompt still asks for an origin the state cannot show:\n%s", prompt)
 	}
 }
 

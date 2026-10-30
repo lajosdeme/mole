@@ -2279,3 +2279,26 @@ func TestOverriddenDoneStillEndsAtMaxLeads(t *testing.T) {
 		t.Errorf("stopped because %q, want max_leads", res.StoppedBecause)
 	}
 }
+
+// TestOverriddenDoneThatAddsNothingEndsTheRun checks a done with no new questions ends the run in both replan paths.
+func TestOverriddenDoneThatAddsNothingEndsTheRun(t *testing.T) {
+	for name, every := range map[string]int{"drain": 3, "mid-loop": 1} {
+		r := newRig(t, 50*core.MicrosPerUSD, []string{planJSON("a", "b", "c")},
+			func(int, core.Lead) (*actors.Result, error) { return okResult(1, 1_000), nil })
+		r.exec.Planner = &planner.Planner{LLM: r.llm, MaxInitialLeads: 3, ReplanEvery: every, MaxDepth: 2}
+
+		res, err := r.exec.Run(context.Background(), r.sess.ID)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if res.Replans != 1 {
+			t.Errorf("%s: %d replans, want 1", name, res.Replans)
+		}
+		if res.StoppedBecause != "planner reported done" {
+			t.Errorf("%s: stopped because %q, want the planner's done", name, res.StoppedBecause)
+		}
+		if got := len(ranQueries(t, r)); got != 3 {
+			t.Errorf("%s: %d leads ran, want the 3 planned", name, got)
+		}
+	}
+}

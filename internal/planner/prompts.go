@@ -65,9 +65,14 @@ Return JSON only:
 {"questions":[{"id":"q9","question":"...","queries":["...","..."]}],"answered":["q1","q3"],"done":false,"rationale":"one sentence"}
 
 Rules:
-- "answered" lists ids of open sub-questions that now have enough evidence.
-  A sub-question is answered when its claims agree on the figure AND its origin
-  is known; one with leads but no claims is not.
+- "answered" lists ids of open sub-questions that now have enough evidence,
+  judged only from the state below. A sub-question is answered when it has
+  claims; one with leads but no claims is not.
+  Where the sub-question asks for a figure, it is answered only when it
+  has claims and the state reports no contradiction.
+  The sub-question tracing a figure to its origin
+  stays open until it has claims of its own; claims on other sub-questions do
+  not answer it.
 - "questions" proposes at most %d NEW sub-questions. Propose them only to close
   a real gap — a sub-question with leads and no claims may need rephrasing, and
   a gap nothing has attempted may need covering.

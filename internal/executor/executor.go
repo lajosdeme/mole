@@ -1077,7 +1077,8 @@ func (e *Executor) replan(
 		digest.MarkAnswered(id)
 	}
 	if plan.Done {
-		if !keepResearching(sess, digest, e.now()) {
+		// Done is honoured when the plan adds nothing or the override threshold is passed.
+		if len(plan.Leads) == 0 || !keepResearching(sess, digest, e.now()) {
 			return 0, true, "planner reported done", nil
 		}
 		e.emit("replanning", "ignoring the planner's done: most of the allowance is left and the research is unsettled")
