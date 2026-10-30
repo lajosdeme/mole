@@ -624,6 +624,31 @@ func TestAShortSessionStillVerifies(t *testing.T) {
 	}
 }
 
+// TestAStoppedFinalConfirmIsReported checks that positives whose second look
+// the wall clock refused are named in Degraded.
+func TestAStoppedFinalConfirmIsReported(t *testing.T) {
+	clock := &fakeClock{}
+	r := wallClockRig(t, time.Hour, clock, func(call int, prompt string) (string, error) {
+		clock.advance(2 * time.Minute)
+		return judgeEveryPair(verifier.RelContradicts)(call, prompt)
+	})
+	r.v.Confirm = verifier.ConfirmBoth
+	r.v.BatchSize = 8 // all six pairs in one first-look batch
+	clock.t = r.sess.CreatedAt.Add(time.Hour - 200*time.Second)
+
+	res, err := r.v.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := r.llm.count(); got != 1 {
+		t.Errorf("%d calls, want only the first look", got)
+	}
+	if !strings.Contains(res.Degraded, "6 positive(s) left unconfirmed") ||
+		!strings.Contains(res.Degraded, "wall clock") {
+		t.Errorf("degraded = %q, want the unconfirmed positive and the wall clock named", res.Degraded)
+	}
+}
+
 // TestNoWallClockMeansNoTimeGating checks that a session without MaxWallClock
 // launches every wave however long batches take.
 func TestNoWallClockMeansNoTimeGating(t *testing.T) {

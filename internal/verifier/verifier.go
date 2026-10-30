@@ -267,11 +267,16 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		// wave's verdicts are kept unconfirmed rather than asked again.
 		if stop == nil || !isFatal(stop) {
 			var confirmStop error
-			judged, confirmStop = v.confirm(ctx, sessionID, groups, res)
+			var unasked int
+			judged, unasked, confirmStop = v.confirm(ctx, sessionID, groups, res)
 			// A fatal second look stops the pass like a fatal first look
 			// would; a non-fatal one is left for the next wave to meet.
 			if stop == nil && confirmStop != nil && isFatal(confirmStop) {
 				stop = confirmStop
+			}
+			// The final wave's stopped second look has no next wave to meet it.
+			if stop == nil && confirmStop != nil && end == len(batches) {
+				res.Degraded = fmt.Sprintf("%d positive(s) left unconfirmed: %v", unasked, confirmStop)
 			}
 		} else {
 			judged = slices.Concat(groups...)
@@ -474,10 +479,10 @@ func confirms(mode ConfirmMode, e Effect) bool {
 // Rests on one property it cannot check: the model must be able to disagree
 // with itself. Re-judging reproduced the stored verdict 54% of the time, so a
 // provider caching identical requests would make this a silent no-op.
-func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Judged, res *Result) ([]Judged, error) {
-	judged := slices.Concat(groups...)
+func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Judged, res *Result) (judged []Judged, unasked int, stop error) {
+	judged = slices.Concat(groups...)
 	if len(judged) == 0 {
-		return judged, nil
+		return judged, 0, nil
 	}
 
 	// Each first-look batch's positives are batched on their own, never
@@ -487,17 +492,17 @@ func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Jud
 		batches = append(batches, Batches(positivesOf(g, v.Confirm), v.BatchSize)...)
 	}
 	if len(batches) == 0 {
-		return judged, nil
+		return judged, 0, nil
 	}
 
 	second := map[string]Relation{}
 	// A pair whose second look never happened keeps its first verdict,
 	// whatever the stop.
-	again, _, _, _, stop := v.runBatches(ctx, sessionID, batches, res)
+	again, missed, _, _, stop := v.runBatches(ctx, sessionID, batches, res)
 	for _, j := range again {
 		second[j.Pair.Key()] = j.Relation.Normalize()
 	}
-	return v.applyConfirmations(judged, second, res), stop
+	return v.applyConfirmations(judged, second, res), len(missed), stop
 }
 
 // positivesOf is the subset worth a second call: verdicts building an edge of a kind
