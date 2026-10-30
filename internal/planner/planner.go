@@ -242,9 +242,7 @@ func (p *Planner) Replan(ctx context.Context, sess *core.Session, d *Digest, dep
 	// the digest.
 	out.Answered = parsed.Answered
 
-	if !out.Done {
-		out.Leads = LeadsAcross(sess.ID, sessionActors(sess), out.Questions, depth+1, nil)
-	}
+	out.Leads = LeadsAcross(sess.ID, sessionActors(sess), out.Questions, depth+1, nil)
 	return out, nil
 }
 

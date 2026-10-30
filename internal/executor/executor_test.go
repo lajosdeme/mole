@@ -2180,3 +2180,102 @@ func TestUncheckedContradictionsAreNotCounted(t *testing.T) {
 		t.Errorf("contradictions = %d with none re-checked, want 0", res.Contradictions)
 	}
 }
+
+// doneWith is a replan reply that reports done and still proposes questions.
+func doneWith(questions ...string) string {
+	var qs []map[string]string
+	for i, q := range questions {
+		qs = append(qs, map[string]string{"id": fmt.Sprintf("q%d", 10+i), "question": q})
+	}
+	b, _ := json.Marshal(map[string]any{"done": true, "questions": qs})
+	return string(b)
+}
+
+// ranQueries lists the query of every lead the actor was given.
+func ranQueries(t *testing.T, r *rig) []string {
+	t.Helper()
+	var out []string
+	for _, l := range leadsOf(t, r) {
+		if l.Status == core.LeadDone || l.Status == core.LeadSkippedCache {
+			out = append(out, l.Query)
+		}
+	}
+	return out
+}
+
+// TestPlannerDoneIsOverriddenWhileMostOfTheBudgetIsLeft checks an early done is ignored and logged.
+func TestPlannerDoneIsOverriddenWhileMostOfTheBudgetIsLeft(t *testing.T) {
+	r := newRig(t, 50*core.MicrosPerUSD, []string{planJSON("a", "b", "c"), doneWith("origin")},
+		func(int, core.Lead) (*actors.Result, error) { return okResult(1, 1_000), nil })
+	var mu sync.Mutex
+	var events []executor.Event
+	r.exec.Progress = func(ev executor.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, ev)
+	}
+
+	if _, err := r.exec.Run(context.Background(), r.sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(ranQueries(t, r), "origin") {
+		t.Errorf("the sub-question proposed with an early done never ran: %v", ranQueries(t, r))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	logged := false
+	for _, ev := range events {
+		if strings.Contains(ev.Detail, "ignoring the planner's done") {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Errorf("the override was not recorded in the progress log: %v", events)
+	}
+}
+
+// TestPlannerDoneIsHonouredPastTheThreshold checks done ends the run once half the allowance is gone.
+func TestPlannerDoneIsHonouredPastTheThreshold(t *testing.T) {
+	cases := map[string]struct {
+		budget   int64
+		maxLeads int64
+		cost     int64
+	}{
+		"half the leads run":   {budget: 50 * core.MicrosPerUSD, maxLeads: 6, cost: 1_000},
+		"half the budget gone": {budget: 300_000, maxLeads: 50, cost: 60_000},
+	}
+	for name, c := range cases {
+		r := newRigWithCeilings(t, c.budget, c.maxLeads, 200,
+			[]string{planJSON("a", "b", "c"), doneWith("origin")},
+			func(int, core.Lead) (*actors.Result, error) { return okResult(1, c.cost), nil })
+
+		res, err := r.exec.Run(context.Background(), r.sess.ID)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if slices.Contains(ranQueries(t, r), "origin") {
+			t.Errorf("%s: done was overridden past the threshold", name)
+		}
+		if res.StoppedBecause != "planner reported done" {
+			t.Errorf("%s: stopped because %q, want the planner's done", name, res.StoppedBecause)
+		}
+	}
+}
+
+// TestOverriddenDoneStillEndsAtMaxLeads checks the lead ceiling ends a run whose done was overridden.
+func TestOverriddenDoneStillEndsAtMaxLeads(t *testing.T) {
+	r := newRigWithCeilings(t, 50*core.MicrosPerUSD, 5, 200,
+		[]string{planJSON("a", "b"), doneWith("c", "d", "e"), doneWith("f", "g", "h")},
+		func(int, core.Lead) (*actors.Result, error) { return okResult(1, 1_000), nil })
+
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(ranQueries(t, r)); got > 5 {
+		t.Errorf("%d leads ran against a ceiling of 5", got)
+	}
+	if res.StoppedBecause != "max_leads" {
+		t.Errorf("stopped because %q, want max_leads", res.StoppedBecause)
+	}
+}

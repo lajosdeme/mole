@@ -459,3 +459,49 @@ func TestLeadsCarryAtMostThreeShortQueries(t *testing.T) {
 		}
 	}
 }
+
+// TestDecomposeAsksToTraceTheHeadlineFigure checks decompose asks for a provenance sub-question.
+func TestDecomposeAsksToTraceTheHeadlineFigure(t *testing.T) {
+	f := &fakeLLM{reply: func(string) string { return plan("one") }}
+	p := &planner.Planner{LLM: f}
+	if _, err := p.InitialLeads(context.Background(), session("q")); err != nil {
+		t.Fatal(err)
+	}
+	prompt := f.lastPrompt()
+	for _, want := range []string{"trace the most-quoted figure to its origin", "denominator", "criticised or superseded"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("decompose prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestReplanJudgesAnsweredOnAgreementAndOrigin checks replan no longer counts claims to answer.
+func TestReplanJudgesAnsweredOnAgreementAndOrigin(t *testing.T) {
+	f := &fakeLLM{reply: func(string) string { return `{"done":false}` }}
+	p := &planner.Planner{LLM: f}
+	if _, err := p.Replan(context.Background(), session("q"), planner.NewDigest("q", 0), 0); err != nil {
+		t.Fatal(err)
+	}
+	prompt := f.lastPrompt()
+	if strings.Contains(prompt, "several claims is") {
+		t.Errorf("replan prompt still answers on claim count:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "agree on the figure AND its origin") {
+		t.Errorf("replan prompt lacks the agreement-and-origin rule:\n%s", prompt)
+	}
+}
+
+// TestReplanKeepsLeadsWhenDone checks a done plan still carries leads for its questions.
+func TestReplanKeepsLeadsWhenDone(t *testing.T) {
+	f := &fakeLLM{reply: func(string) string {
+		return `{"done":true,"questions":[{"id":"q9","question":"where does the figure come from"}]}`
+	}}
+	p := &planner.Planner{LLM: f}
+	got, err := p.Replan(context.Background(), session("q"), planner.NewDigest("q", 0), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Done || len(got.Leads) != 1 {
+		t.Errorf("done=%v leads=%d, want done with 1 lead", got.Done, len(got.Leads))
+	}
+}

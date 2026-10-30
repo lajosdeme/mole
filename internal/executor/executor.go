@@ -1077,7 +1077,12 @@ func (e *Executor) replan(
 		digest.MarkAnswered(id)
 	}
 	if plan.Done {
-		return 0, true, "planner reported done", nil
+		if !keepResearching(sess, digest, e.now()) {
+			return 0, true, "planner reported done", nil
+		}
+		e.emit("replanning", "ignoring the planner's done: most of the allowance is left and the research is unsettled")
+		e.logger().InfoContext(ctx, "planner done overridden",
+			"remaining", digest.BudgetRemaining, "open", len(digest.Open()), "contradictions", digest.Contradictions)
 	}
 
 	assigned := digest.AddQuestions(plan.Questions)
@@ -1096,6 +1101,18 @@ func (e *Executor) replan(
 		return 0, false, "", err
 	}
 	return len(plan.Leads), false, "", nil
+}
+
+// keepResearching reports whether a planner's done is ignored: over half the allowance
+// left, under half of max_leads run, and contradictions or open sub-questions.
+func keepResearching(sess *core.Session, d *planner.Digest, now time.Time) bool {
+	if sess.RemainingFraction(now) <= 0.5 {
+		return false
+	}
+	if sess.MaxLeads > 0 && 2*sess.LeadCount >= sess.MaxLeads {
+		return false
+	}
+	return d.Contradictions > 0 || len(d.Open()) > 0
 }
 
 // planWithBudget reserves, runs a planning call, and settles it.

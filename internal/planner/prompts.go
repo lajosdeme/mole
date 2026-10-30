@@ -40,6 +40,9 @@ Rules:
 - Do not include sub-questions that merely restate the original in other words.
 - If the question is already narrow enough to research directly, return it as a
   single sub-question.
+- Always include one sub-question to trace the most-quoted figure to its origin:
+  who measured it, how (denominator, years, method), and whether it has been
+  criticised or superseded by primary, peer-reviewed or government estimates.
 - Give each sub-question 2-3 "queries": short keyword searches of at most 10
   words, as typed into a search engine, not sentences. One must look for the
   origin or criticism of the key figure, e.g. "<figure> <entity> source" or
@@ -63,8 +66,8 @@ Return JSON only:
 
 Rules:
 - "answered" lists ids of open sub-questions that now have enough evidence.
-  Judge that from the claim counts: a sub-question with several claims is
-  probably answered; one with leads but no claims is not.
+  A sub-question is answered when its claims agree on the figure AND its origin
+  is known; one with leads but no claims is not.
 - "questions" proposes at most %d NEW sub-questions. Propose them only to close
   a real gap — a sub-question with leads and no claims may need rephrasing, and
   a gap nothing has attempted may need covering.
