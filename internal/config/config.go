@@ -365,6 +365,8 @@ func (c *Config) applyEnv() {
 	setIf(&c.LLM.APIKey, llmKeys...)
 	setIf(&c.LLM.BaseURL, "MOLE_LLM_BASE_URL")
 	setIf(&c.LLM.Model, "MOLE_LLM_MODEL")
+	setIf(&c.LLM.VerifierModel, "MOLE_LLM_VERIFIER_MODEL")
+	setIf(&c.LLM.RecheckModel, "MOLE_LLM_RECHECK_MODEL")
 	setIf(&c.ContactEmail, "MOLE_CONTACT_EMAIL")
 }
 

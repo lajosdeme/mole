@@ -13,6 +13,7 @@ import (
 	"github.com/lajosdeme/mole/internal/config"
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/executor"
+	"github.com/lajosdeme/mole/internal/session"
 	"github.com/lajosdeme/mole/internal/store/sqlite"
 
 	"github.com/lajosdeme/mole/internal/verifier"
@@ -392,5 +393,15 @@ func TestASkippedGroundingPassSaysSo(t *testing.T) {
 	out := captureStdout(t, func() { reportGrounding(&rep, researchOpts{}) })
 	if !strings.Contains(out, "3 claim(s) re-read") {
 		t.Errorf("a completed pass did not report its result: %q", out)
+	}
+}
+
+// TestFillOutputCarriesTheRecheckCounts.
+func TestFillOutputCarriesTheRecheckCounts(t *testing.T) {
+	var out researchOutput
+	fillOutput(&out, &session.Result{Run: &executor.Result{Contradictions: 3, Rechecked: 10, Withheld: 7}})
+	if out.Contradictions != 3 || out.Rechecked != 10 || out.Withheld != 7 {
+		t.Errorf("contradictions/rechecked/withheld = %d/%d/%d, want 3/10/7",
+			out.Contradictions, out.Rechecked, out.Withheld)
 	}
 }
