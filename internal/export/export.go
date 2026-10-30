@@ -20,11 +20,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/store"
 	"github.com/lajosdeme/mole/internal/tools/fetch"
+	"github.com/lajosdeme/mole/internal/verifier"
 )
 
 // SchemaVersion is the envelope's version.
@@ -244,6 +246,9 @@ type Options struct {
 	// Nil takes the stored receipt, so a session verified once renders with its
 	// receipt for ever after at no cost.
 	Receipt *Receipt
+	// RecheckModel, when set, leaves contradictions not yet re-checked out of
+	// Conflicts and notes how many in Report.Degraded; a toolkit session is exempt.
+	RecheckModel string
 }
 
 // Build assembles the export from stored state.
@@ -321,10 +326,28 @@ func Build(ctx context.Context, st store.Store, sessionID string, opts Options) 
 	if ex.Receipt == nil {
 		ex.Receipt = storedReceipt(sess.ReceiptJSON)
 	}
+	if verifier.Rechecks(sess, opts.RecheckModel) {
+		var n int
+		if edges, n = verifier.WithholdUnrechecked(edges); n > 0 {
+			ex.Report.Degraded = withWithheldNote(ex.Report.Degraded, verifier.WithheldNote(n))
+		}
+	}
 	ex.Conflicts = conflictsOf(edges, claims)
 	ex.Coverage = coverageOf(claims, fetches)
 	ex.Cost = costOf(byRole, totals, callCount)
 	return ex, nil
+}
+
+// withWithheldNote appends note to degraded unless it already says it.
+func withWithheldNote(degraded, note string) string {
+	switch {
+	case strings.Contains(degraded, note):
+		return degraded
+	case degraded == "":
+		return note
+	default:
+		return degraded + "; " + note
+	}
 }
 
 // storedCitations decodes the bibliography written with the report.

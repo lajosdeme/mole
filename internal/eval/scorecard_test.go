@@ -13,6 +13,7 @@ import (
 	"github.com/lajosdeme/mole/internal/eval"
 	"github.com/lajosdeme/mole/internal/store"
 	"github.com/lajosdeme/mole/internal/store/sqlite"
+	"github.com/lajosdeme/mole/internal/verifier"
 )
 
 type fixture struct {
@@ -520,6 +521,12 @@ func TestStalenessSeparationSaysWhenDatesAreMissing(t *testing.T) {
 // cannot know them in advance.
 func scoreWith(t *testing.T, claims []core.Claim, edges func(ids map[string]string) []core.ClaimEdge) eval.Scorecard {
 	t.Helper()
+	return scoreWithOpts(t, claims, edges, eval.Options{})
+}
+
+// scoreWithOpts is scoreWith with the scoring options chosen.
+func scoreWithOpts(t *testing.T, claims []core.Claim, edges func(ids map[string]string) []core.ClaimEdge, opts eval.Options) eval.Scorecard {
+	t.Helper()
 	ctx := context.Background()
 	f := newFixture(t, core.MicrosPerUSD)
 
@@ -551,7 +558,7 @@ func scoreWith(t *testing.T, claims []core.Claim, edges func(ids map[string]stri
 		}
 	}
 
-	card, err := eval.Score(ctx, f.db, f.sess.ID, eval.Options{})
+	card, err := eval.Score(ctx, f.db, f.sess.ID, opts)
 	if err != nil {
 		t.Fatalf("score: %v", err)
 	}
@@ -665,5 +672,30 @@ func TestTheBudgetMetricIsNamedForWhatItMeasures(t *testing.T) {
 		if x.Name == "budget adherence" {
 			t.Error(`the metric is still published as "budget adherence"`)
 		}
+	}
+}
+
+// TestDisagreementRateLabelsUncheckedContradictions checks unchecked edges are counted and labelled under a re-check model.
+func TestDisagreementRateLabelsUncheckedContradictions(t *testing.T) {
+	claims := func() []core.Claim {
+		return []core.Claim{
+			{Text: "The effect is large.", Source: "https://a.example/1", Quote: "a quote long enough to be real evidence one"},
+			{Text: "The effect is absent.", Source: "https://b.example/1", Quote: "a quote long enough to be real evidence two"},
+			{Text: "The effect is small.", Source: "https://c.example/1", Quote: "a quote long enough to be real evidence three"},
+		}
+	}
+	edges := func(ids map[string]string) []core.ClaimEdge {
+		return []core.ClaimEdge{
+			{FromID: ids["The effect is large."], ToID: ids["The effect is absent."], Kind: core.EdgeContradicts, CreatedBy: "model"},
+			{FromID: ids["The effect is large."], ToID: ids["The effect is small."], Kind: core.EdgeContradicts, CreatedBy: verifier.RecheckedBy + "strict"},
+		}
+	}
+	on := findMetric(scoreWithOpts(t, claims(), edges, eval.Options{RecheckModel: "strict"}), "disagreement rate")
+	if on == nil || !strings.Contains(on.Detail, "2 contradiction(s)") || !strings.Contains(on.Detail, "1 not re-checked") {
+		t.Errorf("detail with a re-check model = %+v; want both counted and one labelled", on)
+	}
+	off := findMetric(scoreWithOpts(t, claims(), edges, eval.Options{}), "disagreement rate")
+	if off == nil || strings.Contains(off.Detail, "re-checked") {
+		t.Errorf("detail without a re-check model = %+v; want no label", off)
 	}
 }

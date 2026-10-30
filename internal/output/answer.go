@@ -62,6 +62,11 @@ func (g *Generator) Answer(ctx context.Context, st store.Store, sessionID, quest
 		return nil, err
 	}
 
+	withheld := 0
+	if verifier.Rechecks(sess, g.RecheckModel) {
+		edges, withheld = verifier.WithholdUnrechecked(edges)
+	}
+
 	rep := &Report{SessionID: sessionID, Question: question}
 
 	if len(claims) == 0 {
@@ -100,6 +105,7 @@ func (g *Generator) Answer(ctx context.Context, st store.Store, sessionID, quest
 	if gen.LLM == nil {
 		rep.Body = fallbackBody(question, findings, index)
 		rep.Degraded = "no budget left to synthesize; evidence listed unsynthesized"
+		noteWithheld(rep, withheld)
 		return rep, nil
 	}
 
@@ -114,6 +120,7 @@ func (g *Generator) Answer(ctx context.Context, st store.Store, sessionID, quest
 		MaxTokens: gen.MaxTokens,
 	}, rep, wording{noun: "answer", verb: "answer"},
 		fallbackBody(question, findings, index))
+	noteWithheld(rep, withheld)
 	return rep, nil
 }
 

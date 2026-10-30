@@ -50,6 +50,12 @@ func (f *fakeLLM) Complete(ctx context.Context, req llm.Request) (*llm.Response,
 
 func newStore(t *testing.T, claims []core.Claim) (store.Store, string) {
 	t.Helper()
+	return newStoreWith(t, claims, core.ActorWeb)
+}
+
+// newStoreWith is newStore with the session's actor types chosen.
+func newStoreWith(t *testing.T, claims []core.Claim, actors ...core.ActorType) (store.Store, string) {
+	t.Helper()
 	ctx := context.Background()
 
 	db, err := sqlite.Open(filepath.Join(t.TempDir(), "t.db"), sqlite.Options{})
@@ -63,7 +69,7 @@ func newStore(t *testing.T, claims []core.Claim) (store.Store, string) {
 
 	sess, err := budget.New(db, budget.DefaultConfig()).CreateSession(ctx, budget.SessionSpec{
 		Prompt: "what is the consensus on byte-level LLMs?", Mode: core.ModeReport,
-		ActorTypes: []core.ActorType{core.ActorWeb},
+		ActorTypes: actors,
 		BudgetUnit: core.BudgetUSD, Budget: 3 * core.MicrosPerUSD,
 	})
 	if err != nil {

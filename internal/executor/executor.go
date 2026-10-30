@@ -1402,7 +1402,7 @@ func (e *Executor) recheck(ctx context.Context, res *Result) {
 	}
 	res.Rechecked += out.Rechecked
 	res.Withheld += out.Withheld
-	res.Contradictions = max(0, res.Contradictions-out.Withheld)
+	res.Contradictions += out.Contradictions
 	if out.Degraded != "" {
 		res.VerifyDegraded = out.Degraded
 	}

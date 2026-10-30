@@ -620,7 +620,7 @@ func (r *Runner) finish(
 		return r.finishDataset(ctx, sess.ID, *schema), ground
 	}
 
-	gen := &output.Generator{LLM: actor.LLM, MaxClaims: r.MaxFindings, WithholdUnrechecked: r.RecheckModel != ""}
+	gen := &output.Generator{LLM: actor.LLM, MaxClaims: r.MaxFindings, RecheckModel: r.RecheckModel}
 	var reservation *core.Reservation
 	if cancelled {
 		// Cancel means stop spending. Escrow is still released and every hold

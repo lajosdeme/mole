@@ -1347,6 +1347,8 @@ type verifierLLM struct {
 	strictModel    string
 	strictRelation string
 	strictCalls    int
+	// strictErr, when set, fails every strictModel adjudication.
+	strictErr error
 }
 
 func (v *verifierLLM) Name() string               { return "fake" }
@@ -1372,6 +1374,9 @@ func (v *verifierLLM) Complete(_ context.Context, req llm.Request) (*llm.Respons
 		if v.strictModel != "" && req.Model == v.strictModel {
 			v.strictCalls++
 			rel = v.strictRelation
+			if v.strictErr != nil {
+				return resp, v.strictErr
+			}
 		}
 		var b strings.Builder
 		b.WriteString(`{"verdicts":[`)
@@ -2145,5 +2150,33 @@ func TestNoRecheckModelMeansNoPostLoopRecheck(t *testing.T) {
 	}
 	if res.Contradictions == 0 {
 		t.Error("no contradictions found; the test proves nothing")
+	}
+}
+
+// TestUncheckedContradictionsAreNotCounted checks the run's count leaves out contradictions never re-checked.
+func TestUncheckedContradictionsAreNotCounted(t *testing.T) {
+	r, fl := recheckRig(t, "strict")
+	fl.strictErr = errors.New("provider hiccup")
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored int
+	if err := r.db.Read(context.Background(), func(ctx context.Context, q store.Queries) error {
+		edges, err := q.ListEdges(ctx, r.sess.ID, 0)
+		for _, e := range edges {
+			if e.Kind == core.EdgeContradicts {
+				stored++
+			}
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if stored == 0 {
+		t.Fatal("no contradictions stored; the test proves nothing")
+	}
+	if res.Contradictions != 0 {
+		t.Errorf("contradictions = %d with none re-checked, want 0", res.Contradictions)
 	}
 }

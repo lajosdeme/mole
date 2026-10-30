@@ -112,7 +112,7 @@ func cmdEval(ctx context.Context, path, sessionID string, o evalOpts) error {
 		return err
 	}
 
-	var opts eval.Options
+	opts := eval.Options{RecheckModel: configuredRecheckModel()}
 	if o.citations {
 		// The same fetch and extract path the actor used. A different
 		// extractor would disagree on whitespace and report mismatches that

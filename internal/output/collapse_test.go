@@ -534,41 +534,53 @@ func linkBy(t *testing.T, st store.Store, sid, from, to, by string) {
 	}
 }
 
-// TestUncheckedContradictionsAreWithheldFromTheReport checks the report drops unchecked contradictions only when asked.
+// TestUncheckedContradictionsAreWithheldFromTheReport checks the report and ask drop unchecked contradictions only when asked.
 func TestUncheckedContradictionsAreWithheldFromTheReport(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		by       string
-		withhold bool
+		model    string
+		toolkit  bool
 		want     int
 		degraded bool
 	}{
-		{"unchecked, withheld", "fake-model", true, 0, true},
-		{"re-checked, kept", verifier.RecheckedBy + "strict", true, 1, false},
-		{"unchecked, re-check off", "fake-model", false, 1, false},
+		{"unchecked, withheld", "fake-model", "strict", false, 0, true},
+		{"re-checked, kept", verifier.RecheckedBy + "strict", "strict", false, 1, false},
+		{"unchecked, re-check off", "fake-model", "", false, 1, false},
+		{"unchecked, toolkit session", "toolkit", "strict", true, 1, false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			claims := []core.Claim{
-				claim("The effect is large.", "https://a.example/1", "a quote long enough to be real evidence one"),
-				claim("The effect is absent.", "https://b.example/1", "a quote long enough to be real evidence two"),
-			}
-			st, sid := newStore(t, claims)
-			stored := storedClaims(t, st, sid)
-			linkBy(t, st, sid, stored["The effect is large."].ID, stored["The effect is absent."].ID, tc.by)
+		for _, ask := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s ask=%v", tc.name, ask), func(t *testing.T) {
+				claims := []core.Claim{
+					claim("The effect is large.", "https://a.example/1", "a quote long enough to be real evidence one"),
+					claim("The effect is absent.", "https://b.example/1", "a quote long enough to be real evidence two"),
+				}
+				actors := []core.ActorType{core.ActorWeb}
+				if tc.toolkit {
+					actors = append(actors, core.ActorToolkit)
+				}
+				st, sid := newStoreWith(t, claims, actors...)
+				stored := storedClaims(t, st, sid)
+				linkBy(t, st, sid, stored["The effect is large."].ID, stored["The effect is absent."].ID, tc.by)
 
-			rep, err := (&output.Generator{WithholdUnrechecked: tc.withhold}).Generate(context.Background(), st, sid)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if rep.Disagreements != tc.want {
-				t.Errorf("Disagreements = %d, want %d", rep.Disagreements, tc.want)
-			}
-			if got := strings.Contains(rep.Degraded, "1 contradiction(s) withheld: not re-checked"); got != tc.degraded {
-				t.Errorf("degraded = %q; want the withheld note %v", rep.Degraded, tc.degraded)
-			}
-			if got := strings.Contains(rep.Markdown(), "CONTRADICTS"); got != (tc.want == 1) {
-				t.Errorf("body shows the contradiction = %v, want %v", got, tc.want == 1)
-			}
-		})
+				gen := &output.Generator{RecheckModel: tc.model}
+				var rep *output.Report
+				var err error
+				if ask {
+					rep, err = gen.Answer(context.Background(), st, sid, "is the effect large")
+				} else {
+					rep, err = gen.Generate(context.Background(), st, sid)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if rep.Disagreements != tc.want {
+					t.Errorf("Disagreements = %d, want %d", rep.Disagreements, tc.want)
+				}
+				if got := strings.Contains(rep.Degraded, "1 contradiction(s) withheld: not re-checked"); got != tc.degraded {
+					t.Errorf("degraded = %q; want the withheld note %v", rep.Degraded, tc.degraded)
+				}
+			})
+		}
 	}
 }

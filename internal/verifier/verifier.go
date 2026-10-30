@@ -378,7 +378,7 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		}
 		res.Rechecked += out.confirmed + out.unconfirmed
 		res.Withheld += out.unconfirmed
-		res.Contradictions -= out.unconfirmed
+		res.Contradictions = out.confirmed
 		if out.stop != nil {
 			res.Degraded = joinDegraded(res.Degraded, out.degraded())
 		}
@@ -892,6 +892,17 @@ func WithholdUnrechecked(edges []*core.ClaimEdge) ([]*core.ClaimEdge, int) {
 	return out, len(edges) - len(out)
 }
 
+// Rechecks reports whether sess is re-checked under recheckModel; a toolkit
+// session never is.
+func Rechecks(sess *core.Session, recheckModel string) bool {
+	return recheckModel != "" && sess != nil && !slices.Contains(sess.ActorTypes, core.ActorToolkit)
+}
+
+// WithheldNote is the degraded note for n withheld contradictions.
+func WithheldNote(n int) string {
+	return fmt.Sprintf("%d contradiction(s) withheld: not re-checked", n)
+}
+
 // scoringEdges is the graph confidence is derived over: without unchecked
 // contradictions when RecheckModel is set, else edges unchanged.
 func (v *Verifier) scoringEdges(edges []*core.ClaimEdge) []*core.ClaimEdge {
@@ -922,16 +933,16 @@ func (v *Verifier) Recheck(ctx context.Context, sessionID string) (*Result, erro
 	}
 	res.PairsConfirmed, res.PairsUnconfirmed = out.confirmed, out.unconfirmed
 	res.Rechecked, res.Withheld = out.confirmed+out.unconfirmed, out.unconfirmed
-	res.Contradictions = out.considered - out.unconfirmed
+	res.Contradictions = out.confirmed
 	return res, nil
 }
 
 // recheckOutcome is what one re-check did; withheld holds the pair keys it removed.
 type recheckOutcome struct {
-	considered, judged, unjudged int
-	confirmed, unconfirmed       int
-	withheld                     map[string]bool
-	stop                         error
+	judged, unjudged       int
+	confirmed, unconfirmed int
+	withheld               map[string]bool
+	stop                   error
 }
 
 func (o recheckOutcome) degraded() string {
@@ -979,7 +990,6 @@ func (v *Verifier) recheck(ctx context.Context, sessionID string, only map[strin
 		pairs = append(pairs, p)
 		edgeOf[p.Key()] = e
 	}
-	out.considered = len(pairs)
 	if len(pairs) == 0 {
 		return out, nil
 	}

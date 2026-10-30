@@ -109,9 +109,9 @@ type Generator struct {
 	MaxTokens int
 	// Effort is the synthesis call's effort; empty sends llm.StrongEffort.
 	Effort string
-	// WithholdUnrechecked leaves contradicts edges not yet re-checked out of the
-	// report and notes how many in Degraded.
-	WithholdUnrechecked bool
+	// RecheckModel, when set, leaves contradicts edges not yet re-checked out of
+	// the report and notes how many in Degraded; a toolkit session is exempt.
+	RecheckModel string
 }
 
 const (
@@ -166,7 +166,7 @@ func (g *Generator) Generate(ctx context.Context, st store.Store, sessionID stri
 	}
 
 	withheld := 0
-	if gen.WithholdUnrechecked {
+	if verifier.Rechecks(sess, gen.RecheckModel) {
 		edges, withheld = verifier.WithholdUnrechecked(edges)
 	}
 
@@ -228,7 +228,7 @@ func noteWithheld(rep *Report, n int) {
 	if n == 0 {
 		return
 	}
-	note := fmt.Sprintf("%d contradiction(s) withheld: not re-checked", n)
+	note := verifier.WithheldNote(n)
 	if rep.Degraded == "" {
 		rep.Degraded = note
 	} else {

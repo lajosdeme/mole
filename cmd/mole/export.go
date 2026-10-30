@@ -77,6 +77,9 @@ func cmdExport(ctx context.Context, sessionID string, o exportOpts) error {
 	defer db.Close()
 
 	opts := export.Options{MoleVersion: moleVersion()}
+	if opts.RecheckModel, err = recheckModelFromConfig(); err != nil {
+		return err
+	}
 	if o.verify {
 		receipt, err := verifyReceipt(ctx, db, sessionID)
 		if err != nil {

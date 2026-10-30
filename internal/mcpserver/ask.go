@@ -106,7 +106,7 @@ func (d Deps) Ask(ctx context.Context, in AskIn) (AskOut, error) {
 	ledCfg := budget.DefaultConfig()
 	ledCfg.Pricing = d.Pricing
 	led := budget.New(d.Store, ledCfg)
-	gen := &output.Generator{LLM: d.LLM}
+	gen := &output.Generator{LLM: d.LLM, RecheckModel: d.RecheckModel}
 
 	var (
 		askSess     *core.Session

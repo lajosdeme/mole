@@ -505,3 +505,35 @@ func TestUncheckedContradictionsScoreWhenRecheckIsOff(t *testing.T) {
 		}
 	}
 }
+
+// TestRunCountsOnlyRecheckedContradictions checks a pass counts no contradiction its re-check never reached.
+func TestRunCountsOnlyRecheckedContradictions(t *testing.T) {
+	claims := recheckClaims()
+	r := newRig(t, 2_000_000, claims, firstCallThen(verifier.RelContradicts,
+		func(int, string) (string, error) { return "", errors.New("provider hiccup") }))
+	r.v.RecheckModel = "strict"
+	r.v.BatchSize = 100
+
+	res, err := r.v.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countKind(r.edges(t), core.EdgeContradicts) == 0 {
+		t.Fatal("the pass wrote no contradictions")
+	}
+	if res.Contradictions != 0 {
+		t.Errorf("contradictions = %d with none re-checked, want 0", res.Contradictions)
+	}
+}
+
+// TestRechecksIsOffForToolkitSessions checks a toolkit session never withholds.
+func TestRechecksIsOffForToolkitSessions(t *testing.T) {
+	web := &core.Session{ActorTypes: []core.ActorType{core.ActorWeb}}
+	kit := &core.Session{ActorTypes: []core.ActorType{core.ActorWeb, core.ActorToolkit}}
+	if !verifier.Rechecks(web, "strict") {
+		t.Error("an autonomous session with a re-check model does not withhold")
+	}
+	if verifier.Rechecks(web, "") || verifier.Rechecks(kit, "strict") || verifier.Rechecks(nil, "strict") {
+		t.Error("withholds with no re-check model, for a toolkit session, or for no session")
+	}
+}

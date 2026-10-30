@@ -304,7 +304,7 @@ func TestTraceSaysWhenNothingIsVerified(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	printClaimGraph(&buf, claims, nil)
+	printClaimGraph(&buf, claims, nil, false)
 	if got := buf.String(); !strings.Contains(got, "none verified") {
 		t.Errorf("unscored claims reported without explanation:\n%s", got)
 	}
@@ -312,14 +312,14 @@ func TestTraceSaysWhenNothingIsVerified(t *testing.T) {
 	// Partially scored says which, rather than implying the rest are worthless.
 	claims[0].VerifiedAt = &verified
 	buf.Reset()
-	printClaimGraph(&buf, claims, nil)
+	printClaimGraph(&buf, claims, nil, false)
 	if got := buf.String(); !strings.Contains(got, "1 verified, 1 not") {
 		t.Errorf("partial verification not distinguished:\n%s", got)
 	}
 
 	claims[1].VerifiedAt = &verified
 	buf.Reset()
-	printClaimGraph(&buf, claims, nil)
+	printClaimGraph(&buf, claims, nil, false)
 	if got := buf.String(); !strings.Contains(got, "all verified") {
 		t.Errorf("fully verified session not reported as such:\n%s", got)
 	}
@@ -339,7 +339,7 @@ func TestTraceNamesContradictions(t *testing.T) {
 	}}
 
 	var buf bytes.Buffer
-	printClaimGraph(&buf, claims, edges)
+	printClaimGraph(&buf, claims, edges, false)
 	got := buf.String()
 
 	for _, want := range []string{
@@ -399,5 +399,30 @@ func TestTheDeprecatedConfirmFlagDoesNotInventPrecedence(t *testing.T) {
 					tc.mode, tc.noConfirm, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestTraceLabelsUncheckedContradictions checks trace shows every contradiction and labels the unchecked.
+func TestTraceLabelsUncheckedContradictions(t *testing.T) {
+	claims := []*core.Claim{
+		{ID: "c_1", Text: "The effect is large."},
+		{ID: "c_2", Text: "No such effect was found."},
+		{ID: "c_3", Text: "The effect is small."},
+	}
+	edges := []*core.ClaimEdge{
+		{FromID: "c_1", ToID: "c_2", Kind: core.EdgeContradicts, CreatedBy: "model"},
+		{FromID: "c_1", ToID: "c_3", Kind: core.EdgeContradicts, CreatedBy: verifier.RecheckedBy + "strict"},
+	}
+	var on, off bytes.Buffer
+	printClaimGraph(&on, claims, edges, true)
+	printClaimGraph(&off, claims, edges, false)
+	if got := strings.Count(on.String(), "(not re-checked)"); got != 1 {
+		t.Errorf("%d labels with a re-check model, want 1:\n%s", got, on.String())
+	}
+	if !strings.Contains(on.String(), "No such effect") || !strings.Contains(on.String(), "The effect is small") {
+		t.Errorf("trace hides a contradiction:\n%s", on.String())
+	}
+	if strings.Contains(off.String(), "re-checked") {
+		t.Errorf("labelled without a re-check model:\n%s", off.String())
 	}
 }
