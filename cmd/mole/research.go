@@ -406,7 +406,7 @@ func maxLeadsFor(o researchOpts) int {
 	return planner.DefaultMaxInitialLeads + depth*planner.DefaultMaxNewLeadsPerReplan + 2
 }
 
-// checkMaxLeadsIsValid rejects a negative --max-leads.
+// checkTimeoutIsValid rejects a zero or negative --timeout.
 func checkTimeoutIsValid(timeout time.Duration) error {
 	if timeout <= 0 {
 		return fmt.Errorf("--timeout must be positive (got %v)", timeout)
@@ -414,6 +414,7 @@ func checkTimeoutIsValid(timeout time.Duration) error {
 	return nil
 }
 
+// checkMaxLeadsIsValid rejects a negative --max-leads.
 func checkMaxLeadsIsValid(maxLeads int) error {
 	if maxLeads < 0 {
 		return fmt.Errorf("--max-leads must not be negative (got %d)", maxLeads)
