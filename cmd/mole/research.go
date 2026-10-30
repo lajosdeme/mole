@@ -291,6 +291,7 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 		Academic:          academicActor,
 		Local:             localActor,
 		VerifierModel:     verifierModelFor(cfg),
+		RecheckModel:      cfg.LLM.RecheckModel,
 		VerifierBatchSize: cfg.LLM.VerifierBatchSize,
 		MaxFindings:       o.maxFindings,
 		Confirm:           confirmMode,

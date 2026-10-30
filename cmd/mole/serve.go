@@ -174,6 +174,7 @@ func cmdServe(ctx context.Context, o serveOpts) error {
 		Store:             db,
 		Actor:             actor,
 		VerifierModel:     verifierModelFor(cfg),
+		RecheckModel:      cfg.LLM.RecheckModel,
 		VerifierBatchSize: cfg.LLM.VerifierBatchSize,
 		Owner:             "daemon",
 		Log:               actor.Log,

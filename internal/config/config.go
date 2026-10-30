@@ -181,6 +181,9 @@ type LLMConfig struct {
 	// disagreement in the report that was not there.
 	VerifierModel string `json:"verifier_model,omitempty"`
 
+	// RecheckModel re-judges contradiction edges before the report. Empty disables it.
+	RecheckModel string `json:"recheck_model,omitempty"`
+
 	// MaxInputTokens caps a SINGLE request's input.
 	//
 	// Not the same limit as a context window, and often much smaller. A
@@ -493,6 +496,16 @@ func Fields() []Field {
 			get:  func(c *Config) string { return c.LLM.VerifierModel },
 			set: func(c *Config, v string) error {
 				c.LLM.VerifierModel = strings.TrimSpace(v)
+				return nil
+			},
+		},
+		{
+			Name: "llm.recheck-model",
+			Help: "model that re-judges contradiction edges before the report; empty disables. " +
+				"sent to the provider of the role whose model it names, else the cheap model's provider",
+			get: func(c *Config) string { return c.LLM.RecheckModel },
+			set: func(c *Config, v string) error {
+				c.LLM.RecheckModel = strings.TrimSpace(v)
 				return nil
 			},
 		},

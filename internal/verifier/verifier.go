@@ -45,6 +45,9 @@ type Verifier struct {
 	// whose errors corrupt confidence, the report's disagreements and three eval metrics.
 	Model string
 
+	// RecheckModel re-judges contradiction edges in Recheck. Empty disables Recheck.
+	RecheckModel string
+
 	// Retriever selects candidate pairs. Nil takes LexicalRetriever.
 	Retriever Retriever
 
@@ -140,6 +143,11 @@ type Result struct {
 	// their edge.
 	PairsConfirmed   int
 	PairsUnconfirmed int
+
+	// Rechecked is contradiction edges Recheck got a verdict for; Withheld is
+	// those it removed.
+	Rechecked int
+	Withheld  int
 
 	// PairsUnjudged is pairs a batch did not return a verdict for, plus pairs
 	// skipped because the allowance ran out.
@@ -261,7 +269,7 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 	// confirmed before the next wave spends the allowance.
 	for start := 0; start < len(batches); {
 		end := min(start+v.concurrency(), len(batches))
-		groups, missed, missedUnanswered, _, stop := v.runBatchGroups(ctx, sessionID, batches[start:end], res)
+		groups, missed, missedUnanswered, _, stop := v.runBatchGroups(ctx, sessionID, v.Model, batches[start:end], res)
 		var judged []Judged
 		// A fatal error fails a second look the same as the first, so the
 		// wave's verdicts are kept unconfirmed rather than asked again.
@@ -498,7 +506,7 @@ func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Jud
 	second := map[string]Relation{}
 	// A pair whose second look never happened keeps its first verdict,
 	// whatever the stop.
-	again, missed, _, _, stop := v.runBatches(ctx, sessionID, batches, res)
+	again, missed, _, _, stop := v.runBatches(ctx, sessionID, v.Model, batches, res)
 	for _, j := range again {
 		second[j.Pair.Key()] = j.Relation.Normalize()
 	}
@@ -574,16 +582,16 @@ type batchOutcome struct {
 	panicked any
 }
 
-// runBatches adjudicates batches several at a time, in waves. unanswered is
-// the subset of unjudged pairs whose batch got no response at all.
-func (v *Verifier) runBatches(ctx context.Context, sessionID string, batches [][]Pair, res *Result) (judged []Judged, unjudged, unanswered []Pair, consumed int, stop error) {
-	groups, unjudged, unanswered, consumed, stop := v.runBatchGroups(ctx, sessionID, batches, res)
+// runBatches adjudicates batches with model several at a time, in waves.
+// unanswered is the subset of unjudged pairs whose batch got no response at all.
+func (v *Verifier) runBatches(ctx context.Context, sessionID, model string, batches [][]Pair, res *Result) (judged []Judged, unjudged, unanswered []Pair, consumed int, stop error) {
+	groups, unjudged, unanswered, consumed, stop := v.runBatchGroups(ctx, sessionID, model, batches, res)
 	return slices.Concat(groups...), unjudged, unanswered, consumed, stop
 }
 
 // runBatchGroups is runBatches with the verdicts kept per batch: groups[i]
 // is batches[i]'s, empty if unanswered.
-func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches [][]Pair, res *Result) (groups [][]Judged, unjudged, unanswered []Pair, consumed int, stop error) {
+func (v *Verifier) runBatchGroups(ctx context.Context, sessionID, model string, batches [][]Pair, res *Result) (groups [][]Judged, unjudged, unanswered []Pair, consumed int, stop error) {
 	groups = make([][]Judged, len(batches))
 	next := 0
 	for next < len(batches) && stop == nil {
@@ -596,7 +604,7 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 			stop = err
 			break
 		}
-		k, err := v.waveSize(ctx, sess, batches[next:])
+		k, err := v.waveSize(ctx, sess, model, batches[next:])
 		if err != nil {
 			stop = err
 			break
@@ -617,7 +625,7 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 					}
 				}()
 				began := v.clock()
-				j, u, responded, e := v.adjudicate(ctx, sess, batch, res)
+				j, u, responded, e := v.adjudicate(ctx, sess, model, batch, res)
 				v.observeBatch(v.clock().Sub(began))
 				outcomes[i] = batchOutcome{judged: j, unjudged: u, responded: responded, stop: e}
 			}()
@@ -694,7 +702,7 @@ func (v *Verifier) waveFits(sess *core.Session) error {
 
 // waveSize is how many of the remaining batches the next wave may launch,
 // bounded by Concurrency, the allowance, availability, and max_tool_calls.
-func (v *Verifier) waveSize(ctx context.Context, sess *core.Session, left [][]Pair) (int, error) {
+func (v *Verifier) waveSize(ctx context.Context, sess *core.Session, model string, left [][]Pair) (int, error) {
 	limit := min(v.concurrency(), len(left))
 	if sess.MaxToolCalls > 0 {
 		// At least one, so a session at its ceiling is refused by the ledger with
@@ -707,7 +715,7 @@ func (v *Verifier) waveSize(ctx context.Context, sess *core.Session, left [][]Pa
 	var sum int64
 	k := 0
 	for ; k < limit; k++ {
-		est := v.estimateBatch(sess.BudgetUnit, len(left[k]))
+		est := v.estimateBatchFor(model, sess.BudgetUnit, len(left[k]))
 		if k == 0 {
 			if est > allowance {
 				return 0, fmt.Errorf("verification allowance exhausted (%d of %.0f%% of budget spent)",
@@ -735,9 +743,9 @@ func (v *Verifier) spentSoFar() int64 {
 //
 // The allowance is checked by runBatches for the whole wave. responded is
 // false only when no call was made or it errored.
-func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, batch []Pair, res *Result) (judged []Judged, unjudged []Pair, responded bool, err error) {
+func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, model string, batch []Pair, res *Result) (judged []Judged, unjudged []Pair, responded bool, err error) {
 	sessionID := sess.ID
-	est := v.estimateBatch(sess.BudgetUnit, len(batch))
+	est := v.estimateBatchFor(model, sess.BudgetUnit, len(batch))
 	if avail := sess.Available(); est > avail {
 		est = avail
 	}
@@ -756,7 +764,7 @@ func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, batch []P
 		// times, which is what §10.1's split exists for. Model overrides it when the
 		// cheap model cannot tell "contradicts" from "unrelated".
 		Tier:      llm.TierCheap,
-		Model:     v.Model,
+		Model:     model,
 		System:    adjudicateSystemPrompt,
 		Messages:  []llm.Message{llm.User(prompt)},
 		MaxTokens: maxTokensForBatch(len(batch)),
@@ -835,6 +843,109 @@ func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, batch []P
 	// A response came back even where parsing salvaged nothing: these claims were
 	// asked about, so they are judged rather than retried for free.
 	return verdicts, missed, true, nil
+}
+
+// Recheck re-judges every contradicts edge with RecheckModel, removes those it
+// does not confirm, and re-derives confidence over the whole graph.
+func (v *Verifier) Recheck(ctx context.Context, sessionID string) (*Result, error) {
+	res := &Result{}
+	if v.RecheckModel == "" {
+		return res, nil
+	}
+	if v.LLM == nil {
+		return res, ErrNoProvider
+	}
+
+	var (
+		claims []*core.Claim
+		edges  []*core.ClaimEdge
+	)
+	if err := v.Store.Read(ctx, func(ctx context.Context, q store.Queries) error {
+		var err error
+		if claims, err = q.ListClaims(ctx, sessionID, 0); err != nil {
+			return err
+		}
+		edges, err = q.ListEdges(ctx, sessionID, 0)
+		return err
+	}); err != nil {
+		return res, err
+	}
+
+	byID := make(map[string]*core.Claim, len(claims))
+	for _, c := range claims {
+		byID[c.ID] = c
+	}
+	var (
+		first  []Judged
+		pairs  []Pair
+		edgeOf = map[string]*core.ClaimEdge{}
+	)
+	for _, e := range edges {
+		a, b := byID[e.FromID], byID[e.ToID]
+		if e.Kind != core.EdgeContradicts || a == nil || b == nil {
+			continue
+		}
+		p := newPair(a, b)
+		first = append(first, Judged{Pair: p, Relation: RelContradicts})
+		pairs = append(pairs, p)
+		edgeOf[p.Key()] = e
+	}
+	if len(pairs) == 0 {
+		return res, nil
+	}
+
+	again, unjudged, _, _, stop := v.runBatches(ctx, sessionID, v.RecheckModel, Batches(pairs, v.BatchSize), res)
+	res.PairsJudged = len(again)
+	res.PairsUnjudged = len(unjudged)
+	if stop != nil {
+		res.Degraded = fmt.Sprintf("re-check left %d contradiction(s) unchecked: %v", len(unjudged), stop)
+	}
+	second := make(map[string]Relation, len(again))
+	for _, j := range again {
+		second[j.Pair.Key()] = j.Relation.Normalize()
+	}
+	out, confirmed, unconfirmed := ApplyConfirmations(first, second)
+	res.PairsConfirmed, res.PairsUnconfirmed = confirmed, unconfirmed
+	res.Rechecked, res.Withheld = confirmed+unconfirmed, unconfirmed
+
+	drop := map[string]bool{}
+	for _, j := range out {
+		if j.Relation == RelContradicts {
+			res.Contradictions++
+		} else {
+			drop[edgeOf[j.Pair.Key()].ID] = true
+		}
+	}
+	if len(drop) == 0 {
+		return res, nil
+	}
+
+	kept := make([]*core.ClaimEdge, 0, len(edges)-len(drop))
+	ids := make([]string, 0, len(drop))
+	for _, e := range edges {
+		if drop[e.ID] {
+			ids = append(ids, e.ID)
+		} else {
+			kept = append(kept, e)
+		}
+	}
+	scores, breakdown := DeriveConfidence(claims, kept)
+	for i := range scores {
+		if c := byID[scores[i].ClaimID]; c != nil && c.VerifiedAt == nil {
+			scores[i].KeepUnverified = true
+		}
+	}
+	if err := v.Store.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		if err := tx.DeleteEdges(ctx, ids); err != nil {
+			return err
+		}
+		return tx.ScoreClaims(ctx, scores)
+	}); err != nil {
+		return res, err
+	}
+	res.Scores = breakdown
+	res.ClaimsScored = len(scores)
+	return res, nil
 }
 
 // persist writes the edges and marks every target claim verified, except one
@@ -1009,19 +1120,27 @@ func (v *Verifier) model() string {
 // estimate reserves a (in, out) token call's cost in the session's budget
 // unit: raw tokens in token mode, priced per-model in USD mode.
 func (v *Verifier) estimate(unit core.BudgetUnit, in, out int64) int64 {
+	return v.estimateFor(v.Model, unit, in, out)
+}
+
+// estimateFor is estimate priced against model, or v.model() when empty.
+func (v *Verifier) estimateFor(model string, unit core.BudgetUnit, in, out int64) int64 {
+	if model == "" {
+		model = v.model()
+	}
 	if unit == core.BudgetTokens {
 		return in + out
 	}
 
 	usage := pricing.Usage{InputTokens: in, OutputTokens: out}
 	if v.Pricing != nil {
-		if cost, err := v.Pricing.Cost(v.model(), usage); err == nil {
+		if cost, err := v.Pricing.Cost(model, usage); err == nil {
 			return max(1, cost.USDMicros)
 		}
 		v.warnUnpriced.Do(func() {
 			v.logger().Warn("verifier: model not in the pricing table; "+
 				"reserving at a deliberately high fallback rate instead",
-				"model", v.model())
+				"model", model)
 		})
 	}
 
@@ -1036,11 +1155,16 @@ func (v *Verifier) estimate(unit core.BudgetUnit, in, out int64) int64 {
 // matters: §8.2's whole point is that the hold is taken before the call, so a hold
 // smaller than the call trips the overshoot detector.
 func (v *Verifier) estimateBatch(unit core.BudgetUnit, pairs int) int64 {
+	return v.estimateBatchFor(v.Model, unit, pairs)
+}
+
+// estimateBatchFor is estimateBatch priced against model.
+func (v *Verifier) estimateBatchFor(model string, unit core.BudgetUnit, pairs int) int64 {
 	// ~600 tokens of instructions, ~250 in and ~120 out per pair, doubled for
 	// headroom; split for USD mode's per-rate pricing.
 	in := int64(2 * (600 + pairs*250))
 	out := int64(2 * 120 * pairs)
-	return v.estimate(unit, in, out)
+	return v.estimateFor(model, unit, in, out)
 }
 
 // maxTokensForBatch leaves room for a verdict per pair plus a reasoning model's

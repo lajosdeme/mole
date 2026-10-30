@@ -120,6 +120,8 @@ type Runner struct {
 	// cheap model in place; set it when the cheap model cannot tell a
 	// contradiction from two unrelated statements.
 	VerifierModel string
+	// RecheckModel re-judges contradiction edges before the report. Empty disables it.
+	RecheckModel string
 	// VerifierBatchSize caps pairs per adjudication call. Zero takes the default.
 	VerifierBatchSize int
 
@@ -429,13 +431,14 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 	// §11.5's re-read goes through the same robots handling, rate limiter and SSRF
 	// guard as the fetch that produced the claim.
 	vf := &verifier.Verifier{
-		Store:     r.Store,
-		Ledger:    led,
-		LLM:       actor.LLM,
-		Pricing:   actor.Pricing,
-		Log:       r.logger(),
-		Model:     r.VerifierModel,
-		BatchSize: r.VerifierBatchSize,
+		Store:        r.Store,
+		Ledger:       led,
+		LLM:          actor.LLM,
+		Pricing:      actor.Pricing,
+		Log:          r.logger(),
+		Model:        r.VerifierModel,
+		RecheckModel: r.RecheckModel,
+		BatchSize:    r.VerifierBatchSize,
 		// Both by default: one judgement gets "contradicts" right 51% of the time,
 		// and here a false edge also spends a research lead. Output a person reads
 		// wants ConfirmDuplicates — 98% recall against 67%.
