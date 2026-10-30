@@ -544,11 +544,8 @@ func (r *Runner) finish(
 	actor *actors.WebActor,
 	schema *dataset.Schema,
 ) (*output.Report, *verifier.GroundReport) {
-	// Whether the run was stopped, read BEFORE detaching. Everything below runs
-	// on a live context by design — the payoff for money already spent must not
-	// be discarded because research was cancelled — which also means ctx.Err()
-	// stops being readable one line down.
-	cancelled := ctx.Err() != nil
+	// Only an explicit cancel skips the report; a deadline still writes it.
+	cancelled := errors.Is(ctx.Err(), context.Canceled)
 	ctx = context.WithoutCancel(ctx)
 
 	released, err := led.ReleaseEscrow(ctx, sess.ID)

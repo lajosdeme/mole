@@ -115,6 +115,17 @@ func newRig(t *testing.T, budgetTokens int64, claims []core.Claim, reply func(in
 // real one ends up: at max_leads, with verification still to do.
 func newRigWithCeilings(t *testing.T, budgetTokens, maxLeads, maxCalls int64, claims []core.Claim, reply func(int, string) (string, error)) *rig {
 	t.Helper()
+	return newRigFromSpec(t, budget.SessionSpec{
+		Prompt: "q", Mode: core.ModeReport,
+		ActorTypes: []core.ActorType{core.ActorWeb},
+		BudgetUnit: core.BudgetTokens, Budget: budgetTokens,
+		MaxLeads: maxLeads, MaxToolCalls: maxCalls,
+	}, claims, reply)
+}
+
+// newRigFromSpec builds a rig whose session is created from spec.
+func newRigFromSpec(t *testing.T, spec budget.SessionSpec, claims []core.Claim, reply func(int, string) (string, error)) *rig {
+	t.Helper()
 	ctx := context.Background()
 
 	db, err := sqlite.Open(filepath.Join(t.TempDir(), "t.db"), sqlite.Options{})
@@ -127,12 +138,7 @@ func newRigWithCeilings(t *testing.T, budgetTokens, maxLeads, maxCalls int64, cl
 	}
 
 	led := budget.New(db, budget.DefaultConfig())
-	sess, err := led.CreateSession(ctx, budget.SessionSpec{
-		Prompt: "q", Mode: core.ModeReport,
-		ActorTypes: []core.ActorType{core.ActorWeb},
-		BudgetUnit: core.BudgetTokens, Budget: budgetTokens,
-		MaxLeads: maxLeads, MaxToolCalls: maxCalls,
-	})
+	sess, err := led.CreateSession(ctx, spec)
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}

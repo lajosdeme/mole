@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lajosdeme/mole/internal/budget"
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/llm"
 	"github.com/lajosdeme/mole/internal/verifier"
@@ -501,4 +502,129 @@ func TestAFatalSecondLookStopsLaterWaves(t *testing.T) {
 		t.Errorf("%d pairs unjudged, want the 2 never sent", res.PairsUnjudged)
 	}
 	r.assertNothingHeld(t, "fatal second look")
+}
+
+// fakeClock is a settable clock shared by the test and the Verifier.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// wallClockRig is a rig whose session has an hour of wall clock, judged in six
+// one-pair batches one at a time on clock.
+func wallClockRig(t *testing.T, clock *fakeClock, reply func(int, string) (string, error)) *rig {
+	t.Helper()
+	r := newRigFromSpec(t, budget.SessionSpec{
+		Prompt: "q", Mode: core.ModeReport,
+		ActorTypes: []core.ActorType{core.ActorWeb},
+		BudgetUnit: core.BudgetTokens, Budget: 2_000_000,
+		MaxLeads: 50, MaxToolCalls: 500, MaxWallClock: time.Hour,
+	}, distinctClaims(4), reply)
+	r.v.SetClock(clock.now)
+	r.v.BatchSize = 1
+	r.v.Concurrency = 1
+	return r
+}
+
+// TestAWaveThatCannotFinishIsNotLaunched checks that a wave is launched only
+// when the longest batch seen so far fits before the wall clock.
+func TestAWaveThatCannotFinishIsNotLaunched(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		left      time.Duration
+		wantCalls int
+	}{
+		{"ten seconds left", 10 * time.Second, 0},
+		{"five minutes left", 5 * time.Minute, 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := &fakeClock{}
+			r := wallClockRig(t, clock, judgeEveryPair(verifier.RelNeither))
+			clock.t = r.sess.CreatedAt.Add(time.Hour - tc.left)
+			verifier.ObserveBatch(r.v, 30*time.Second)
+
+			res, err := r.v.Run(context.Background(), r.sess.ID)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := r.llm.count(); got != tc.wantCalls {
+				t.Errorf("%d calls, want %d", got, tc.wantCalls)
+			}
+			if tc.wantCalls < 6 {
+				if !strings.Contains(res.Degraded, "wall clock") {
+					t.Errorf("degraded = %q, want the wall clock named", res.Degraded)
+				}
+				if res.PairsUnjudged != 6-tc.wantCalls {
+					t.Errorf("%d pairs unjudged, want %d", res.PairsUnjudged, 6-tc.wantCalls)
+				}
+			} else if res.Degraded != "" {
+				t.Errorf("degraded = %q, want a complete pass", res.Degraded)
+			}
+			r.assertNothingHeld(t, "wall clock")
+		})
+	}
+}
+
+// TestTheWaveBudgetIsTheLongestBatchSeen checks that batch durations are
+// timed: 60s by default, then the longest observed.
+func TestTheWaveBudgetIsTheLongestBatchSeen(t *testing.T) {
+	clock := &fakeClock{}
+	r := wallClockRig(t, clock, func(call int, prompt string) (string, error) {
+		clock.advance(30 * time.Second)
+		return judgeEveryPair(verifier.RelNeither)(call, prompt)
+	})
+	// 70s left: the first wave fits the 60s default, the second the 30s
+	// observed, and the third, with 10s left, does not.
+	clock.t = r.sess.CreatedAt.Add(time.Hour - 70*time.Second)
+
+	res, err := r.v.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := r.llm.count(); got != 2 {
+		t.Errorf("%d calls, want 2", got)
+	}
+	if !strings.Contains(res.Degraded, "wall clock") {
+		t.Errorf("degraded = %q, want the wall clock named", res.Degraded)
+	}
+	if res.PairsUnjudged != 4 {
+		t.Errorf("%d pairs unjudged, want the 4 never sent", res.PairsUnjudged)
+	}
+	r.assertNothingHeld(t, "wall clock")
+}
+
+// TestNoWallClockMeansNoTimeGating checks that a session without MaxWallClock
+// launches every wave however long batches take.
+func TestNoWallClockMeansNoTimeGating(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	r := newRig(t, 2_000_000, distinctClaims(4), func(call int, prompt string) (string, error) {
+		clock.advance(time.Hour)
+		return judgeEveryPair(verifier.RelNeither)(call, prompt)
+	})
+	r.v.SetClock(clock.now)
+	r.v.BatchSize = 1
+	r.v.Concurrency = 1
+
+	res, err := r.v.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := r.llm.count(); got != 6 {
+		t.Errorf("%d calls, want all 6", got)
+	}
+	if res.Degraded != "" {
+		t.Errorf("degraded = %q, want a complete pass", res.Degraded)
+	}
 }

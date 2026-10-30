@@ -100,8 +100,13 @@ type Verifier struct {
 	// reconciled against the ledger before each wave of batches.
 	spent int64
 
-	// mu guards spent, and the Result counters adjudicate writes (Spent, Calls),
-	// because a wave's batches settle from their own goroutines.
+	// slowestBatch is the longest adjudication batch timed so far.
+	slowestBatch time.Duration
+	// now is the clock; nil takes time.Now.
+	now func() time.Time
+
+	// mu guards spent, slowestBatch, and the Result counters adjudicate writes
+	// (Spent, Calls), because a wave's batches settle from their own goroutines.
 	mu sync.Mutex
 
 	// warnUnpriced logs the "no rate for this model" fallback once per
@@ -582,6 +587,10 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 			stop = err
 			break
 		}
+		if err := v.waveFits(sess); err != nil {
+			stop = err
+			break
+		}
 		k, err := v.waveSize(ctx, sess, batches[next:])
 		if err != nil {
 			stop = err
@@ -602,7 +611,9 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 						outcomes[i].panicked = fmt.Sprintf("%v\n\nadjudication goroutine stack:\n%s", p, debug.Stack())
 					}
 				}()
+				began := v.clock()
 				j, u, responded, e := v.adjudicate(ctx, sess, batch, res)
+				v.observeBatch(v.clock().Sub(began))
 				outcomes[i] = batchOutcome{judged: j, unjudged: u, responded: responded, stop: e}
 			}()
 		}
@@ -632,6 +643,46 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 		unanswered = append(unanswered, batch...)
 	}
 	return groups, unjudged, unanswered, consumed, stop
+}
+
+// DefaultWaveBudget is how long a wave is assumed to take before any batch
+// has been timed.
+const DefaultWaveBudget = 60 * time.Second
+
+// SetClock replaces the Verifier's clock.
+func (v *Verifier) SetClock(fn func() time.Time) { v.now = fn }
+
+func (v *Verifier) clock() time.Time {
+	if v.now != nil {
+		return v.now()
+	}
+	return time.Now()
+}
+
+func (v *Verifier) observeBatch(d time.Duration) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.slowestBatch = max(v.slowestBatch, d)
+}
+
+// waveFits refuses a wave that would not finish, at the slowest batch timed
+// so far, before the session's wall clock.
+func (v *Verifier) waveFits(sess *core.Session) error {
+	if sess.MaxWallClock <= 0 {
+		return nil
+	}
+	v.mu.Lock()
+	need := v.slowestBatch
+	v.mu.Unlock()
+	if need == 0 {
+		need = DefaultWaveBudget
+	}
+	deadline := sess.CreatedAt.Add(sess.MaxWallClock)
+	if left := deadline.Sub(v.clock()); left < need {
+		return fmt.Errorf("wall clock too close for another wave (%s left, a batch takes up to %s)",
+			left.Round(time.Second), need.Round(time.Second))
+	}
+	return nil
 }
 
 // waveSize is how many of the remaining batches the next wave may launch,
