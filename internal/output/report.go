@@ -24,6 +24,7 @@ import (
 	"github.com/lajosdeme/mole/internal/llm"
 	"github.com/lajosdeme/mole/internal/pricing"
 	"github.com/lajosdeme/mole/internal/store"
+	"github.com/lajosdeme/mole/internal/verifier"
 )
 
 // Citation is one numbered source.
@@ -108,6 +109,9 @@ type Generator struct {
 	MaxTokens int
 	// Effort is the synthesis call's effort; empty sends llm.StrongEffort.
 	Effort string
+	// WithholdUnrechecked leaves contradicts edges not yet re-checked out of the
+	// report and notes how many in Degraded.
+	WithholdUnrechecked bool
 }
 
 const (
@@ -161,6 +165,11 @@ func (g *Generator) Generate(ctx context.Context, st store.Store, sessionID stri
 		return nil, err
 	}
 
+	withheld := 0
+	if gen.WithholdUnrechecked {
+		edges, withheld = verifier.WithholdUnrechecked(edges)
+	}
+
 	rep := &Report{SessionID: sessionID, Question: sess.Prompt}
 
 	if len(claims) == 0 {
@@ -197,6 +206,7 @@ func (g *Generator) Generate(ctx context.Context, st store.Store, sessionID stri
 	if gen.LLM == nil {
 		rep.Body = fallbackBody(sess.Prompt, findings, index)
 		rep.Degraded = "no budget left to synthesize; evidence listed unsynthesized"
+		noteWithheld(rep, withheld)
 		return rep, nil
 	}
 
@@ -209,7 +219,21 @@ func (g *Generator) Generate(ctx context.Context, st store.Store, sessionID stri
 		MaxTokens: gen.MaxTokens,
 	}, rep, wording{noun: "synthesis", verb: "synthesize"},
 		fallbackBody(sess.Prompt, findings, index))
+	noteWithheld(rep, withheld)
 	return rep, nil
+}
+
+// noteWithheld appends the count of withheld contradictions to rep.Degraded.
+func noteWithheld(rep *Report, n int) {
+	if n == 0 {
+		return
+	}
+	note := fmt.Sprintf("%d contradiction(s) withheld: not re-checked", n)
+	if rep.Degraded == "" {
+		rep.Degraded = note
+	} else {
+		rep.Degraded += "; " + note
+	}
 }
 
 // wording is what Generate and Answer disagree about when a call fails.

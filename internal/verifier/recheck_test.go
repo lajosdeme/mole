@@ -2,6 +2,7 @@ package verifier_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/lajosdeme/mole/internal/budget"
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/store"
+	"github.com/lajosdeme/mole/internal/store/sqlite"
 	"github.com/lajosdeme/mole/internal/verifier"
 )
 
@@ -232,5 +234,274 @@ func TestRecheckRespectsTheDeadline(t *testing.T) {
 	}
 	if res.Withheld != 0 || countKind(r.edges(t), core.EdgeContradicts) != 2 {
 		t.Errorf("withheld %d; edges changed without a re-check", res.Withheld)
+	}
+}
+
+// insertEdges writes edges straight to the store.
+func insertEdges(t *testing.T, r *rig, edges ...core.ClaimEdge) {
+	t.Helper()
+	if err := r.db.WithTx(context.Background(), func(ctx context.Context, tx store.Tx) error {
+		return tx.InsertEdges(ctx, edges)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// contradiction is a contradicts edge between claims i and j, created by by.
+func contradiction(r *rig, claims []core.Claim, i, j int, by string) core.ClaimEdge {
+	return core.ClaimEdge{
+		SessionID: r.sess.ID, FromID: claims[i].ID, ToID: claims[j].ID,
+		Kind: core.EdgeContradicts, Weight: 1, CreatedBy: by,
+	}
+}
+
+// comparesPair reports whether a prompt names both claim i and claim j.
+func comparesPair(prompt string, i, j int) bool {
+	return strings.Contains(prompt, fmt.Sprintf("Finding number %d ", i)) &&
+		strings.Contains(prompt, fmt.Sprintf("Finding number %d ", j))
+}
+
+// promptsFor returns the prompts sent with model.
+func (s *scriptedLLM) promptsFor(model string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for i, m := range s.models {
+		if m == model {
+			out = append(out, s.prompts[i])
+		}
+	}
+	return out
+}
+
+// firstCallThen answers call 0 with first and every later call with later.
+func firstCallThen(first verifier.Relation, later func(int, string) (string, error)) func(int, string) (string, error) {
+	return func(call int, prompt string) (string, error) {
+		if call == 0 {
+			return judgeEveryPair(first)(call, prompt)
+		}
+		return later(call, prompt)
+	}
+}
+
+// storedConfidence maps claim ID to its stored confidence.
+func storedConfidence(t *testing.T, r *rig) map[string]float64 {
+	t.Helper()
+	out := map[string]float64{}
+	for _, c := range r.claims(t) {
+		out[c.ID] = c.Confidence
+	}
+	return out
+}
+
+// derivedConfidence maps claim ID to the confidence derived over edges.
+func derivedConfidence(t *testing.T, r *rig, edges []*core.ClaimEdge) map[string]float64 {
+	t.Helper()
+	var list []*core.Claim
+	for _, c := range r.claims(t) {
+		list = append(list, c)
+	}
+	scores, _ := verifier.DeriveConfidence(list, edges)
+	out := map[string]float64{}
+	for _, s := range scores {
+		out[s.ClaimID] = s.Confidence
+	}
+	return out
+}
+
+// TestRunRechecksOnlyTheContradictionsItWrote checks a pass re-checks its own new edges and no older ones.
+func TestRunRechecksOnlyTheContradictionsItWrote(t *testing.T) {
+	claims := recheckClaims()
+	r := newRig(t, 2_000_000, claims, judgeEveryPair(verifier.RelContradicts))
+	r.v.RecheckModel = "strict"
+	r.v.BatchSize = 1
+	insertEdges(t, r, contradiction(r, claims, 0, 1, "seed"))
+
+	res, err := r.v.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := 0
+	for _, e := range r.edges(t) {
+		if e.Kind != core.EdgeContradicts {
+			continue
+		}
+		if e.FromID == claims[0].ID && e.ToID == claims[1].ID || e.FromID == claims[1].ID && e.ToID == claims[0].ID {
+			if verifier.IsRechecked(e) {
+				t.Errorf("the older edge was re-checked: created_by %q", e.CreatedBy)
+			}
+			continue
+		}
+		written++
+		if !verifier.IsRechecked(e) {
+			t.Errorf("new edge %s -> %s not marked re-checked: %q", e.FromID, e.ToID, e.CreatedBy)
+		}
+	}
+	if written == 0 {
+		t.Fatal("the pass wrote no contradictions")
+	}
+	strict := r.llm.promptsFor("strict")
+	if len(strict) != written {
+		t.Errorf("%d re-check calls, want one per new contradiction (%d)", len(strict), written)
+	}
+	for _, p := range strict {
+		if comparesPair(p, 0, 1) {
+			t.Error("the older contradiction was sent for re-check")
+		}
+	}
+	if res.Rechecked != written || res.Withheld != 0 {
+		t.Errorf("rechecked %d, withheld %d; want %d and 0", res.Rechecked, res.Withheld, written)
+	}
+}
+
+// TestRunWithholdsWhatItsRecheckRejects checks a pass removes rejected edges, their count and their follow-ups.
+func TestRunWithholdsWhatItsRecheckRejects(t *testing.T) {
+	claims := recheckClaims()
+	r := newRig(t, 2_000_000, claims, firstCallThen(verifier.RelContradicts, judgeEveryPair(verifier.RelNeither)))
+	r.v.RecheckModel = "strict"
+	r.v.BatchSize = 100
+
+	res, err := r.v.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Withheld == 0 || res.Withheld != res.Rechecked {
+		t.Errorf("rechecked %d, withheld %d; want every contradiction withheld", res.Rechecked, res.Withheld)
+	}
+	if res.Contradictions != 0 {
+		t.Errorf("contradictions = %d after every one was withheld", res.Contradictions)
+	}
+	if n := countKind(r.edges(t), core.EdgeContradicts); n != 0 {
+		t.Errorf("%d contradicts edges stored after the re-check rejected them", n)
+	}
+	if len(res.FollowUps)+len(res.Deferred) != 0 {
+		t.Errorf("%d follow-up(s) for withheld contradictions", len(res.FollowUps)+len(res.Deferred))
+	}
+}
+
+// TestRecheckSkipsEdgesAlreadyRechecked checks a marked edge is never sent again.
+func TestRecheckSkipsEdgesAlreadyRechecked(t *testing.T) {
+	claims := recheckClaims()
+	r := newRig(t, 2_000_000, claims, judgeEveryPair(verifier.RelContradicts))
+	r.v.RecheckModel = "strict"
+	r.v.BatchSize = 1
+	insertEdges(t, r,
+		contradiction(r, claims, 0, 1, verifier.RecheckedBy+"strict"),
+		contradiction(r, claims, 2, 3, "seed"))
+
+	res, err := r.v.Recheck(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict := r.llm.promptsFor("strict")
+	if len(strict) != 1 || comparesPair(strict[0], 0, 1) {
+		t.Errorf("%d re-check call(s); want one, for the unmarked edge", len(strict))
+	}
+	if res.Rechecked != 1 {
+		t.Errorf("rechecked %d, want 1", res.Rechecked)
+	}
+
+	if _, err := r.v.Recheck(context.Background(), r.sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n := r.llm.count(); n != 1 {
+		t.Errorf("%d calls after a second re-check, want still 1", n)
+	}
+}
+
+// TestRecheckMarkerSurvivesReopen checks a re-opened store still knows which edges were re-checked.
+func TestRecheckMarkerSurvivesReopen(t *testing.T) {
+	claims := recheckClaims()
+	r := newRig(t, 2_000_000, claims, judgeEveryPair(verifier.RelContradicts))
+	r.v.RecheckModel = "strict"
+	insertEdges(t, r, contradiction(r, claims, 0, 1, "seed"), contradiction(r, claims, 2, 3, "seed"))
+	if _, err := r.v.Recheck(context.Background(), r.sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sqlite.Open(r.path, sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fl := &scriptedLLM{reply: judgeEveryPair(verifier.RelNeither)}
+	v := &verifier.Verifier{Store: db, Ledger: budget.New(db, budget.DefaultConfig()), LLM: fl,
+		RecheckModel: "strict", Log: r.v.Log}
+	res, err := v.Recheck(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := fl.count(); n != 0 || res.Rechecked != 0 {
+		t.Errorf("%d calls, %d rechecked after reopening; want 0 and 0", n, res.Rechecked)
+	}
+	r.db = db
+	for _, e := range r.edges(t) {
+		if e.Kind == core.EdgeContradicts && !verifier.IsRechecked(e) {
+			t.Errorf("edge %s -> %s lost its marker: %q", e.FromID, e.ToID, e.CreatedBy)
+		}
+	}
+}
+
+// TestUncheckedContradictionsDoNotScoreWhenRecheckIsOn checks confidence ignores unchecked contradictions.
+func TestUncheckedContradictionsDoNotScoreWhenRecheckIsOn(t *testing.T) {
+	claims := recheckClaims()
+	r := newRig(t, 2_000_000, claims, firstCallThen(verifier.RelContradicts,
+		func(int, string) (string, error) { return "", errors.New("provider hiccup") }))
+	r.v.RecheckModel = "strict"
+	r.v.BatchSize = 100
+
+	if _, err := r.v.Run(context.Background(), r.sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	all := r.edges(t)
+	if countKind(all, core.EdgeContradicts) == 0 {
+		t.Fatal("the pass wrote no contradictions")
+	}
+	var kept []*core.ClaimEdge
+	for _, e := range all {
+		if verifier.IsRechecked(e) {
+			t.Errorf("edge %s -> %s marked re-checked without a verdict", e.FromID, e.ToID)
+		}
+		if e.Kind != core.EdgeContradicts {
+			kept = append(kept, e)
+		}
+	}
+	got, want, counted := storedConfidence(t, r), derivedConfidence(t, r, kept), derivedConfidence(t, r, all)
+	differs := false
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("claim %s confidence %.4f, want %.4f without the unchecked edges", id, got[id], w)
+		}
+		differs = differs || counted[id] != w
+	}
+	if !differs {
+		t.Fatal("the contradictions would not have changed confidence; the test proves nothing")
+	}
+}
+
+// TestUncheckedContradictionsScoreWhenRecheckIsOff checks confidence counts every contradiction without RecheckModel.
+func TestUncheckedContradictionsScoreWhenRecheckIsOff(t *testing.T) {
+	claims := recheckClaims()
+	r := newRig(t, 2_000_000, claims, judgeEveryPair(verifier.RelContradicts))
+	r.v.BatchSize = 100
+
+	if _, err := r.v.Run(context.Background(), r.sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	all := r.edges(t)
+	if countKind(all, core.EdgeContradicts) == 0 {
+		t.Fatal("the pass wrote no contradictions")
+	}
+	got, want := storedConfidence(t, r), derivedConfidence(t, r, all)
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("claim %s confidence %.4f, want %.4f", id, got[id], w)
+		}
 	}
 }

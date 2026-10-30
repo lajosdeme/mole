@@ -250,13 +250,13 @@ func TestAllowanceBoundsTheWave(t *testing.T) {
 // TestFatalErrorStopsLaterWaves checks that a fatal error stops every wave
 // after the one already in flight, including the confirm pass.
 func TestFatalErrorStopsLaterWaves(t *testing.T) {
-	r := newRig(t, 2_000_000, distinctClaims(6), func(call int, prompt string) (string, error) {
+	r := newRig(t, 2_000_000, distinctClaims(8), func(call int, prompt string) (string, error) {
 		if call == 0 {
 			return "", llm.ErrUnauthorized
 		}
 		return judgeEveryPair(verifier.RelContradicts)(call, prompt)
 	})
-	r.v.BatchSize = 1 // fifteen batches: four waves' worth
+	r.v.BatchSize = 1 // one batch per pair: several waves' worth
 	r.v.Confirm = verifier.ConfirmBoth
 
 	res, err := r.v.Run(context.Background(), r.sess.ID)

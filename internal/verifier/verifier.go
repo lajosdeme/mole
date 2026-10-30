@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -129,7 +130,7 @@ const DefaultMaxShareOfBudget = 0.25
 
 // DefaultConcurrency is how many adjudication batches run at once, instead
 // of serially.
-const DefaultConcurrency = 4
+const DefaultConcurrency = 8
 
 // Result reports what one pass did.
 type Result struct {
@@ -144,8 +145,8 @@ type Result struct {
 	PairsConfirmed   int
 	PairsUnconfirmed int
 
-	// Rechecked is contradiction edges Recheck got a verdict for; Withheld is
-	// those it removed.
+	// Rechecked is contradiction edges the re-check got a verdict for; Withheld
+	// is those it removed.
 	Rechecked int
 	Withheld  int
 
@@ -360,6 +361,31 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 	for _, e := range res.writtenEdges {
 		if e.Kind == core.EdgeContradicts {
 			res.Contradictions++
+		}
+	}
+
+	// Re-checks this pass's new contradictions and drops the withheld from the verdicts.
+	if v.RecheckModel != "" && res.Contradictions > 0 {
+		only := map[string]bool{}
+		for _, e := range res.writtenEdges {
+			if e.Kind == core.EdgeContradicts {
+				only[newPairKey(e.FromID, e.ToID)] = true
+			}
+		}
+		out, err := v.recheck(ctx, sessionID, only, res)
+		if err != nil {
+			return res, err
+		}
+		res.Rechecked += out.confirmed + out.unconfirmed
+		res.Withheld += out.unconfirmed
+		res.Contradictions -= out.unconfirmed
+		if out.stop != nil {
+			res.Degraded = joinDegraded(res.Degraded, out.degraded())
+		}
+		for i := range verdicts {
+			if out.withheld[newPairKey(verdicts[i].A.ID, verdicts[i].B.ID)] {
+				verdicts[i].Relation = RelNeither
+			}
 		}
 	}
 
@@ -845,8 +871,39 @@ func (v *Verifier) adjudicate(ctx context.Context, sess *core.Session, model str
 	return verdicts, missed, true, nil
 }
 
-// Recheck re-judges every contradicts edge with RecheckModel, removes those it
-// does not confirm, and re-derives confidence over the whole graph.
+// RecheckedBy prefixes created_by on a contradicts edge RecheckModel confirmed.
+const RecheckedBy = "recheck:"
+
+// IsRechecked reports whether e carries the RecheckedBy marker.
+func IsRechecked(e *core.ClaimEdge) bool {
+	return e != nil && strings.HasPrefix(e.CreatedBy, RecheckedBy)
+}
+
+// WithholdUnrechecked returns edges without the contradicts edges not yet
+// re-checked, and how many it left out.
+func WithholdUnrechecked(edges []*core.ClaimEdge) ([]*core.ClaimEdge, int) {
+	out := make([]*core.ClaimEdge, 0, len(edges))
+	for _, e := range edges {
+		if e != nil && e.Kind == core.EdgeContradicts && !IsRechecked(e) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out, len(edges) - len(out)
+}
+
+// scoringEdges is the graph confidence is derived over: without unchecked
+// contradictions when RecheckModel is set, else edges unchanged.
+func (v *Verifier) scoringEdges(edges []*core.ClaimEdge) []*core.ClaimEdge {
+	if v.RecheckModel == "" {
+		return edges
+	}
+	kept, _ := WithholdUnrechecked(edges)
+	return kept
+}
+
+// Recheck re-judges every contradicts edge not yet re-checked with
+// RecheckModel, removes those it does not confirm, and re-derives confidence.
 func (v *Verifier) Recheck(ctx context.Context, sessionID string) (*Result, error) {
 	res := &Result{}
 	if v.RecheckModel == "" {
@@ -855,7 +912,36 @@ func (v *Verifier) Recheck(ctx context.Context, sessionID string) (*Result, erro
 	if v.LLM == nil {
 		return res, ErrNoProvider
 	}
+	out, err := v.recheck(ctx, sessionID, nil, res)
+	if err != nil {
+		return res, err
+	}
+	res.PairsJudged, res.PairsUnjudged = out.judged, out.unjudged
+	if out.stop != nil {
+		res.Degraded = out.degraded()
+	}
+	res.PairsConfirmed, res.PairsUnconfirmed = out.confirmed, out.unconfirmed
+	res.Rechecked, res.Withheld = out.confirmed+out.unconfirmed, out.unconfirmed
+	res.Contradictions = out.considered - out.unconfirmed
+	return res, nil
+}
 
+// recheckOutcome is what one re-check did; withheld holds the pair keys it removed.
+type recheckOutcome struct {
+	considered, judged, unjudged int
+	confirmed, unconfirmed       int
+	withheld                     map[string]bool
+	stop                         error
+}
+
+func (o recheckOutcome) degraded() string {
+	return fmt.Sprintf("re-check left %d contradiction(s) unchecked: %v", o.unjudged, o.stop)
+}
+
+// recheck re-judges unmarked contradicts edges (only those whose pair key is in
+// only, when non-nil), marks the confirmed, deletes the rest, and rescores.
+func (v *Verifier) recheck(ctx context.Context, sessionID string, only map[string]bool, res *Result) (recheckOutcome, error) {
+	out := recheckOutcome{withheld: map[string]bool{}}
 	var (
 		claims []*core.Claim
 		edges  []*core.ClaimEdge
@@ -868,7 +954,7 @@ func (v *Verifier) Recheck(ctx context.Context, sessionID string) (*Result, erro
 		edges, err = q.ListEdges(ctx, sessionID, 0)
 		return err
 	}); err != nil {
-		return res, err
+		return out, err
 	}
 
 	byID := make(map[string]*core.Claim, len(claims))
@@ -882,54 +968,66 @@ func (v *Verifier) Recheck(ctx context.Context, sessionID string) (*Result, erro
 	)
 	for _, e := range edges {
 		a, b := byID[e.FromID], byID[e.ToID]
-		if e.Kind != core.EdgeContradicts || a == nil || b == nil {
+		if e.Kind != core.EdgeContradicts || IsRechecked(e) || a == nil || b == nil {
 			continue
 		}
 		p := newPair(a, b)
+		if only != nil && !only[p.Key()] {
+			continue
+		}
 		first = append(first, Judged{Pair: p, Relation: RelContradicts})
 		pairs = append(pairs, p)
 		edgeOf[p.Key()] = e
 	}
+	out.considered = len(pairs)
 	if len(pairs) == 0 {
-		return res, nil
+		return out, nil
 	}
 
 	again, unjudged, _, _, stop := v.runBatches(ctx, sessionID, v.RecheckModel, Batches(pairs, v.BatchSize), res)
-	res.PairsJudged = len(again)
-	res.PairsUnjudged = len(unjudged)
-	if stop != nil {
-		res.Degraded = fmt.Sprintf("re-check left %d contradiction(s) unchecked: %v", len(unjudged), stop)
-	}
+	out.judged, out.unjudged, out.stop = len(again), len(unjudged), stop
 	second := make(map[string]Relation, len(again))
 	for _, j := range again {
 		second[j.Pair.Key()] = j.Relation.Normalize()
 	}
-	out, confirmed, unconfirmed := ApplyConfirmations(first, second)
-	res.PairsConfirmed, res.PairsUnconfirmed = confirmed, unconfirmed
-	res.Rechecked, res.Withheld = confirmed+unconfirmed, unconfirmed
+	judged, confirmed, unconfirmed := ApplyConfirmations(first, second)
+	out.confirmed, out.unconfirmed = confirmed, unconfirmed
 
 	drop := map[string]bool{}
-	for _, j := range out {
+	marked := map[string]*core.ClaimEdge{}
+	var mark []core.ClaimEdge
+	for _, j := range judged {
+		if _, asked := second[j.Pair.Key()]; !asked {
+			continue
+		}
+		e := edgeOf[j.Pair.Key()]
 		if j.Relation == RelContradicts {
-			res.Contradictions++
+			m := *e
+			m.CreatedBy = RecheckedBy + v.RecheckModel
+			mark = append(mark, m)
+			marked[e.ID] = &m
 		} else {
-			drop[edgeOf[j.Pair.Key()].ID] = true
+			drop[e.ID] = true
+			out.withheld[j.Pair.Key()] = true
 		}
 	}
-	if len(drop) == 0 {
-		return res, nil
+	if len(mark) == 0 && len(drop) == 0 {
+		return out, nil
 	}
 
 	kept := make([]*core.ClaimEdge, 0, len(edges)-len(drop))
 	ids := make([]string, 0, len(drop))
 	for _, e := range edges {
-		if drop[e.ID] {
+		switch {
+		case drop[e.ID]:
 			ids = append(ids, e.ID)
-		} else {
+		case marked[e.ID] != nil:
+			kept = append(kept, marked[e.ID])
+		default:
 			kept = append(kept, e)
 		}
 	}
-	scores, breakdown := DeriveConfidence(claims, kept)
+	scores, breakdown := DeriveConfidence(claims, v.scoringEdges(kept))
 	for i := range scores {
 		if c := byID[scores[i].ClaimID]; c != nil && c.VerifiedAt == nil {
 			scores[i].KeepUnverified = true
@@ -939,13 +1037,18 @@ func (v *Verifier) Recheck(ctx context.Context, sessionID string) (*Result, erro
 		if err := tx.DeleteEdges(ctx, ids); err != nil {
 			return err
 		}
+		if len(mark) > 0 {
+			if err := tx.InsertEdges(ctx, mark); err != nil {
+				return err
+			}
+		}
 		return tx.ScoreClaims(ctx, scores)
 	}); err != nil {
-		return res, err
+		return out, err
 	}
 	res.Scores = breakdown
 	res.ClaimsScored = len(scores)
-	return res, nil
+	return out, nil
 }
 
 // persist writes the edges and marks every target claim verified, except one
@@ -967,7 +1070,7 @@ func (v *Verifier) persist(ctx context.Context, sessionID string, pool, targets 
 	priorEdges := res.priorEdges
 	all := append(append([]*core.ClaimEdge(nil), priorEdges...), pointers(newEdges)...)
 
-	scores, breakdown := DeriveConfidence(pool, all)
+	scores, breakdown := DeriveConfidence(pool, v.scoringEdges(all))
 	res.Scores = breakdown
 
 	// A skipped target keeps its derived confidence but not verified_at.
@@ -1023,6 +1126,14 @@ func (v *Verifier) persist(ctx context.Context, sessionID string, pool, targets 
 	res.ClaimsVerified = verified
 	res.ClaimsScored = len(scores)
 	return nil
+}
+
+// joinDegraded appends next to cur, separated by "; ".
+func joinDegraded(cur, next string) string {
+	if cur == "" {
+		return next
+	}
+	return cur + "; " + next
 }
 
 func pointers(edges []core.ClaimEdge) []*core.ClaimEdge {

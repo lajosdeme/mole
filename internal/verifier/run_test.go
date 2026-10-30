@@ -105,6 +105,7 @@ type rig struct {
 	sess *core.Session
 	llm  *scriptedLLM
 	v    *verifier.Verifier
+	path string
 }
 
 func newRig(t *testing.T, budgetTokens int64, claims []core.Claim, reply func(int, string) (string, error)) *rig {
@@ -128,7 +129,8 @@ func newRigFromSpec(t *testing.T, spec budget.SessionSpec, claims []core.Claim, 
 	t.Helper()
 	ctx := context.Background()
 
-	db, err := sqlite.Open(filepath.Join(t.TempDir(), "t.db"), sqlite.Options{})
+	path := filepath.Join(t.TempDir(), "t.db")
+	db, err := sqlite.Open(path, sqlite.Options{})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -162,7 +164,7 @@ func newRigFromSpec(t *testing.T, spec budget.SessionSpec, claims []core.Claim, 
 
 	fl := &scriptedLLM{reply: reply}
 	return &rig{
-		db: db, led: led, sess: sess, llm: fl,
+		db: db, led: led, sess: sess, llm: fl, path: path,
 		v: &verifier.Verifier{
 			Store: db, Ledger: led, LLM: fl,
 			Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
