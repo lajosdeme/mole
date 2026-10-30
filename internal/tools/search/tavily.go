@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/tools/limiter"
 )
 
@@ -67,10 +68,6 @@ func (p *tavilyProvider) Search(ctx context.Context, query string, opts Options)
 	opts = opts.withDefaults()
 	start := time.Now()
 
-	if err := p.wait(ctx); err != nil {
-		return nil, err
-	}
-
 	depth := "basic"
 	if opts.Deep {
 		depth = "advanced"
@@ -82,6 +79,71 @@ func (p *tavilyProvider) Search(ctx context.Context, query string, opts Options)
 		IncludeRawContent: opts.IncludeContent,
 		IncludeDomains:    opts.IncludeDomains,
 		ExcludeDomains:    opts.ExcludeDomains,
+	}
+	parsed, err := p.post(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+	calls := int64(1)
+	// Tavily can return fewer results when asked for raw content; the rest come
+	// from a second query without it, and the actor fetches those pages itself.
+	if payload.IncludeRawContent && len(parsed.Results) < opts.MaxResults {
+		payload.IncludeRawContent = false
+		if more, err := p.post(ctx, payload); err == nil {
+			calls++
+			seen := make(map[string]bool, len(parsed.Results))
+			for _, r := range parsed.Results {
+				seen[r.URL] = true
+			}
+			for _, r := range more.Results {
+				if len(parsed.Results) >= opts.MaxResults {
+					break
+				}
+				if !seen[r.URL] {
+					seen[r.URL] = true
+					parsed.Results = append(parsed.Results, r)
+				}
+			}
+		}
+	}
+
+	out := &Response{
+		Query:    query,
+		Provider: KindTavily,
+		Cost:     core.Cost{USDMicros: p.queryCost().USDMicros * calls},
+	}
+	for _, r := range parsed.Results {
+		if r.URL == "" {
+			continue
+		}
+		// raw_content is the full page; content is Tavily's query-focused
+		// extract. Prefer the full text: the actor's own chunker and quote
+		// verification want the whole document, not a pre-summarized slice of
+		// it — a claim cannot be grounded against text that was already
+		// filtered by someone else's relevance judgement.
+		text := r.RawContent
+		if strings.TrimSpace(text) == "" {
+			text = r.Content
+		}
+
+		out.Results = append(out.Results, Result{
+			URL:         r.URL,
+			Title:       r.Title,
+			Snippet:     r.Content,
+			Content:     text,
+			Score:       r.Score,
+			PublishedAt: parseTavilyDate(r.PublishedDate),
+			Rank:        len(out.Results) + 1,
+		})
+	}
+	out.Elapsed = time.Since(start)
+	return out, nil
+}
+
+// post sends one search request and decodes the answer.
+func (p *tavilyProvider) post(ctx context.Context, payload tavilyRequest) (*tavilyResponse, error) {
+	if err := p.wait(ctx); err != nil {
+		return nil, err
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -119,38 +181,7 @@ func (p *tavilyProvider) Search(ctx context.Context, query string, opts Options)
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return nil, fmt.Errorf("search: tavily decode: %w", err)
 	}
-
-	out := &Response{
-		Query:    query,
-		Provider: KindTavily,
-		Cost:     p.queryCost(),
-	}
-	for _, r := range parsed.Results {
-		if r.URL == "" {
-			continue
-		}
-		// raw_content is the full page; content is Tavily's query-focused
-		// extract. Prefer the full text: the actor's own chunker and quote
-		// verification want the whole document, not a pre-summarized slice of
-		// it — a claim cannot be grounded against text that was already
-		// filtered by someone else's relevance judgement.
-		text := r.RawContent
-		if strings.TrimSpace(text) == "" {
-			text = r.Content
-		}
-
-		out.Results = append(out.Results, Result{
-			URL:         r.URL,
-			Title:       r.Title,
-			Snippet:     r.Content,
-			Content:     text,
-			Score:       r.Score,
-			PublishedAt: parseTavilyDate(r.PublishedDate),
-			Rank:        len(out.Results) + 1,
-		})
-	}
-	out.Elapsed = time.Since(start)
-	return out, nil
+	return &parsed, nil
 }
 
 func parseTavilyDate(s string) *time.Time {
