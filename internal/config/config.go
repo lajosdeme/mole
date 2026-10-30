@@ -357,6 +357,7 @@ func (c *Config) applyEnv() {
 	setIf(&c.Search.Provider, "MOLE_SEARCH_PROVIDER")
 	setIf(&c.Search.BraveKey, "MOLE_BRAVE_API_KEY", "BRAVE_API_KEY")
 	setIf(&c.Search.TavilyKey, "MOLE_TAVILY_API_KEY", "TAVILY_API_KEY")
+	setIf(&c.LLM.Provider, "MOLE_LLM_PROVIDER")
 	// ANTHROPIC_API_KEY fills the top-level key only for an anthropic or unset provider.
 	llmKeys := []string{"MOLE_LLM_API_KEY"}
 	if providerKind(c.LLM.Provider) == "anthropic" {
@@ -365,6 +366,7 @@ func (c *Config) applyEnv() {
 	setIf(&c.LLM.APIKey, llmKeys...)
 	setIf(&c.LLM.BaseURL, "MOLE_LLM_BASE_URL")
 	setIf(&c.LLM.Model, "MOLE_LLM_MODEL")
+	setIf(&c.LLM.CheapModel, "MOLE_LLM_CHEAP_MODEL")
 	setIf(&c.LLM.VerifierModel, "MOLE_LLM_VERIFIER_MODEL")
 	setIf(&c.LLM.RecheckModel, "MOLE_LLM_RECHECK_MODEL")
 	setIf(&c.ContactEmail, "MOLE_CONTACT_EMAIL")
