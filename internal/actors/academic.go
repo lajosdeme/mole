@@ -167,7 +167,8 @@ func (a *AcademicActor) Run(ctx context.Context, lead core.Lead) (*Result, error
 		// share at the default. WebActor decrements for exactly this reason: the
 		// cap exists so one verbose document cannot dominate the graph, and §11.3
 		// counts publishers, so one paper outvoting four corrupts confidence.
-		remaining := maxClaims - len(out.Claims)
+		remaining := maxClaims - (len(out.Claims) - out.Qualifiers)
+		qualifiersLeft := max(budget.withDefaults().MaxQualifiersPerSource-out.Qualifiers, 0)
 
 		// Gate BEFORE target, and the order is load-bearing now that
 		// fullTextTarget can make a request. Go evaluates && left to right, so
@@ -176,7 +177,7 @@ func (a *AcademicActor) Run(ctx context.Context, lead core.Lead) (*Result, error
 		// which is exactly the spend the ladder exists to avoid.
 		if remaining > 0 && shouldEscalate(lead.Query, out.Claims) {
 			if target := a.fullTextTarget(ctx, p); target != "" {
-				extra, spent := a.readFullText(ctx, lead, p, target, miner, remaining, maxInput-used, res)
+				extra, spent := a.readFullText(ctx, lead, p, target, miner, remaining, qualifiersLeft, maxInput-used, res)
 				res.Claims = append(res.Claims, extra...)
 				used += spent
 				if used >= maxInput {
@@ -452,6 +453,7 @@ func (a *AcademicActor) readFullText(
 	target string,
 	miner *Miner,
 	maxClaims int,
+	maxQualifiers int,
 	tokenBudget int64,
 	res *Result,
 ) ([]core.Claim, int64) {
@@ -495,8 +497,9 @@ func (a *AcademicActor) readFullText(
 	}
 
 	var (
-		claims []core.Claim
-		spent  int64
+		claims     []core.Claim
+		qualifiers int
+		spent      int64
 	)
 	for _, idx := range order {
 		chunk := chunks[idx]
@@ -520,7 +523,9 @@ func (a *AcademicActor) readFullText(
 			// Decremented, and the break below bounds it too. Either alone holds
 			// the cap; both are kept because this one also stops the model being
 			// asked for claims that would be thrown away.
-			MaxClaims: maxClaims - len(claims),
+			MaxClaims:     maxClaims - (len(claims) - qualifiers),
+			MaxQualifiers: maxQualifiers - qualifiers,
+			Question:      a.Question,
 		})
 		if out.HasCall {
 			res.Costs = append(res.Costs, out.Call)
@@ -534,7 +539,8 @@ func (a *AcademicActor) readFullText(
 			continue
 		}
 		claims = append(claims, out.Claims...)
-		if len(claims) >= maxClaims {
+		qualifiers += out.Qualifiers
+		if len(claims)-qualifiers >= maxClaims && qualifiers >= maxQualifiers {
 			break
 		}
 	}
