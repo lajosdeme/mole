@@ -654,6 +654,10 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 // has been timed; a tenth of the wall clock applies when smaller.
 const DefaultWaveBudget = 60 * time.Second
 
+// DefaultReportAllowance caps the time kept free for the report before the
+// wall clock; a tenth of the wall clock applies when smaller.
+const DefaultReportAllowance = 60 * time.Second
+
 // SetClock replaces the Verifier's clock.
 func (v *Verifier) SetClock(fn func() time.Time) { v.now = fn }
 
@@ -671,7 +675,7 @@ func (v *Verifier) observeBatch(d time.Duration) {
 }
 
 // waveFits refuses a wave that would not finish, at the slowest batch timed
-// so far, before the session's wall clock.
+// so far, before the wall clock less the report's allowance.
 func (v *Verifier) waveFits(sess *core.Session) error {
 	if sess.MaxWallClock <= 0 {
 		return nil
@@ -682,7 +686,8 @@ func (v *Verifier) waveFits(sess *core.Session) error {
 	if need == 0 {
 		need = min(DefaultWaveBudget, sess.MaxWallClock/10)
 	}
-	deadline := sess.CreatedAt.Add(sess.MaxWallClock)
+	report := min(DefaultReportAllowance, sess.MaxWallClock/10)
+	deadline := sess.CreatedAt.Add(sess.MaxWallClock - report)
 	if left := deadline.Sub(v.clock()); left < need {
 		return fmt.Errorf("wall clock too close for another wave (%s left, a batch takes up to %s)",
 			left.Round(time.Second), need.Round(time.Second))

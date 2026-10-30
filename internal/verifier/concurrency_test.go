@@ -532,6 +532,7 @@ func wallClockRig(t *testing.T, wall time.Duration, clock *fakeClock, reply func
 		BudgetUnit: core.BudgetTokens, Budget: 2_000_000,
 		MaxLeads: 50, MaxToolCalls: 500, MaxWallClock: wall,
 	}, distinctClaims(4), reply)
+	r.sess = r.reload(t) // CreatedAt as stored, which the Verifier reads
 	r.v.SetClock(clock.now)
 	r.v.BatchSize = 1
 	r.v.Concurrency = 1
@@ -585,9 +586,9 @@ func TestTheWaveBudgetIsTheLongestBatchSeen(t *testing.T) {
 		clock.advance(30 * time.Second)
 		return judgeEveryPair(verifier.RelNeither)(call, prompt)
 	})
-	// 70s left: the first wave fits the 60s default, the second the 30s
-	// observed, and the third, with 10s left, does not.
-	clock.t = r.sess.CreatedAt.Add(time.Hour - 70*time.Second)
+	// 70s before the report's 60s: the first wave fits the 60s default, the
+	// second the 30s observed, and the third, with 10s left, does not.
+	clock.t = r.sess.CreatedAt.Add(time.Hour - 130*time.Second)
 
 	res, err := r.v.Run(context.Background(), r.sess.ID)
 	if err != nil {
@@ -646,6 +647,33 @@ func TestAStoppedFinalConfirmIsReported(t *testing.T) {
 	if !strings.Contains(res.Degraded, "6 positive(s) left unconfirmed") ||
 		!strings.Contains(res.Degraded, "wall clock") {
 		t.Errorf("degraded = %q, want the unconfirmed positive and the wall clock named", res.Degraded)
+	}
+}
+
+// TestAWaveLeavesTimeForTheReport checks that a wave must fit before the wall
+// clock less the report's allowance (60s of an hour).
+func TestAWaveLeavesTimeForTheReport(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		left      time.Duration
+		wantCalls int
+	}{
+		{"exactly enough", 90 * time.Second, 6},
+		{"a second short", 89 * time.Second, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := &fakeClock{}
+			r := wallClockRig(t, time.Hour, clock, judgeEveryPair(verifier.RelNeither))
+			clock.t = r.sess.CreatedAt.Add(time.Hour - tc.left)
+			verifier.ObserveBatch(r.v, 30*time.Second)
+
+			if _, err := r.v.Run(context.Background(), r.sess.ID); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := r.llm.count(); got != tc.wantCalls {
+				t.Errorf("%d calls, want %d", got, tc.wantCalls)
+			}
+		})
 	}
 }
 
