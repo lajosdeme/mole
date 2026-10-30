@@ -288,16 +288,23 @@ const (
 	maxQueryWords     = 10
 )
 
-// shortQueries keeps the first maxQueriesPerLead non-empty queries, each cut to
-// maxQueryWords words.
+// shortQueries keeps the first maxQueriesPerLead distinct non-empty queries,
+// each cut to maxQueryWords words.
 func shortQueries(in []string) []string {
 	var out []string
+	seen := map[string]bool{}
 	for _, q := range in {
 		words := strings.Fields(q)
 		if len(words) == 0 {
 			continue
 		}
-		out = append(out, strings.Join(words[:min(len(words), maxQueryWords)], " "))
+		q = strings.Join(words[:min(len(words), maxQueryWords)], " ")
+		key := strings.ToLower(q)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, q)
 		if len(out) >= maxQueriesPerLead {
 			break
 		}

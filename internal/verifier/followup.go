@@ -214,6 +214,7 @@ func disambiguationQuery(p Pair) string {
 const (
 	claimQueryWords   = 8
 	sourceQueryTopics = 4
+	maxUnitWords      = 2
 )
 
 // followUpQueries builds keyword searches from a contradiction: one per claim
@@ -228,29 +229,64 @@ func followUpQueries(p Pair) []string {
 	}
 	add(claimQuery(a))
 	add(claimQuery(b))
-
-	var src []string
-	for _, ws := range [][]string{a, b} {
-		if f := figureIndex(ws); f >= 0 && !slices.Contains(src, ws[f]) {
-			src = append(src, ws[f])
-		}
-	}
-	for _, w := range topicWords(a, b) {
-		if len(src) >= 2+sourceQueryTopics {
-			break
-		}
-		if !slices.Contains(src, w) {
-			src = append(src, w)
-		}
-	}
-	if len(src) > 0 {
+	if src := sourceTerms(a, b); len(src) > 0 {
 		add(strings.Join(src, " ") + " source OR methodology")
 	}
 	return out
 }
 
-// claimQuery keeps a claim's figure, its capitalised names and then its first
-// content words, in sentence order, up to claimQueryWords words.
+// sourceTerms returns the first claim's figure with its unit and first name,
+// or the claims' topic words when neither holds a figure.
+func sourceTerms(a, b []string) []string {
+	for _, ws := range [][]string{a, b} {
+		f := figureIndex(ws)
+		if f < 0 {
+			continue
+		}
+		terms := []string{ws[f]}
+		for _, i := range unitIndices(ws, f) {
+			terms = append(terms, ws[i])
+		}
+		if n := firstName(ws, terms); n != "" {
+			terms = append(terms, n)
+		}
+		return terms
+	}
+	topics := topicWords(a, b)
+	return topics[:min(len(topics), sourceQueryTopics)]
+}
+
+// firstName returns the claim's first capitalised name, else its first content
+// word, skipping words already in terms.
+func firstName(ws, terms []string) string {
+	for _, match := range []func(int, string) bool{
+		func(i int, w string) bool { return i > 0 && isName(w) },
+		func(_ int, w string) bool { return !isStopword(w) && figureIndex([]string{w}) < 0 },
+	} {
+		for i, w := range ws {
+			if match(i, w) && !slices.Contains(terms, w) {
+				return w
+			}
+		}
+	}
+	return ""
+}
+
+// unitIndices returns up to maxUnitWords content words directly after the
+// figure at f.
+func unitIndices(ws []string, f int) []int {
+	var out []int
+	for i := f + 1; i < len(ws) && len(out) < maxUnitWords; i++ {
+		if isStopword(ws[i]) || figureIndex([]string{ws[i]}) == 0 {
+			break
+		}
+		out = append(out, i)
+	}
+	return out
+}
+
+// claimQuery keeps a claim's figure and unit, its capitalised names and then its
+// first content words, in sentence order, up to claimQueryWords words.
 func claimQuery(ws []string) string {
 	keep := make([]bool, len(ws))
 	seen := map[string]bool{}
@@ -260,7 +296,13 @@ func claimQuery(ws []string) string {
 			seen[strings.ToLower(ws[i])] = true
 		}
 	}
-	pick(figureIndex(ws))
+	f := figureIndex(ws)
+	pick(f)
+	if f >= 0 {
+		for _, i := range unitIndices(ws, f) {
+			pick(i)
+		}
+	}
 	for i, w := range ws {
 		if i > 0 && isName(w) {
 			pick(i)

@@ -314,6 +314,29 @@ func TestTavilyFullRawContentAnswerMakesOneCall(t *testing.T) {
 	}
 }
 
+// TestTavilyNoTopUpMakesOneCall checks NoTopUp keeps a short raw-content answer to one request.
+func TestTavilyNoTopUpMakesOneCall(t *testing.T) {
+	calls := 0
+	srv := serve(t, 200, tavilyFixture, func(*http.Request) { calls++ })
+	p, err := search.New(search.Config{
+		Provider: search.KindTavily, APIKey: "tvly-test",
+		BaseURL: srv.URL, RateLimit: fastLimit(),
+	}, srv.Client())
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	resp, err := p.Search(context.Background(), "q", search.Options{MaxResults: 10, IncludeContent: true, NoTopUp: true})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
+	}
+	if want := int64(search.DefaultTavilyCostMicros); resp.Cost.USDMicros != want {
+		t.Errorf("cost = %d, want one query (%d)", resp.Cost.USDMicros, want)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Shared behaviour
 // ---------------------------------------------------------------------------

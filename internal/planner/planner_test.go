@@ -505,3 +505,18 @@ func TestReplanKeepsLeadsWhenDone(t *testing.T) {
 		t.Errorf("done=%v leads=%d, want done with 1 lead", got.Done, len(got.Leads))
 	}
 }
+
+// TestDuplicateQueriesAreDropped checks repeated keyword queries are searched once.
+func TestDuplicateQueriesAreDropped(t *testing.T) {
+	reply := `{"questions":[{"id":"q1","question":"How often do EVs catch fire?","queries":[
+		"EV fire rate", "ev  fire RATE", "EV fire rate source"]}],"rationale":"r"}`
+	p := &planner.Planner{LLM: &fakeLLM{reply: func(string) string { return reply }}}
+	initial, err := p.InitialLeads(context.Background(), session("q"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"EV fire rate", "EV fire rate source"}
+	if got := initial.Leads[0].Queries; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("queries = %q, want %q", got, want)
+	}
+}

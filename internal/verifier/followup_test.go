@@ -2,6 +2,7 @@ package verifier
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -355,5 +356,25 @@ func TestFollowUpQueriesAreShortAndCarryEachFigure(t *testing.T) {
 	}
 	if got[0].Lead.Query == "" {
 		t.Error("follow-up lost its descriptive lead text")
+	}
+}
+
+// TestSourceQueryPairsOneFigureWithItsUnitAndEntity checks the provenance query shape.
+func TestSourceQueryPairsOneFigureWithItsUnitAndEntity(t *testing.T) {
+	a := &core.Claim{ID: "c_a", Text: "Electric cars in Sweden had 3.8 fires per 100,000 vehicles in 2022."}
+	b := &core.Claim{ID: "c_b", Text: "Gasoline cars have 1,530 fires per 100,000 vehicles, according to AutoInsuranceEZ."}
+	qs := followUpQueries(newPair(a, b))
+	want := "3.8 fires Sweden source OR methodology"
+	if !slices.Contains(qs, want) {
+		t.Errorf("queries = %q, want one equal to %q", qs, want)
+	}
+}
+
+// TestClaimQueryKeepsTheUnitAfterTheFigure checks the word after the figure survives the word cap.
+func TestClaimQueryKeepsTheUnitAfterTheFigure(t *testing.T) {
+	q := claimQuery(queryWords("Battery electric vehicles experience roughly 4 fires per 100,000 " +
+		"vehicles sold, according to a 2023 Swedish Civil Contingencies Agency report."))
+	if !strings.Contains(" "+q+" ", " 4 fires ") {
+		t.Errorf("query %q lost the unit after the figure", q)
 	}
 }

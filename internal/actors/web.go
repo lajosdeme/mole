@@ -261,10 +261,14 @@ func (a *WebActor) searchAll(ctx context.Context, lead core.Lead, budget Budget,
 		lists    [][]search.Result
 		firstErr error
 	)
-	for _, q := range searchQueries(lead) {
+	queries := searchQueries(lead)
+	// Asks for twice MaxSources results in total, split across the queries.
+	perQuery := (budget.MaxSources*2 + len(queries) - 1) / len(queries)
+	for _, q := range queries {
 		sr, err := a.Search.Search(ctx, q, search.Options{
-			MaxResults:     budget.MaxSources * 2, // headroom for guard/robots refusals
+			MaxResults:     perQuery,
 			IncludeContent: true,
+			NoTopUp:        len(queries) > 1,
 		})
 		if err != nil {
 			if firstErr == nil {
@@ -293,7 +297,7 @@ func (a *WebActor) searchAll(ctx context.Context, lead core.Lead, budget Budget,
 }
 
 // mergeByURL interleaves result lists rank by rank, keeping the first hit for
-// each URL.
+// each normalized URL.
 func mergeByURL(lists [][]search.Result) []search.Result {
 	var out []search.Result
 	seen := map[string]bool{}
@@ -304,7 +308,7 @@ func mergeByURL(lists [][]search.Result) []search.Result {
 				continue
 			}
 			more = true
-			if u := l[rank].URL; !seen[u] {
+			if u := cache.NormalizeURL(l[rank].URL); !seen[u] {
 				seen[u] = true
 				out = append(out, l[rank])
 			}
