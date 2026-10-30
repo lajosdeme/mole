@@ -490,6 +490,13 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 	}
 	if res.Err != nil && res.Status == core.StatusDone {
 		res.Status = core.StatusFailed
+		// A run cut short by its context is exhausted or cancelled, not failed.
+		switch err := runCtx.Err(); {
+		case errors.Is(err, context.DeadlineExceeded):
+			res.Status = core.StatusExhausted
+		case errors.Is(err, context.Canceled):
+			res.Status = core.StatusCancelled
+		}
 	}
 
 	// Persist the answer before finalizing.

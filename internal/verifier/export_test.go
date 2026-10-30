@@ -9,3 +9,6 @@ var EstimateBatch = (*Verifier).estimateBatch
 
 // ObserveBatch records d as a timed batch duration.
 func ObserveBatch(v *Verifier, d time.Duration) { v.observeBatch(d) }
+
+// SetClock replaces the Verifier's clock.
+func (v *Verifier) SetClock(fn func() time.Time) { v.now = fn }

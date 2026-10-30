@@ -658,9 +658,6 @@ const DefaultWaveBudget = 60 * time.Second
 // wall clock; a tenth of the wall clock applies when smaller.
 const DefaultReportAllowance = 60 * time.Second
 
-// SetClock replaces the Verifier's clock.
-func (v *Verifier) SetClock(fn func() time.Time) { v.now = fn }
-
 func (v *Verifier) clock() time.Time {
 	if v.now != nil {
 		return v.now()

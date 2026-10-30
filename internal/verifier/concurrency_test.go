@@ -570,6 +570,11 @@ func TestAWaveThatCannotFinishIsNotLaunched(t *testing.T) {
 				if res.PairsUnjudged != 6-tc.wantCalls {
 					t.Errorf("%d pairs unjudged, want %d", res.PairsUnjudged, 6-tc.wantCalls)
 				}
+				if tc.wantCalls == 0 {
+					if n := r.unverified(t); n != 4 {
+						t.Errorf("%d claims unverified, want all 4", n)
+					}
+				}
 			} else if res.Degraded != "" {
 				t.Errorf("degraded = %q, want a complete pass", res.Degraded)
 			}
@@ -583,12 +588,16 @@ func TestAWaveThatCannotFinishIsNotLaunched(t *testing.T) {
 func TestTheWaveBudgetIsTheLongestBatchSeen(t *testing.T) {
 	clock := &fakeClock{}
 	r := wallClockRig(t, time.Hour, clock, func(call int, prompt string) (string, error) {
-		clock.advance(30 * time.Second)
+		if call == 0 {
+			clock.advance(40 * time.Second)
+		} else {
+			clock.advance(10 * time.Second)
+		}
 		return judgeEveryPair(verifier.RelNeither)(call, prompt)
 	})
-	// 70s before the report's 60s: the first wave fits the 60s default, the
-	// second the 30s observed, and the third, with 10s left, does not.
-	clock.t = r.sess.CreatedAt.Add(time.Hour - 130*time.Second)
+	// 80s before the report's 60s: waves of 40s then 10s leave 30s, short of
+	// the longest batch though not the latest.
+	clock.t = r.sess.CreatedAt.Add(time.Hour - 140*time.Second)
 
 	res, err := r.v.Run(context.Background(), r.sess.ID)
 	if err != nil {

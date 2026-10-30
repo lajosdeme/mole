@@ -188,6 +188,7 @@ to be confused with `llm.timeout`, which bounds a single model call.
 mole research "how much electricity does the bitcoin network use?" --usd 0.50
 mole research "..." --tokens 200000            # token budget instead of dollars
 mole research "..." --max-sources 8 --max-depth 3
+mole research "..." --max-leads 20             # leads in total; 0 derives it from --max-depth
 mole research "..." --timeout 20m               # wall-clock ceiling for the session
 mole research "..." --max-tool-calls 2000       # backstop; 0 sizes one from --max-depth
 mole research "..." --json                      # machine-readable result

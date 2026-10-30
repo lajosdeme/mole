@@ -243,17 +243,18 @@ func TestOnlyACancelSkipsTheReport(t *testing.T) {
 		name       string
 		ctx        func() context.Context
 		wantReport bool
+		wantStatus core.SessionStatus
 	}{
 		{"deadline", func() context.Context {
 			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 			t.Cleanup(cancel)
 			return ctx
-		}, true},
+		}, true, core.StatusExhausted},
 		{"cancel", func() context.Context {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			return ctx
-		}, false},
+		}, false, core.StatusCancelled},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, db := newRunner(t)
@@ -287,6 +288,9 @@ func TestOnlyACancelSkipsTheReport(t *testing.T) {
 			}
 			if grounded {
 				t.Error("grounding ran after the research context ended")
+			}
+			if res.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", res.Status, tc.wantStatus)
 			}
 			if res.Report == nil {
 				t.Fatal("no report written")
