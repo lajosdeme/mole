@@ -31,19 +31,26 @@ import (
 
 type fakeSearch struct {
 	results []search.Result
+	byQuery map[string][]search.Result
 	cost    core.Cost
 	err     error
 	calls   int
+	queries []string
 }
 
 func (f *fakeSearch) Kind() search.Kind { return "fake" }
 
 func (f *fakeSearch) Search(ctx context.Context, q string, o search.Options) (*search.Response, error) {
 	f.calls++
+	f.queries = append(f.queries, q)
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &search.Response{Query: q, Provider: "fake", Results: f.results, Cost: f.cost}, nil
+	results := f.results
+	if r, ok := f.byQuery[q]; ok {
+		results = r
+	}
+	return &search.Response{Query: q, Provider: "fake", Results: results, Cost: f.cost}, nil
 }
 
 type fakeFetcher struct {
@@ -949,5 +956,64 @@ func TestClaimsSurviveACancelledRun(t *testing.T) {
 	if len(stored) != len(res.Claims) {
 		t.Fatalf("mined %d claims but stored %d — evidence that was paid for was "+
 			"discarded by the cancellation", len(res.Claims), len(stored))
+	}
+}
+
+// TestEachQueryIsSearchedBilledAndMergedByURL checks one billed search per query and round-robin URL dedupe.
+func TestEachQueryIsSearchedBilledAndMergedByURL(t *testing.T) {
+	ctx := context.Background()
+	const a, b, c = "https://a.example/p", "https://b.example/p", "https://c.example/p"
+	page := func(u string) *fetch.Result {
+		return &fetch.Result{URL: u, Outcome: fetch.OutcomeOK, StatusCode: 200,
+			ContentType: "text/html", Content: []byte(articleHTML())}
+	}
+	h := newHarness(t, nil, map[string]*fetch.Result{a: page(a), b: page(b), c: page(c)}, nil)
+	h.search.byQuery = map[string][]search.Result{
+		"mambabyte benchmark":      {{URL: a, Rank: 1}, {URL: b, Rank: 2}},
+		"mambabyte bits per byte":  {{URL: b, Rank: 1}, {URL: c, Rank: 2}},
+		"mambabyte critique flaws": {{URL: a, Rank: 1}},
+	}
+	h.lead.Queries = []string{"mambabyte benchmark", "mambabyte bits per byte", "mambabyte critique flaws"}
+	h.actor.Budget = actors.Budget{MaxSources: 2, MaxInputTokens: 1_000_000}
+
+	res, err := h.actor.Run(ctx, h.lead)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Join(h.search.queries, "|") != strings.Join(h.lead.Queries, "|") {
+		t.Errorf("searched %q, want %q", h.search.queries, h.lead.Queries)
+	}
+	var searches []string
+	for _, c := range res.Costs {
+		if c.Type == core.CallSearch {
+			searches = append(searches, c.Input)
+			if c.Cost.USDMicros != 5000 {
+				t.Errorf("search %q billed %d, want 5000", c.Input, c.Cost.USDMicros)
+			}
+		}
+	}
+	if len(searches) != 3 {
+		t.Errorf("billed %d searches (%q), want 3", len(searches), searches)
+	}
+	if got := strings.Join(h.fetcher.fetched, " "); got != a+" "+b {
+		t.Errorf("fetched %q, want %q then %q", got, a, b)
+	}
+	if res.Stats.SearchResults != 3 {
+		t.Errorf("SearchResults = %d, want 3 unique URLs", res.Stats.SearchResults)
+	}
+	settled := h.settle(t, res)
+	if settled.Charged < 15000 {
+		t.Errorf("charged %d, want at least the three searches", settled.Charged)
+	}
+}
+
+// TestLeadWithoutQueriesSearchesItsText checks the lead text is the one query when none are set.
+func TestLeadWithoutQueriesSearchesItsText(t *testing.T) {
+	h := newHarness(t, nil, nil, nil)
+	if _, err := h.actor.Run(context.Background(), h.lead); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(h.search.queries) != 1 || h.search.queries[0] != h.lead.Query {
+		t.Errorf("searched %q, want only %q", h.search.queries, h.lead.Query)
 	}
 }

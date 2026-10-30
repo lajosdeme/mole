@@ -306,3 +306,54 @@ func TestContradictionsOverTheCapAreDeferred(t *testing.T) {
 		t.Errorf("a duplicate produced %d queued and %d deferred", len(q2), len(d2))
 	}
 }
+
+// TestFollowUpQueriesAreShortAndCarryEachFigure checks follow-up queries are short keyword searches.
+func TestFollowUpQueriesAreShortAndCarryEachFigure(t *testing.T) {
+	a := &core.Claim{ID: "c_a", Text: "Battery electric vehicles experience roughly 25 fires per " +
+		"100,000 vehicles sold, according to a 2023 Swedish Civil Contingencies Agency report."}
+	b := &core.Claim{ID: "c_b", Text: "Internal combustion engine vehicles have about 1,530 fires " +
+		"per 100,000 vehicles sold, according to AutoInsuranceEZ, which cited NTSB data."}
+
+	got := FollowUps([]Judged{contradiction(a, b)}, FollowUpOptions{SessionID: "s_1"})
+	if len(got) != 1 {
+		t.Fatalf("got %d follow-ups, want 1", len(got))
+	}
+	qs := got[0].Lead.Queries
+	if len(qs) < 2 || len(qs) > 3 {
+		t.Fatalf("queries = %q, want 2-3", qs)
+	}
+	hasWord := func(word string) bool {
+		for _, q := range qs {
+			for _, w := range strings.Fields(q) {
+				if w == word {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, q := range qs {
+		if n := len(strings.Fields(q)); n > 12 {
+			t.Errorf("query %q has %d words, want at most 12", q, n)
+		}
+		if strings.Contains(q, "evidence resolving") {
+			t.Errorf("query %q is the descriptive lead text", q)
+		}
+	}
+	for _, fig := range []string{"25", "1,530"} {
+		if !hasWord(fig) {
+			t.Errorf("no query carries the figure %s: %q", fig, qs)
+		}
+	}
+	for _, entity := range []string{"Swedish", "AutoInsuranceEZ"} {
+		if !hasWord(entity) {
+			t.Errorf("no query names %s: %q", entity, qs)
+		}
+	}
+	if !strings.Contains(strings.Join(qs, "|"), "source OR methodology") {
+		t.Errorf("no provenance query in %q", qs)
+	}
+	if got[0].Lead.Query == "" {
+		t.Error("follow-up lost its descriptive lead text")
+	}
+}

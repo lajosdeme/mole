@@ -378,6 +378,9 @@ type Lead struct {
 	Priority  int
 	Status    LeadStatus
 
+	// Queries are short keyword searches for the lead; empty means search Query.
+	Queries []string
+
 	// RootClaimID marks a lead spawned to resolve something about a claim —
 	// §11.4's verification lineage. Nil on an ordinary planner lead.
 	//

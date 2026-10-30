@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strings"
 
 	"github.com/lajosdeme/mole/internal/cache"
 	"github.com/lajosdeme/mole/internal/core"
@@ -81,22 +82,11 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 	}
 
 	// 1. Search.
-	sr, err := a.Search.Search(ctx, lead.Query, search.Options{
-		MaxResults:     budget.MaxSources * 2, // headroom for guard/robots refusals
-		IncludeContent: true,
-	})
+	hits, err := a.searchAll(ctx, lead, budget, res)
 	if err != nil {
-		return res, fmt.Errorf("actors/web: search: %w", err)
+		return res, err
 	}
-	res.Costs = append(res.Costs, core.ToolCall{
-		SessionID: a.SessionID,
-		LeadID:    &lead.ID,
-		Role:      core.RoleExecutor,
-		Type:      core.CallSearch,
-		Input:     lead.Query,
-		Cost:      sr.Cost,
-	})
-	res.Stats.SearchResults = len(sr.Results)
+	res.Stats.SearchResults = len(hits)
 
 	// 2-5. Read sources until the budget or the source cap is reached.
 	var (
@@ -105,18 +95,18 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 		perSource       []sourceSummary
 	)
 
-	for i, hit := range sr.Results {
+	for i, hit := range hits {
 		// Count sources READ, not sources that yielded something. Counting
 		// summaries meant a run where nothing extracted cleanly walked the
 		// entire result list — spending a fetch, an extract, and a model call
 		// per hit against a cap that never advanced.
 		if sourcesRead >= budget.MaxSources {
-			a.recordNotSelected(ctx, lead, sr.Results[i:])
+			a.recordNotSelected(ctx, lead, hits[i:])
 			break
 		}
 		if remaining := budget.MaxInputTokens - inputTokensUsed; remaining <= 0 {
 			res.Truncated = true
-			a.recordNotSelected(ctx, lead, sr.Results[i:])
+			a.recordNotSelected(ctx, lead, hits[i:])
 			break
 		}
 
@@ -248,6 +238,81 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 	}
 
 	return res, nil
+}
+
+// searchQueries returns the lead's keyword queries, or its text when it has none.
+func searchQueries(lead core.Lead) []string {
+	var out []string
+	for _, q := range lead.Queries {
+		if q = strings.TrimSpace(q); q != "" {
+			out = append(out, q)
+		}
+	}
+	if len(out) == 0 {
+		return []string{lead.Query}
+	}
+	return out
+}
+
+// searchAll runs one billed search per query and merges the hits by URL in
+// round-robin rank order. It fails only when every search fails.
+func (a *WebActor) searchAll(ctx context.Context, lead core.Lead, budget Budget, res *Result) ([]search.Result, error) {
+	var (
+		lists    [][]search.Result
+		firstErr error
+	)
+	for _, q := range searchQueries(lead) {
+		sr, err := a.Search.Search(ctx, q, search.Options{
+			MaxResults:     budget.MaxSources * 2, // headroom for guard/robots refusals
+			IncludeContent: true,
+		})
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			a.logger().WarnContext(ctx, "search query failed", "query", q, "err", err)
+			continue
+		}
+		res.Costs = append(res.Costs, core.ToolCall{
+			SessionID: a.SessionID,
+			LeadID:    &lead.ID,
+			Role:      core.RoleExecutor,
+			Type:      core.CallSearch,
+			Input:     q,
+			Cost:      sr.Cost,
+		})
+		lists = append(lists, sr.Results)
+	}
+	if len(lists) == 0 {
+		return nil, fmt.Errorf("actors/web: search: %w", firstErr)
+	}
+	return mergeByURL(lists), nil
+}
+
+// mergeByURL interleaves result lists rank by rank, keeping the first hit for
+// each URL.
+func mergeByURL(lists [][]search.Result) []search.Result {
+	var out []search.Result
+	seen := map[string]bool{}
+	for rank := 0; ; rank++ {
+		more := false
+		for _, l := range lists {
+			if rank >= len(l) {
+				continue
+			}
+			more = true
+			if u := l[rank].URL; !seen[u] {
+				seen[u] = true
+				out = append(out, l[rank])
+			}
+		}
+		if !more {
+			return out
+		}
+	}
 }
 
 // sourceSummary tracks one source's contribution: claims and rows toward

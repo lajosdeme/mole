@@ -29,6 +29,8 @@ type SubQuestion struct {
 	// replans without the full text being echoed back each time.
 	ID   string
 	Text string
+	// Queries are the short keyword searches for this sub-question.
+	Queries []string
 
 	// Leads counts dispatches against this question; Claims counts what came
 	// back. The pair is the coverage signal: leads without claims is a
@@ -468,6 +470,7 @@ func LeadsAcross(sessionID string, actors []core.ActorType, qs []SubQuestion, de
 			SessionID: sessionID,
 			ActorType: actors[i%len(actors)],
 			Query:     q.Text,
+			Queries:   q.Queries,
 			Depth:     depth,
 			ParentID:  parent,
 			Status:    core.LeadQueued,

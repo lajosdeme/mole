@@ -409,3 +409,53 @@ func TestPlannerCallsSendMediumEffort(t *testing.T) {
 		t.Errorf("efforts = %q, want two medium", f.efforts)
 	}
 }
+
+// TestLeadsCarryAtMostThreeShortQueries checks queries are parsed, capped at three and at ten words.
+func TestLeadsCarryAtMostThreeShortQueries(t *testing.T) {
+	reply := `{"questions":[{"id":"q1","question":"How often do EVs catch fire?","queries":[
+		"EV fire rate per 100,000 vehicles",
+		"  ",
+		"1,530 fires per 100,000 gasoline cars source",
+		"one two three four five six seven eight nine ten eleven twelve",
+		"EV fire statistic debunked OR misleading"]},
+		{"id":"q2","question":"Who measured it?"}],"rationale":"r"}`
+	f := &fakeLLM{reply: func(string) string { return reply }}
+	p := &planner.Planner{LLM: f}
+
+	check := func(leads []core.Lead) {
+		t.Helper()
+		if len(leads) != 2 {
+			t.Fatalf("got %d leads, want 2", len(leads))
+		}
+		want := []string{
+			"EV fire rate per 100,000 vehicles",
+			"1,530 fires per 100,000 gasoline cars source",
+			"one two three four five six seven eight nine ten",
+		}
+		if strings.Join(leads[0].Queries, "|") != strings.Join(want, "|") {
+			t.Errorf("queries = %q, want %q", leads[0].Queries, want)
+		}
+		if len(leads[1].Queries) != 0 {
+			t.Errorf("lead without queries got %q", leads[1].Queries)
+		}
+	}
+
+	initial, err := p.InitialLeads(context.Background(), session("q"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(initial.Leads)
+
+	d := planner.NewDigest("q", planner.DefaultDigestChars)
+	next, err := p.Replan(context.Background(), session("q"), d, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(next.Leads)
+
+	for _, prompt := range f.prompts {
+		if !strings.Contains(prompt, `"queries"`) {
+			t.Errorf("prompt does not ask for queries:\n%s", prompt)
+		}
+	}
+}

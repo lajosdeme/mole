@@ -757,7 +757,7 @@ func isUniqueViolation(err error) bool {
 // Leads
 // ---------------------------------------------------------------------------
 
-const leadCols = `id, session_id, actor_type, query, parent_id, depth, priority,
+const leadCols = `id, session_id, actor_type, query, queries, parent_id, depth, priority,
 	status, deferred, lease_owner, lease_expires, root_claim_id, verify_depth,
 	created_at, updated_at`
 
@@ -775,8 +775,8 @@ func (t *queries) InsertLead(ctx context.Context, l *core.Lead) error {
 	}
 
 	_, err := t.q.ExecContext(ctx, `
-		INSERT INTO leads (`+leadCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		l.ID, l.SessionID, string(l.ActorType), l.Query, nullStr(l.ParentID),
+		INSERT INTO leads (`+leadCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		l.ID, l.SessionID, string(l.ActorType), l.Query, encodeQueries(l.Queries), nullStr(l.ParentID),
 		l.Depth, l.Priority, string(l.Status), l.Deferred,
 		nullStr(l.LeaseOwner), nullMicros(l.LeaseExpires),
 		nullStr(l.RootClaimID), l.VerifyDepth,
@@ -796,16 +796,20 @@ func scanLead(sc interface{ Scan(...any) error }) (*core.Lead, error) {
 		owner     sql.NullString
 		expires   sql.NullInt64
 		rootClaim sql.NullString
+		queries   string
 		created   int64
 		updated   int64
 	)
-	err := sc.Scan(&l.ID, &l.SessionID, &actorType, &l.Query, &parentID,
+	err := sc.Scan(&l.ID, &l.SessionID, &actorType, &l.Query, &queries, &parentID,
 		&l.Depth, &l.Priority, &status, &l.Deferred, &owner, &expires,
 		&rootClaim, &l.VerifyDepth, &created, &updated)
 	if err != nil {
 		return nil, err
 	}
 	l.ActorType = core.ActorType(actorType)
+	if l.Queries, err = decodeQueries(queries); err != nil {
+		return nil, err
+	}
 	l.ParentID = strPtr(parentID)
 	l.Status = core.LeadStatus(status)
 	l.LeaseOwner = strPtr(owner)
@@ -814,6 +818,27 @@ func scanLead(sc interface{ Scan(...any) error }) (*core.Lead, error) {
 	l.CreatedAt = fromMicros(created)
 	l.UpdatedAt = fromMicros(updated)
 	return &l, nil
+}
+
+// encodeQueries stores a lead's queries as a JSON array, or "" when there are none.
+func encodeQueries(qs []string) string {
+	if len(qs) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(qs)
+	return string(b)
+}
+
+// decodeQueries reads what encodeQueries wrote.
+func decodeQueries(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var qs []string
+	if err := json.Unmarshal([]byte(s), &qs); err != nil {
+		return nil, fmt.Errorf("sqlite: decode lead queries: %w", err)
+	}
+	return qs, nil
 }
 
 func (t *queries) GetLead(ctx context.Context, id string) (*core.Lead, error) {
