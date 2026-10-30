@@ -590,7 +590,7 @@ func (r *Runner) finish(
 	// well-checked set of claims and no report to put them in.
 	var ground *verifier.GroundReport
 	if !cancelled && !timedOut {
-		ground = r.ground(ctx, vf, sess.ID, released)
+		ground = r.groundByDeadline(ctx, vf, sess, released)
 	}
 	if r.OnGround != nil && ground != nil {
 		r.OnGround(ground)
@@ -752,6 +752,19 @@ func (r *Runner) ground(
 		return nil
 	}
 	return rep
+}
+
+// groundByDeadline grounds under the session's research deadline, skipping it once passed.
+func (r *Runner) groundByDeadline(ctx context.Context, vf *verifier.Verifier, sess *core.Session, released int64) *verifier.GroundReport {
+	if deadline, ok := verifier.ResearchDeadline(sess); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	return r.ground(ctx, vf, sess.ID, released)
 }
 
 func (r *Runner) loadSession(ctx context.Context, id string) (*core.Session, error) {

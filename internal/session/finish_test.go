@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/lajosdeme/mole/internal/llm"
 	"github.com/lajosdeme/mole/internal/store"
 	"github.com/lajosdeme/mole/internal/store/sqlite"
+	"github.com/lajosdeme/mole/internal/tools/extract"
+	"github.com/lajosdeme/mole/internal/tools/fetch"
 	"github.com/lajosdeme/mole/internal/verifier"
 )
 
@@ -116,5 +119,32 @@ func checkReportIsBoundedAndCancellable(t *testing.T, runCtx func(context.Contex
 	}
 	if !errors.Is(probe.errAtEnd, context.Canceled) {
 		t.Errorf("report context ended with %v, want it cancelled with the parent", probe.errAtEnd)
+	}
+}
+
+type nopFetch struct{}
+
+func (nopFetch) Fetch(context.Context, string) (*fetch.Result, error) {
+	return nil, errors.New("no fetch")
+}
+
+type nopExtract struct{}
+
+func (nopExtract) Extract(context.Context, []byte, string, *url.URL) (*extract.Document, error) {
+	return nil, errors.New("no extract")
+}
+
+// TestGroundingIsSkippedPastTheResearchDeadline checks grounding makes no attempt once the research deadline has passed.
+func TestGroundingIsSkippedPastTheResearchDeadline(t *testing.T) {
+	var notices []string
+	r := &Runner{Notice: func(s string) { notices = append(notices, s) }}
+	vf := &verifier.Verifier{Grounder: &verifier.Grounder{Fetch: nopFetch{}, Extract: nopExtract{}}}
+	sess := &core.Session{ID: "s_1", CreatedAt: time.Now().Add(-2 * time.Minute), MaxWallClock: time.Minute}
+
+	if got := r.groundByDeadline(context.Background(), vf, sess, 1_000); got != nil {
+		t.Errorf("grounding ran past the deadline: %+v", got)
+	}
+	if len(notices) != 0 {
+		t.Errorf("grounding was attempted past the deadline: %v", notices)
 	}
 }

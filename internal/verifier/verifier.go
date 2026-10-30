@@ -692,6 +692,15 @@ const DefaultWaveBudget = 60 * time.Second
 // wall clock; a tenth of the wall clock applies when smaller.
 const DefaultReportAllowance = 60 * time.Second
 
+// ResearchDeadline is the wall clock less the report allowance; false without a wall clock.
+func ResearchDeadline(sess *core.Session) (time.Time, bool) {
+	if sess.MaxWallClock <= 0 {
+		return time.Time{}, false
+	}
+	report := min(DefaultReportAllowance, sess.MaxWallClock/10)
+	return sess.CreatedAt.Add(sess.MaxWallClock - report), true
+}
+
 func (v *Verifier) clock() time.Time {
 	if v.now != nil {
 		return v.now()
@@ -717,8 +726,7 @@ func (v *Verifier) waveFits(sess *core.Session) error {
 	if need == 0 {
 		need = min(DefaultWaveBudget, sess.MaxWallClock/10)
 	}
-	report := min(DefaultReportAllowance, sess.MaxWallClock/10)
-	deadline := sess.CreatedAt.Add(sess.MaxWallClock - report)
+	deadline, _ := ResearchDeadline(sess)
 	if left := deadline.Sub(v.clock()); left < need {
 		return fmt.Errorf("wall clock too close for another wave (%s left, a batch takes up to %s)",
 			left.Round(time.Second), need.Round(time.Second))

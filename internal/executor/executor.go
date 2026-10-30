@@ -204,6 +204,12 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Every call made during research ends by the session's research deadline.
+	if deadline, ok := verifier.ResearchDeadline(sess); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
 
 	// One estimator for the whole session, so Observe actually accumulates.
 	// It had no callers at all, and e.estimate built a fresh one per call, so
