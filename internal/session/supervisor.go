@@ -121,11 +121,9 @@ func (s *Supervisor) Start(ctx context.Context, spec Spec) (*core.Session, error
 		return nil, err
 	}
 
-	// Derived from the supervisor's context, NOT the caller's. Headroom over the
-	// wall-clock ceiling so the two do not fire together: when they do, the loop
-	// is killed mid-lead instead of stopping at its own check, and the run ends
-	// in a cascade of context errors from whatever was in flight.
-	runCtx, cancel := context.WithTimeout(s.base, spec.Timeout+30*time.Second)
+	// Derived from the supervisor's context, NOT the caller's; Run applies the
+	// session's deadline.
+	runCtx, cancel := context.WithCancel(s.base)
 	h := &handle{cancel: cancel, done: make(chan struct{})}
 
 	s.mu.Lock()

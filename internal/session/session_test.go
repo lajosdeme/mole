@@ -15,6 +15,7 @@ import (
 	"github.com/lajosdeme/mole/internal/store"
 	"github.com/lajosdeme/mole/internal/store/sqlite"
 	"github.com/lajosdeme/mole/internal/tools/search"
+	"github.com/lajosdeme/mole/internal/verifier"
 )
 
 // emptyPlanner answers every planning call with "no sub-questions", so the loop
@@ -258,6 +259,8 @@ func TestOnlyACancelSkipsTheReport(t *testing.T) {
 			r, db := newRunner(t)
 			counter := &strongCounter{}
 			r.Actor.LLM = counter
+			grounded := false
+			r.OnGround = func(*verifier.GroundReport) { grounded = true }
 			spec := testSpec()
 
 			sess, err := r.Create(context.Background(), spec)
@@ -281,6 +284,9 @@ func TestOnlyACancelSkipsTheReport(t *testing.T) {
 			}
 			if got := counter.count() > 0; got != tc.wantReport {
 				t.Errorf("report generator called = %v, want %v", got, tc.wantReport)
+			}
+			if grounded {
+				t.Error("grounding ran after the research context ended")
 			}
 			if res.Report == nil {
 				t.Fatal("no report written")

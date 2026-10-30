@@ -272,14 +272,6 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 	}
 	defer db.Close()
 
-	// The context gets headroom over the wall-clock CEILING so the two do not
-	// fire together. When they do, the loop is killed mid-lead instead of
-	// stopping at its own check, and the run ends in a cascade of "context
-	// deadline exceeded" from whatever was in flight — a persist, a settle, a
-	// count — rather than a clean "stopped: max_wallclock".
-	ctx, cancel := context.WithTimeout(ctx, o.timeout+30*time.Second)
-	defer cancel()
-
 	academicActor, err := buildAcademicActor(cfg, actorTypes, actor)
 	if err != nil {
 		return err

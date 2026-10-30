@@ -467,7 +467,13 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 		Workers:    spec.Workers,
 	}
 
-	res.Run, res.Err = exec.Run(ctx, sess.ID)
+	runCtx := ctx
+	if spec.Timeout > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, spec.Timeout+RunHeadroom)
+		defer cancel()
+	}
+	res.Run, res.Err = exec.Run(runCtx, sess.ID)
 	if r.OnLoop != nil && res.Run != nil {
 		r.OnLoop(res.Run)
 	}
@@ -476,7 +482,7 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 	// money set aside at session creation spendable — a run that produced good
 	// claims and could not afford to write them up would have wasted the whole
 	// budget, not just the last call.
-	res.Report, res.Ground = r.finish(ctx, led, vf, sess, &actor, spec.Schema)
+	res.Report, res.Ground = r.finish(ctx, runCtx, led, vf, sess, &actor, spec.Schema)
 
 	if res.Run != nil {
 		res.Status = res.Run.Status
@@ -531,22 +537,30 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 	return res, nil
 }
 
+// RunHeadroom is how long past the session's wall clock research may run
+// before its context is cut.
+const RunHeadroom = 30 * time.Second
+
+// ReportGrace bounds the report written after research hit its deadline.
+const ReportGrace = 2 * time.Minute
+
 // finish releases escrow, grounds, and writes the report.
 //
 // Runs on a context detached from the caller's. Everything here is the payoff
 // for money already spent, and a cancelled research context must not also
-// discard the answer it paid for.
+// discard the answer it paid for. run is the research context, derived from parent.
 func (r *Runner) finish(
-	ctx context.Context,
+	parent, run context.Context,
 	led *budget.Ledger,
 	vf *verifier.Verifier,
 	sess *core.Session,
 	actor *actors.WebActor,
 	schema *dataset.Schema,
 ) (*output.Report, *verifier.GroundReport) {
-	// Only an explicit cancel skips the report; a deadline still writes it.
-	cancelled := errors.Is(ctx.Err(), context.Canceled)
-	ctx = context.WithoutCancel(ctx)
+	// A cancel skips the report; a deadline skips grounding and bounds the report.
+	cancelled := errors.Is(run.Err(), context.Canceled)
+	timedOut := errors.Is(run.Err(), context.DeadlineExceeded)
+	ctx := context.WithoutCancel(parent)
 
 	released, err := led.ReleaseEscrow(ctx, sess.ID)
 	if err != nil {
@@ -562,7 +576,7 @@ func (r *Runner) finish(
 	// rest for the answer. A grounding pass that spent the escrow would produce a
 	// well-checked set of claims and no report to put them in.
 	var ground *verifier.GroundReport
-	if !cancelled {
+	if !cancelled && !timedOut {
 		ground = r.ground(ctx, vf, sess.ID, released)
 	}
 	if r.OnGround != nil && ground != nil {
@@ -619,7 +633,20 @@ func (r *Runner) finish(
 		gen.LLM = nil
 	}
 
-	report, err := gen.Generate(ctx, r.Store, sess.ID)
+	genCtx := ctx
+	if timedOut {
+		var cancel context.CancelFunc
+		genCtx, cancel = context.WithTimeout(ctx, ReportGrace)
+		defer cancel()
+		// Stops the report when the parent is cancelled, not when it times out.
+		stop := context.AfterFunc(parent, func() {
+			if errors.Is(parent.Err(), context.Canceled) {
+				cancel()
+			}
+		})
+		defer stop()
+	}
+	report, err := gen.Generate(genCtx, r.Store, sess.ID)
 	if err != nil {
 		r.notice("report generation failed: %v", err)
 		if reservation != nil {
