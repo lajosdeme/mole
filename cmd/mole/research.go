@@ -185,6 +185,10 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 		o.timeout = cfg.MaxWallClock.Duration()
 	}
 
+	if err := checkTimeoutIsValid(o.timeout); err != nil {
+		return err
+	}
+
 	unit, amount, err := resolveBudget(o.usd, o.tokens, cfg)
 	if err != nil {
 		return err
@@ -403,6 +407,13 @@ func maxLeadsFor(o researchOpts) int {
 }
 
 // checkMaxLeadsIsValid rejects a negative --max-leads.
+func checkTimeoutIsValid(timeout time.Duration) error {
+	if timeout <= 0 {
+		return fmt.Errorf("--timeout must be positive (got %v)", timeout)
+	}
+	return nil
+}
+
 func checkMaxLeadsIsValid(maxLeads int) error {
 	if maxLeads < 0 {
 		return fmt.Errorf("--max-leads must not be negative (got %d)", maxLeads)

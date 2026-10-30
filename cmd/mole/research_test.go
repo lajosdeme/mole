@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lajosdeme/mole/internal/budget"
 	"github.com/lajosdeme/mole/internal/config"
@@ -122,6 +123,18 @@ func TestZeroMaxLeadsKeepsTheDerivedCap(t *testing.T) {
 func TestNegativeMaxLeadsIsRefused(t *testing.T) {
 	if err := checkMaxLeadsIsValid(-1); err == nil {
 		t.Error("a negative --max-leads was accepted")
+	}
+}
+
+func TestANonPositiveTimeoutIsRefused(t *testing.T) {
+	t.Setenv("MOLE_CONFIG_DIR", t.TempDir())
+	t.Setenv("MOLE_DB", filepath.Join(t.TempDir(), "mole.db"))
+	for _, d := range []time.Duration{0, -time.Second} {
+		err := cmdResearch(context.Background(), "a question",
+			researchOpts{timeout: d, timeoutSet: true, tokens: 1000})
+		if err == nil || !strings.Contains(err.Error(), "--timeout") {
+			t.Errorf("--timeout %v: err = %v, want --timeout refused", d, err)
+		}
 	}
 }
 

@@ -60,9 +60,8 @@ type Spec struct {
 	// see defaultCallsPerLead.
 	MaxToolCalls int64
 
-	// Timeout is the session's wall-clock ceiling (§8.5). The caller owns the
-	// context deadline; this is the ceiling the loop checks itself against, and
-	// the two should not be equal — see Runner.Run.
+	// Timeout is the session's wall-clock ceiling (§8.5). Run cuts the research
+	// context RunHeadroom after it.
 	Timeout time.Duration
 
 	// Schema is the dataset schema, required when Mode is ModeDataset and unused
@@ -375,11 +374,8 @@ func (r *Runner) Create(ctx context.Context, spec Spec) (*core.Session, error) {
 // Run drives the loop for an already-created session, then writes the report and
 // finalizes the status.
 //
-// The caller owns the context. Give it headroom over spec.Timeout: when the
-// context deadline and the wall-clock ceiling fire together the loop is killed
-// mid-lead instead of stopping at its own check, and the run ends in a cascade
-// of "context deadline exceeded" from whatever was in flight — a persist, a
-// settle, a count — rather than a clean "stopped: max_wallclock".
+// Research runs under spec.Timeout plus RunHeadroom; a cancel of ctx stops
+// both research and the report.
 //
 // A loop error is returned inside Result, not as the error, so a caller still
 // gets the session, the spend and the claims. The error return is for failures
@@ -494,8 +490,10 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 		switch err := runCtx.Err(); {
 		case errors.Is(err, context.DeadlineExceeded):
 			res.Status = core.StatusExhausted
+			res.StoppedBecause = "deadline before research started"
 		case errors.Is(err, context.Canceled):
 			res.Status = core.StatusCancelled
+			res.StoppedBecause = "cancelled before research started"
 		}
 	}
 
@@ -548,8 +546,9 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 // before its context is cut.
 const RunHeadroom = 30 * time.Second
 
-// ReportGrace bounds the report written after research hit its deadline.
-const ReportGrace = 2 * time.Minute
+// ReportGrace bounds the report, the same slice of the wall clock the verifier
+// leaves for it.
+const ReportGrace = verifier.DefaultReportAllowance
 
 // finish releases escrow, grounds, and writes the report.
 //
@@ -641,14 +640,14 @@ func (r *Runner) finish(
 	}
 
 	genCtx := ctx
-	if timedOut {
-		var cancel context.CancelFunc
-		genCtx, cancel = context.WithTimeout(ctx, ReportGrace)
-		defer cancel()
+	if !cancelled {
+		var cancelGen context.CancelFunc
+		genCtx, cancelGen = context.WithTimeout(ctx, ReportGrace)
+		defer cancelGen()
 		// Stops the report when the parent is cancelled, not when it times out.
 		stop := context.AfterFunc(parent, func() {
 			if errors.Is(parent.Err(), context.Canceled) {
-				cancel()
+				cancelGen()
 			}
 		})
 		defer stop()

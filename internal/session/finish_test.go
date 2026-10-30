@@ -41,9 +41,25 @@ func (p *reportProbe) Complete(ctx context.Context, req llm.Request) (*llm.Respo
 	return nil, p.errAtEnd
 }
 
-// TestATimedOutReportIsBoundedAndCancellable checks that after a deadline the
-// report runs under its own time limit and stops when the parent is cancelled.
-func TestATimedOutReportIsBoundedAndCancellable(t *testing.T) {
+// TestTheReportIsBoundedAndCancellable checks that, after a deadline or a
+// normal stop, the report has a time limit and stops when the parent is cancelled.
+func TestTheReportIsBoundedAndCancellable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(parent context.Context) (context.Context, context.CancelFunc)
+	}{
+		{"deadline", func(parent context.Context) (context.Context, context.CancelFunc) {
+			return context.WithDeadline(parent, time.Now().Add(-time.Second))
+		}},
+		{"normal", func(parent context.Context) (context.Context, context.CancelFunc) {
+			return context.WithCancel(parent)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { checkReportIsBoundedAndCancellable(t, tc.run) })
+	}
+}
+
+func checkReportIsBoundedAndCancellable(t *testing.T, runCtx func(context.Context) (context.Context, context.CancelFunc)) {
 	db, err := sqlite.Open(filepath.Join(t.TempDir(), "t.db"), sqlite.Options{})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -75,7 +91,7 @@ func TestATimedOutReportIsBoundedAndCancellable(t *testing.T) {
 
 	parent, cancelParent := context.WithCancel(context.Background())
 	defer cancelParent()
-	run, cancelRun := context.WithDeadline(parent, time.Now().Add(-time.Second))
+	run, cancelRun := runCtx(parent)
 	defer cancelRun()
 	vf := &verifier.Verifier{Store: db, Ledger: r.ledger(), LLM: probe}
 
