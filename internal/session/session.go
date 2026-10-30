@@ -572,7 +572,7 @@ func (r *Runner) finish(
 ) (*output.Report, *verifier.GroundReport) {
 	// A cancel skips the report; a deadline skips grounding and bounds the report.
 	cancelled := errors.Is(run.Err(), context.Canceled)
-	timedOut := errors.Is(run.Err(), context.DeadlineExceeded)
+	timedOut := researchTimedOut(run, sess, time.Now())
 	ctx := context.WithoutCancel(parent)
 
 	released, err := led.ReleaseEscrow(ctx, sess.ID)
@@ -649,7 +649,7 @@ func (r *Runner) finish(
 	genCtx := ctx
 	if !cancelled {
 		var cancelGen context.CancelFunc
-		genCtx, cancelGen = context.WithTimeout(ctx, ReportGrace)
+		genCtx, cancelGen = context.WithDeadline(ctx, reportDeadline(sess, time.Now()))
 		defer cancelGen()
 		// Stops the report when the parent is cancelled, not when it times out.
 		stop := context.AfterFunc(parent, func() {
@@ -752,6 +752,32 @@ func (r *Runner) ground(
 		return nil
 	}
 	return rep
+}
+
+// researchTimedOut reports whether the run context hit its deadline or the research deadline has passed.
+func researchTimedOut(run context.Context, sess *core.Session, now time.Time) bool {
+	if errors.Is(run.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	deadline, ok := verifier.ResearchDeadline(sess)
+	return ok && !now.Before(deadline)
+}
+
+// reportDeadline is the later of the wall clock and a tenth of it from now,
+// capped at ReportGrace from now.
+func reportDeadline(sess *core.Session, now time.Time) time.Time {
+	limit := now.Add(ReportGrace)
+	if sess.MaxWallClock <= 0 {
+		return limit
+	}
+	end := sess.CreatedAt.Add(sess.MaxWallClock)
+	if floor := now.Add(sess.MaxWallClock / 10); floor.After(end) {
+		end = floor
+	}
+	if end.After(limit) {
+		return limit
+	}
+	return end
 }
 
 // groundByDeadline grounds under the session's research deadline, skipping it once passed.

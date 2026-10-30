@@ -205,7 +205,8 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 		return nil, err
 	}
 	// Every call made during research ends by the session's research deadline.
-	if deadline, ok := verifier.ResearchDeadline(sess); ok {
+	deadline, hasDeadline := verifier.ResearchDeadline(sess)
+	if hasDeadline {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, deadline)
 		defer cancel()
@@ -286,6 +287,9 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 		if err := ctx.Err(); err != nil {
 			res.Status = statusForContext(err)
 			res.StoppedBecause = err.Error()
+			if errors.Is(err, context.DeadlineExceeded) && hasDeadline && !time.Now().Before(deadline) {
+				res.StoppedBecause = "max_wallclock"
+			}
 			break
 		}
 
@@ -426,7 +430,8 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			// it as a dead end tells the planner a route is blocked when nothing
 			// was tried, and LeadsFailed, the dead-end histogram and the lead
 			// statuses are all §14.3 eval inputs.
-			cancelled := errors.Is(out.err, context.Canceled)
+			cancelled := errors.Is(out.err, context.Canceled) ||
+				(errors.Is(out.err, context.DeadlineExceeded) && ctx.Err() != nil)
 			if out.deadEnd != "" && !cancelled {
 				digest.RecordDeadEnd(out.deadEnd, deadEndExample(&out.lead))
 			}
@@ -871,6 +876,10 @@ func (e *Executor) runLead(
 	var last leadOutcome
 	for attempt := 1; attempt <= MaxAttempts; attempt++ {
 		if attempt > 1 {
+			// No retry once the run's context has ended; the last error is kept.
+			if ctx.Err() != nil {
+				break
+			}
 			if err := e.sleep(ctx, Backoff(attempt-1, e.jitter)); err != nil {
 				last.err, last.class = err, Degraded
 				break
@@ -1087,7 +1096,7 @@ func (e *Executor) replan(
 		if len(plan.Leads) == 0 || !keepResearching(sess, digest, e.now()) {
 			return 0, true, "planner reported done", nil
 		}
-		e.emit("replanning", "ignoring the planner's done: most of the allowance is left and the research is unsettled")
+		e.emit("replanning", "ignoring the planner's done: most of the allowance is left")
 		e.logger().InfoContext(ctx, "planner done overridden",
 			"remaining", digest.BudgetRemaining, "open", len(digest.Open()), "contradictions", digest.Contradictions)
 	}

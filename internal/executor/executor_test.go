@@ -2232,6 +2232,11 @@ func TestPlannerDoneIsOverriddenWhileMostOfTheBudgetIsLeft(t *testing.T) {
 	if !logged {
 		t.Errorf("the override was not recorded in the progress log: %v", events)
 	}
+	for _, ev := range events {
+		if strings.Contains(ev.Detail, "unsettled") {
+			t.Errorf("override message still claims the research is unsettled: %q", ev.Detail)
+		}
+	}
 }
 
 // TestPlannerDoneIsHonouredPastTheThreshold checks done ends the run once half the allowance is gone.
@@ -2301,4 +2306,53 @@ func TestOverriddenDoneThatAddsNothingEndsTheRun(t *testing.T) {
 			t.Errorf("%s: %d leads ran, want the 3 planned", name, got)
 		}
 	}
+}
+
+// TestALeadCutByTheResearchDeadlineIsNotAFailure checks a lead stopped by the deadline is not failed, not a dead end, and the run stops on max_wallclock.
+func TestALeadCutByTheResearchDeadlineIsNotAFailure(t *testing.T) {
+	r := newRigFromSpec(t, budget.SessionSpec{Budget: 50 * core.MicrosPerUSD, MaxWallClock: time.Second},
+		[]string{planJSON("a")},
+		func(_ int, l core.Lead) (*actors.Result, error) { return nil, context.DeadlineExceeded })
+	r.exec.Actors[core.ActorWeb] = actorFunc(func(ctx context.Context, l core.Lead) (*actors.Result, error) {
+		<-ctx.Done()
+		return nil, fmt.Errorf("search: %w", ctx.Err())
+	})
+
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LeadsFailed != 0 {
+		t.Errorf("%d leads failed, want 0", res.LeadsFailed)
+	}
+	if len(res.Digest.DeadEnds) != 0 {
+		t.Errorf("dead ends recorded: %+v", res.Digest.DeadEnds)
+	}
+	if res.StoppedBecause != "max_wallclock" {
+		t.Errorf("stopped because %q, want max_wallclock", res.StoppedBecause)
+	}
+}
+
+// TestALeadTimeoutBeforeTheDeadlineIsStillAFailure checks a call's own timeout still counts as a failed lead.
+func TestALeadTimeoutBeforeTheDeadlineIsStillAFailure(t *testing.T) {
+	r := newRig(t, 50*core.MicrosPerUSD, []string{planJSON("a")},
+		func(int, core.Lead) (*actors.Result, error) {
+			return nil, fmt.Errorf("fetch: %w", context.DeadlineExceeded)
+		})
+
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LeadsFailed == 0 {
+		t.Error("a lead that timed out on its own was not counted as failed")
+	}
+}
+
+// actorFunc adapts a function to actors.Actor.
+type actorFunc func(context.Context, core.Lead) (*actors.Result, error)
+
+func (actorFunc) Type() core.ActorType { return core.ActorWeb }
+func (f actorFunc) Run(ctx context.Context, l core.Lead) (*actors.Result, error) {
+	return f(ctx, l)
 }
