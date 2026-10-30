@@ -2,7 +2,9 @@ package session_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -302,6 +304,76 @@ func TestOnlyACancelSkipsTheReport(t *testing.T) {
 			after, err := loadSession(t, db, sess.ID)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if after.Escrow != 0 {
+				t.Errorf("escrow is still %d after Run; it should have been released", after.Escrow)
+			}
+		})
+	}
+}
+
+// refusingSearch answers every query with a quota refusal.
+type refusingSearch struct{}
+
+func (refusingSearch) Kind() search.Kind { return search.KindTavily }
+func (refusingSearch) Search(context.Context, string, search.Options) (*search.Response, error) {
+	return nil, fmt.Errorf("stub: %w", search.ErrQuotaExceeded)
+}
+
+// TestSearchRefusalWithoutClaimsWritesNoReport checks a quota-refused run with no claims ends failed with no report.
+func TestSearchRefusalWithoutClaimsWritesNoReport(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		claims     bool
+		wantReport bool
+	}{
+		{"no claims", false, false},
+		{"claims collected", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, db := newRunner(t)
+			r.Actor.Search = refusingSearch{}
+			spec := testSpec()
+
+			sess, err := r.Create(context.Background(), spec)
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if tc.claims {
+				if err := db.WithTx(context.Background(), func(ctx context.Context, tx store.Tx) error {
+					return tx.InsertClaims(ctx, []core.Claim{{
+						SessionID: sess.ID, LeadID: "l_1",
+						Text:   "Subword tokenization affects byte-level scaling.",
+						Source: "https://s.example/p",
+						Quote:  "a quote long enough to be real evidence",
+					}})
+				}); err != nil {
+					t.Fatalf("insert claims: %v", err)
+				}
+			}
+
+			res, err := r.Run(context.Background(), sess, spec)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if res.Status != core.StatusFailed {
+				t.Errorf("status = %q, want failed", res.Status)
+			}
+			if !strings.HasPrefix(res.StoppedBecause, "fatal: search provider refused the request: quota exceeded") {
+				t.Errorf("stopped because %q", res.StoppedBecause)
+			}
+			if got := res.Report != nil; got != tc.wantReport {
+				t.Errorf("report written = %v, want %v", got, tc.wantReport)
+			}
+			after, err := loadSession(t, db, sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := after.Report != ""; got != tc.wantReport {
+				t.Errorf("stored report = %v, want %v", got, tc.wantReport)
+			}
+			if after.Status != core.StatusFailed {
+				t.Errorf("stored status = %q, want failed", after.Status)
 			}
 			if after.Escrow != 0 {
 				t.Errorf("escrow is still %d after Run; it should have been released", after.Escrow)

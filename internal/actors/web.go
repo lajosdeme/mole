@@ -264,7 +264,8 @@ func searchQueries(lead core.Lead) []string {
 }
 
 // searchAll runs one billed search per query and merges the hits by URL in
-// round-robin rank order. It fails only when every search fails.
+// round-robin rank order. It fails when every search fails or the provider
+// refuses the account.
 func (a *WebActor) searchAll(ctx context.Context, lead core.Lead, budget Budget, res *Result) ([]search.Result, error) {
 	var (
 		lists    [][]search.Result
@@ -280,6 +281,9 @@ func (a *WebActor) searchAll(ctx context.Context, lead core.Lead, budget Budget,
 			NoTopUp:        len(queries) > 1,
 		})
 		if err != nil {
+			if errors.Is(err, search.ErrQuotaExceeded) || errors.Is(err, search.ErrUnauthorized) {
+				return nil, fmt.Errorf("actors/web: search: %w", err)
+			}
 			if firstErr == nil {
 				firstErr = err
 			}

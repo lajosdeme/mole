@@ -1073,6 +1073,25 @@ func TestSearchFailuresPerQuery(t *testing.T) {
 	}
 }
 
+// TestSearchRefusalOnAnyQueryFailsTheLead checks a quota or auth error is returned even when another query succeeds.
+func TestSearchRefusalOnAnyQueryFailsTheLead(t *testing.T) {
+	for _, sentinel := range []error{search.ErrQuotaExceeded, search.ErrUnauthorized} {
+		t.Run(sentinel.Error(), func(t *testing.T) {
+			h := newHarness(t, nil, nil, nil)
+			h.search.byQuery = map[string][]search.Result{
+				"q one": {{URL: "https://a.example/p", Rank: 1, Content: articleBody}},
+			}
+			h.search.errByQuery = map[string]error{"q two": sentinel}
+			h.lead.Queries = []string{"q one", "q two"}
+
+			_, err := h.actor.Run(context.Background(), h.lead)
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("err = %v, want %v", err, sentinel)
+			}
+		})
+	}
+}
+
 // TestMultiQueryLeadsSplitTheResultBudget checks per-query result counts and the top-up switch.
 func TestMultiQueryLeadsSplitTheResultBudget(t *testing.T) {
 	cases := []struct {

@@ -405,3 +405,17 @@ func TestFillOutputCarriesTheRecheckCounts(t *testing.T) {
 			out.Contradictions, out.Rechecked, out.Withheld)
 	}
 }
+
+// TestFillOutputCarriesTheFatalReasonAsTheError checks a failed run's JSON has status failed and an error.
+func TestFillOutputCarriesTheFatalReasonAsTheError(t *testing.T) {
+	const reason = "fatal: search provider refused the request: quota exceeded (tavily 432)"
+	var out researchOutput
+	fillOutput(&out, &session.Result{
+		Status:         core.StatusFailed,
+		StoppedBecause: reason,
+		Run:            &executor.Result{Status: core.StatusFailed, StoppedBecause: reason},
+	})
+	if out.Status != "failed" || out.Error != reason || out.Report != "" {
+		t.Errorf("status/error/report = %q/%q/%q", out.Status, out.Error, out.Report)
+	}
+}

@@ -29,6 +29,7 @@ import (
 	"github.com/lajosdeme/mole/internal/pricing"
 	"github.com/lajosdeme/mole/internal/queue"
 	"github.com/lajosdeme/mole/internal/store"
+	"github.com/lajosdeme/mole/internal/tools/search"
 	"github.com/lajosdeme/mole/internal/verifier"
 )
 
@@ -464,7 +465,8 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 				break
 			}
 			res.Status = core.StatusFailed
-			res.StoppedBecause = "fatal: " + fatal.err.Error()
+			res.StoppedBecause = fatalReason(fatal.err)
+			e.logger().ErrorContext(ctx, "session stopped by a fatal error", "err", fatal.err)
 			// Escrow survives, so a partial report is still affordable (§9.5).
 			return res, nil
 		}
@@ -1014,6 +1016,25 @@ func (e *Executor) attempt(ctx context.Context, sess *core.Session, lead core.Le
 		out.err, out.class = runErr, Classify(runErr)
 	}
 	return out
+}
+
+// fatalReason is the StoppedBecause text for a fatal lead error.
+func fatalReason(err error) string {
+	var refusal string
+	switch {
+	case errors.Is(err, search.ErrQuotaExceeded):
+		refusal = "quota exceeded"
+	case errors.Is(err, search.ErrUnauthorized):
+		refusal = "unauthorized"
+	default:
+		return "fatal: " + err.Error()
+	}
+	reason := "fatal: search provider refused the request: " + refusal
+	var apiErr *search.APIError
+	if errors.As(err, &apiErr) {
+		reason += fmt.Sprintf(" (%s %d)", apiErr.Provider, apiErr.Status)
+	}
+	return reason
 }
 
 // deadEndExample is the query to record against a dead end, or empty.

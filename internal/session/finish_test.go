@@ -101,7 +101,7 @@ func checkReportIsBoundedAndCancellable(t *testing.T, runCtx func(context.Contex
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		r.finish(parent, run, r.ledger(), vf, sess, actor, nil)
+		r.finish(parent, run, r.ledger(), vf, sess, actor, nil, false)
 	}()
 	select {
 	case <-probe.started:
@@ -226,7 +226,7 @@ func TestAStalledReportEndsAtTheWallClock(t *testing.T) {
 	wallEnd := sess.CreatedAt.Add(sess.MaxWallClock)
 
 	vf := &verifier.Verifier{Store: db, Ledger: r.ledger(), LLM: probe}
-	report, _ := r.finish(context.Background(), context.Background(), r.ledger(), vf, sess, actor, nil)
+	report, _ := r.finish(context.Background(), context.Background(), r.ledger(), vf, sess, actor, nil, false)
 
 	if d := probe.deadline.Sub(wallEnd).Abs(); d > 50*time.Millisecond {
 		t.Errorf("report deadline %s from the wall clock, want at it", d)

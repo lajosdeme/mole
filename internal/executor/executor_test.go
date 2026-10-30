@@ -27,6 +27,7 @@ import (
 	"github.com/lajosdeme/mole/internal/queue"
 	"github.com/lajosdeme/mole/internal/store"
 	"github.com/lajosdeme/mole/internal/store/sqlite"
+	"github.com/lajosdeme/mole/internal/tools/search"
 	"github.com/lajosdeme/mole/internal/verifier"
 )
 
@@ -383,6 +384,39 @@ func TestFatalErrorsAbortTheSession(t *testing.T) {
 	}
 	if after := r.reload(t); after.Escrow <= 0 {
 		t.Error("escrow was consumed, so no partial report is affordable")
+	}
+}
+
+// TestSearchRefusalFailsTheSession checks a quota or auth refusal from the search provider stops the run.
+func TestSearchRefusalFailsTheSession(t *testing.T) {
+	cases := []struct {
+		sentinel error
+		want     string
+	}{
+		{search.ErrQuotaExceeded, "fatal: search provider refused the request: quota exceeded"},
+		{search.ErrUnauthorized, "fatal: search provider refused the request: unauthorized"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.want, func(t *testing.T) {
+			refused := fmt.Errorf("actors/web: search: %w", tc.sentinel)
+			r := newRig(t, 5*core.MicrosPerUSD, []string{planJSON("a", "b", "c")},
+				func(int, core.Lead) (*actors.Result, error) { return okResult(0, 1_000), refused })
+			r.exec.Workers = 1
+
+			res, err := r.exec.Run(context.Background(), r.sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Status != core.StatusFailed {
+				t.Errorf("status = %s, want failed", res.Status)
+			}
+			if !strings.HasPrefix(res.StoppedBecause, tc.want) {
+				t.Errorf("stopped because %q, want prefix %q", res.StoppedBecause, tc.want)
+			}
+			if r.actor.count() != 1 {
+				t.Errorf("ran %d leads, want 1", r.actor.count())
+			}
+		})
 	}
 }
 

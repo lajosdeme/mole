@@ -485,7 +485,10 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 	// money set aside at session creation spendable — a run that produced good
 	// claims and could not afford to write them up would have wasted the whole
 	// budget, not just the last call.
-	res.Report, res.Ground = r.finish(ctx, runCtx, led, vf, sess, &actor, spec.Schema)
+	// A failed report-mode run with no claims gets no report.
+	skipReport := spec.Schema == nil && res.Run != nil &&
+		res.Run.Status == core.StatusFailed && r.noClaims(ctx, sess.ID)
+	res.Report, res.Ground = r.finish(ctx, runCtx, led, vf, sess, &actor, spec.Schema, skipReport)
 
 	if res.Run != nil {
 		res.Status = res.Run.Status
@@ -562,6 +565,7 @@ const ReportGrace = verifier.DefaultReportAllowance
 // Runs on a context detached from the caller's. Everything here is the payoff
 // for money already spent, and a cancelled research context must not also
 // discard the answer it paid for. run is the research context, derived from parent.
+// skipReport releases escrow and writes nothing.
 func (r *Runner) finish(
 	parent, run context.Context,
 	led *budget.Ledger,
@@ -569,6 +573,7 @@ func (r *Runner) finish(
 	sess *core.Session,
 	actor *actors.WebActor,
 	schema *dataset.Schema,
+	skipReport bool,
 ) (*output.Report, *verifier.GroundReport) {
 	// A cancel skips the report; a deadline skips grounding and bounds the report.
 	cancelled := errors.Is(run.Err(), context.Canceled)
@@ -578,6 +583,10 @@ func (r *Runner) finish(
 	released, err := led.ReleaseEscrow(ctx, sess.ID)
 	if err != nil {
 		r.notice("could not release escrow: %v", err)
+	}
+	if skipReport {
+		r.notice("session failed before collecting any claim: no report written")
+		return nil, nil
 	}
 
 	// §11.5.2's grounding pass, between the escrow release and the report.
@@ -791,6 +800,17 @@ func (r *Runner) groundByDeadline(ctx context.Context, vf *verifier.Verifier, se
 		return nil
 	}
 	return r.ground(ctx, vf, sess.ID, released)
+}
+
+// noClaims reports whether the session has no stored claims.
+func (r *Runner) noClaims(ctx context.Context, id string) bool {
+	var n int64
+	err := r.Store.Read(context.WithoutCancel(ctx), func(ctx context.Context, q store.Queries) error {
+		var err error
+		n, err = q.CountClaims(ctx, id)
+		return err
+	})
+	return err == nil && n == 0
 }
 
 func (r *Runner) loadSession(ctx context.Context, id string) (*core.Session, error) {

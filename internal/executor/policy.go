@@ -69,6 +69,8 @@ func Classify(err error) Class {
 	// succeed, which is worse than stopping with a partial report.
 	case errors.Is(err, llm.ErrUnauthorized),
 		errors.Is(err, llm.ErrQuotaExceeded),
+		errors.Is(err, search.ErrUnauthorized),
+		errors.Is(err, search.ErrQuotaExceeded),
 		errors.Is(err, budget.ErrInsufficientBudget):
 		return Fatal
 
@@ -83,12 +85,6 @@ func Classify(err error) Class {
 	// A search provider speaks for itself about whether a retry is worth it.
 	var searchErr *search.APIError
 	if errors.As(err, &searchErr) {
-		if searchErr.Status == 401 || searchErr.Status == 403 {
-			// A bad search key fails identically on every lead; retrying it
-			// once per lead for a whole session is the loudest possible way to
-			// say nothing.
-			return Fatal
-		}
 		if searchErr.Retryable() {
 			return Transient
 		}
