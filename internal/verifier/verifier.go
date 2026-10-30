@@ -645,8 +645,8 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 	return groups, unjudged, unanswered, consumed, stop
 }
 
-// DefaultWaveBudget is how long a wave is assumed to take before any batch
-// has been timed.
+// DefaultWaveBudget caps how long a wave is assumed to take before any batch
+// has been timed; a tenth of the wall clock applies when smaller.
 const DefaultWaveBudget = 60 * time.Second
 
 // SetClock replaces the Verifier's clock.
@@ -675,7 +675,7 @@ func (v *Verifier) waveFits(sess *core.Session) error {
 	need := v.slowestBatch
 	v.mu.Unlock()
 	if need == 0 {
-		need = DefaultWaveBudget
+		need = min(DefaultWaveBudget, sess.MaxWallClock/10)
 	}
 	deadline := sess.CreatedAt.Add(sess.MaxWallClock)
 	if left := deadline.Sub(v.clock()); left < need {

@@ -522,15 +522,15 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-// wallClockRig is a rig whose session has an hour of wall clock, judged in six
+// wallClockRig is a rig whose session has wall of wall clock, judged in six
 // one-pair batches one at a time on clock.
-func wallClockRig(t *testing.T, clock *fakeClock, reply func(int, string) (string, error)) *rig {
+func wallClockRig(t *testing.T, wall time.Duration, clock *fakeClock, reply func(int, string) (string, error)) *rig {
 	t.Helper()
 	r := newRigFromSpec(t, budget.SessionSpec{
 		Prompt: "q", Mode: core.ModeReport,
 		ActorTypes: []core.ActorType{core.ActorWeb},
 		BudgetUnit: core.BudgetTokens, Budget: 2_000_000,
-		MaxLeads: 50, MaxToolCalls: 500, MaxWallClock: time.Hour,
+		MaxLeads: 50, MaxToolCalls: 500, MaxWallClock: wall,
 	}, distinctClaims(4), reply)
 	r.v.SetClock(clock.now)
 	r.v.BatchSize = 1
@@ -551,7 +551,7 @@ func TestAWaveThatCannotFinishIsNotLaunched(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clock := &fakeClock{}
-			r := wallClockRig(t, clock, judgeEveryPair(verifier.RelNeither))
+			r := wallClockRig(t, time.Hour, clock, judgeEveryPair(verifier.RelNeither))
 			clock.t = r.sess.CreatedAt.Add(time.Hour - tc.left)
 			verifier.ObserveBatch(r.v, 30*time.Second)
 
@@ -581,7 +581,7 @@ func TestAWaveThatCannotFinishIsNotLaunched(t *testing.T) {
 // timed: 60s by default, then the longest observed.
 func TestTheWaveBudgetIsTheLongestBatchSeen(t *testing.T) {
 	clock := &fakeClock{}
-	r := wallClockRig(t, clock, func(call int, prompt string) (string, error) {
+	r := wallClockRig(t, time.Hour, clock, func(call int, prompt string) (string, error) {
 		clock.advance(30 * time.Second)
 		return judgeEveryPair(verifier.RelNeither)(call, prompt)
 	})
@@ -603,6 +603,25 @@ func TestTheWaveBudgetIsTheLongestBatchSeen(t *testing.T) {
 		t.Errorf("%d pairs unjudged, want the 4 never sent", res.PairsUnjudged)
 	}
 	r.assertNothingHeld(t, "wall clock")
+}
+
+// TestAShortSessionStillVerifies checks that before any batch is timed, the
+// default wave budget shrinks with a short wall clock.
+func TestAShortSessionStillVerifies(t *testing.T) {
+	clock := &fakeClock{}
+	r := wallClockRig(t, time.Minute, clock, judgeEveryPair(verifier.RelNeither))
+	clock.t = r.sess.CreatedAt.Add(30 * time.Second)
+
+	res, err := r.v.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := r.llm.count(); got != 6 {
+		t.Errorf("%d calls, want all 6", got)
+	}
+	if res.Degraded != "" {
+		t.Errorf("degraded = %q, want a complete pass", res.Degraded)
+	}
 }
 
 // TestNoWallClockMeansNoTimeGating checks that a session without MaxWallClock
