@@ -130,7 +130,7 @@ const DefaultMaxShareOfBudget = 0.25
 
 // DefaultConcurrency is how many adjudication batches run at once, instead
 // of serially.
-const DefaultConcurrency = 8
+const DefaultConcurrency = 4
 
 // Result reports what one pass did.
 type Result struct {
