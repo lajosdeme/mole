@@ -193,7 +193,7 @@ func TestTavilyPrefersRawContent(t *testing.T) {
 	}
 
 	resp, err := p.Search(context.Background(), "byte level llm", search.Options{
-		MaxResults: 5, IncludeContent: true, Deep: true,
+		MaxResults: 2, IncludeContent: true, Deep: true,
 	})
 	if err != nil {
 		t.Fatalf("search: %v", err)
@@ -239,6 +239,78 @@ func TestTavilyPrefersRawContent(t *testing.T) {
 	}
 	if sent["include_raw_content"] != true {
 		t.Errorf("include_raw_content = %v", sent["include_raw_content"])
+	}
+}
+
+// TestTavilyTopsUpAShortRawContentAnswer.
+func TestTavilyTopsUpAShortRawContentAnswer(t *testing.T) {
+	const full = `{"results":[
+	  {"url":"https://arxiv.org/abs/2401.13660","content":"a","raw_content":"FULL"},
+	  {"url":"https://example.com/b","content":"b"},
+	  {"url":"https://example.com/c","content":"c"},
+	  {"url":"https://example.com/d","content":"d"}]}`
+	var sent []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		sent = append(sent, m)
+		w.Header().Set("Content-Type", "application/json")
+		if m["include_raw_content"] == true {
+			_, _ = io.WriteString(w, tavilyFixture)
+			return
+		}
+		_, _ = io.WriteString(w, full)
+	}))
+	t.Cleanup(srv.Close)
+
+	p, err := search.New(search.Config{
+		Provider: search.KindTavily, APIKey: "tvly-test",
+		BaseURL: srv.URL, RateLimit: fastLimit(),
+	}, srv.Client())
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	resp, err := p.Search(context.Background(), "q", search.Options{MaxResults: 4, IncludeContent: true})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+
+	if len(sent) != 2 || sent[1]["include_raw_content"] != nil {
+		t.Fatalf("requests = %v, want a second one without raw content", sent)
+	}
+	var urls []string
+	for _, r := range resp.Results {
+		urls = append(urls, r.URL)
+	}
+	want := []string{"https://arxiv.org/abs/2401.13660", "https://example.com/short",
+		"https://example.com/b", "https://example.com/c"}
+	if strings.Join(urls, " ") != strings.Join(want, " ") {
+		t.Errorf("urls = %v, want %v", urls, want)
+	}
+	if !strings.HasPrefix(resp.Results[0].Content, "FULL PAGE TEXT") {
+		t.Error("the raw-content result lost its page text")
+	}
+	if resp.Results[3].Rank != 4 {
+		t.Errorf("rank = %d, want 4", resp.Results[3].Rank)
+	}
+}
+
+// TestTavilyFullRawContentAnswerMakesOneCall.
+func TestTavilyFullRawContentAnswerMakesOneCall(t *testing.T) {
+	calls := 0
+	srv := serve(t, 200, tavilyFixture, func(*http.Request) { calls++ })
+	p, err := search.New(search.Config{
+		Provider: search.KindTavily, APIKey: "tvly-test",
+		BaseURL: srv.URL, RateLimit: fastLimit(),
+	}, srv.Client())
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if _, err := p.Search(context.Background(), "q", search.Options{MaxResults: 2, IncludeContent: true}); err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
 	}
 }
 
