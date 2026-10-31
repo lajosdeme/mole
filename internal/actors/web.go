@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strings"
 
 	"github.com/lajosdeme/mole/internal/cache"
 	"github.com/lajosdeme/mole/internal/core"
@@ -41,6 +42,8 @@ type WebActor struct {
 
 	// SessionID scopes the claims and fetch outcomes this actor records.
 	SessionID string
+	// Question is the session's root question, shown to the miner beside the lead.
+	Question string
 
 	// Cache, when set, holds documents already fetched in this session. The
 	// nested check §9.3 describes: two distinct queries converging on one page
@@ -81,22 +84,11 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 	}
 
 	// 1. Search.
-	sr, err := a.Search.Search(ctx, lead.Query, search.Options{
-		MaxResults:     budget.MaxSources * 2, // headroom for guard/robots refusals
-		IncludeContent: true,
-	})
+	hits, err := a.searchAll(ctx, lead, budget, res)
 	if err != nil {
-		return res, fmt.Errorf("actors/web: search: %w", err)
+		return res, err
 	}
-	res.Costs = append(res.Costs, core.ToolCall{
-		SessionID: a.SessionID,
-		LeadID:    &lead.ID,
-		Role:      core.RoleExecutor,
-		Type:      core.CallSearch,
-		Input:     lead.Query,
-		Cost:      sr.Cost,
-	})
-	res.Stats.SearchResults = len(sr.Results)
+	res.Stats.SearchResults = len(hits)
 
 	// 2-5. Read sources until the budget or the source cap is reached.
 	var (
@@ -105,18 +97,18 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 		perSource       []sourceSummary
 	)
 
-	for i, hit := range sr.Results {
+	for i, hit := range hits {
 		// Count sources READ, not sources that yielded something. Counting
 		// summaries meant a run where nothing extracted cleanly walked the
 		// entire result list — spending a fetch, an extract, and a model call
 		// per hit against a cap that never advanced.
 		if sourcesRead >= budget.MaxSources {
-			a.recordNotSelected(ctx, lead, sr.Results[i:])
+			a.recordNotSelected(ctx, lead, hits[i:])
 			break
 		}
 		if remaining := budget.MaxInputTokens - inputTokensUsed; remaining <= 0 {
 			res.Truncated = true
-			a.recordNotSelected(ctx, lead, sr.Results[i:])
+			a.recordNotSelected(ctx, lead, hits[i:])
 			break
 		}
 
@@ -156,8 +148,13 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 			// stayed pinned at the full allowance for every chunk — which is
 			// verbatim the failure the comment above says was already fixed once,
 			// reintroduced by the mode that does not use the field it counts.
-			remainingClaims := budget.MaxClaimsPerSource - len(summary.Claims) - summary.Rows
-			if remainingClaims <= 0 {
+			remainingClaims := budget.MaxClaimsPerSource - (len(summary.Claims) - summary.Qualifiers) - summary.Rows
+			// Qualifiers have their own ceiling; dataset mode extracts none.
+			remainingQualifiers := budget.MaxQualifiersPerSource - summary.Qualifiers
+			if a.Rows != nil {
+				remainingQualifiers = 0
+			}
+			if remainingClaims <= 0 && remainingQualifiers <= 0 {
 				break
 			}
 
@@ -178,7 +175,8 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 				continue
 			}
 
-			claims, usage, err := a.mineChunk(ctx, lead, src, doc, chunk, remainingClaims, budget, res)
+			claims, qualifiers, usage, err := a.mineChunk(ctx, lead, src, doc, chunk,
+				max(remainingClaims, 0), remainingQualifiers, res)
 			inputTokensUsed += usage.InputTokens + usage.CacheReadTokens
 			if err != nil {
 				// One bad chunk does not fail the lead; the others may still
@@ -192,6 +190,7 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 			}
 			res.Claims = append(res.Claims, claims...)
 			summary.Claims = append(summary.Claims, claims...)
+			summary.Qualifiers += qualifiers
 		}
 
 		if len(summary.Claims) > 0 || summary.Rows > 0 || doc.Excerpt != "" {
@@ -250,10 +249,91 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 	return res, nil
 }
 
+// searchQueries returns the lead's keyword queries, or its text when it has none.
+func searchQueries(lead core.Lead) []string {
+	var out []string
+	for _, q := range lead.Queries {
+		if q = strings.TrimSpace(q); q != "" {
+			out = append(out, q)
+		}
+	}
+	if len(out) == 0 {
+		return []string{lead.Query}
+	}
+	return out
+}
+
+// searchAll runs one billed search per query and merges the hits by URL in
+// round-robin rank order. It fails only when every search fails.
+func (a *WebActor) searchAll(ctx context.Context, lead core.Lead, budget Budget, res *Result) ([]search.Result, error) {
+	var (
+		lists    [][]search.Result
+		firstErr error
+	)
+	queries := searchQueries(lead)
+	// Asks for twice MaxSources results in total, split across the queries.
+	perQuery := (budget.MaxSources*2 + len(queries) - 1) / len(queries)
+	for _, q := range queries {
+		sr, err := a.Search.Search(ctx, q, search.Options{
+			MaxResults:     perQuery,
+			IncludeContent: true,
+			NoTopUp:        len(queries) > 1,
+		})
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			a.logger().WarnContext(ctx, "search query failed", "query", q, "err", err)
+			continue
+		}
+		res.Costs = append(res.Costs, core.ToolCall{
+			SessionID: a.SessionID,
+			LeadID:    &lead.ID,
+			Role:      core.RoleExecutor,
+			Type:      core.CallSearch,
+			Input:     q,
+			Cost:      sr.Cost,
+		})
+		lists = append(lists, sr.Results)
+	}
+	if len(lists) == 0 {
+		return nil, fmt.Errorf("actors/web: search: %w", firstErr)
+	}
+	return mergeByURL(lists), nil
+}
+
+// mergeByURL interleaves result lists rank by rank, keeping the first hit for
+// each normalized URL.
+func mergeByURL(lists [][]search.Result) []search.Result {
+	var out []search.Result
+	seen := map[string]bool{}
+	for rank := 0; ; rank++ {
+		more := false
+		for _, l := range lists {
+			if rank >= len(l) {
+				continue
+			}
+			more = true
+			if u := cache.NormalizeURL(l[rank].URL); !seen[u] {
+				seen[u] = true
+				out = append(out, l[rank])
+			}
+		}
+		if !more {
+			return out
+		}
+	}
+}
+
 // sourceSummary tracks one source's contribution: claims and rows toward
 // MaxClaimsPerSource, and whether it counted toward the run summary.
 type sourceSummary struct {
 	Claims []core.Claim
+	// Qualifiers counts the claims in Claims marked as corrections or caveats.
+	Qualifiers int
 	// Rows counts what dataset mode extracted from this source, not the rows
 	// themselves.
 	Rows int
@@ -390,19 +470,21 @@ func (a *WebActor) mineChunk(
 	doc *extract.Document,
 	chunk llm.Chunk,
 	maxClaims int,
-	budget Budget,
+	maxQualifiers int,
 	res *Result,
-) ([]core.Claim, llm.Usage, error) {
+) ([]core.Claim, int, llm.Usage, error) {
 	miner := &Miner{LLM: a.LLM, Pricing: a.Pricing, Log: a.Log, SessionID: a.SessionID}
 
 	out, err := miner.Mine(ctx, MineInput{
-		Lead:        lead,
-		SourceURL:   src.url,
-		Title:       doc.Title,
-		PublishedAt: doc.PublishedAt,
-		Text:        chunk.Text,
-		Offset:      chunk.Start,
-		MaxClaims:   maxClaims,
+		Lead:          lead,
+		SourceURL:     src.url,
+		Title:         doc.Title,
+		PublishedAt:   doc.PublishedAt,
+		Text:          chunk.Text,
+		Offset:        chunk.Start,
+		MaxClaims:     maxClaims,
+		MaxQualifiers: maxQualifiers,
+		Question:      a.Question,
 	})
 	if out.HasCall {
 		// Recorded before the error is returned: the tokens were spent whether
@@ -411,7 +493,7 @@ func (a *WebActor) mineChunk(
 	}
 	res.Stats.ClaimsProposed += out.Proposed
 	res.Stats.ClaimsRejected += out.Rejected
-	return out.Claims, out.Usage, err
+	return out.Claims, out.Qualifiers, out.Usage, err
 }
 
 // toolCall prices a model response into a ledger row.

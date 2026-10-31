@@ -242,9 +242,7 @@ func (p *Planner) Replan(ctx context.Context, sess *core.Session, d *Digest, dep
 	// the digest.
 	out.Answered = parsed.Answered
 
-	if !out.Done {
-		out.Leads = LeadsAcross(sess.ID, sessionActors(sess), out.Questions, depth+1, nil)
-	}
+	out.Leads = LeadsAcross(sess.ID, sessionActors(sess), out.Questions, depth+1, nil)
 	return out, nil
 }
 
@@ -276,8 +274,38 @@ func toSubQuestions(in []plannedQuestion, max int) []SubQuestion {
 		if id == "" {
 			id = fmt.Sprintf("q%d", i+1)
 		}
-		out = append(out, SubQuestion{ID: id, Text: text})
+		out = append(out, SubQuestion{ID: id, Text: text, Queries: shortQueries(q.Queries)})
 		if len(out) >= max {
+			break
+		}
+	}
+	return out
+}
+
+// Bounds on the keyword searches a sub-question may carry.
+const (
+	maxQueriesPerLead = 3
+	maxQueryWords     = 10
+)
+
+// shortQueries keeps the first maxQueriesPerLead distinct non-empty queries,
+// each cut to maxQueryWords words.
+func shortQueries(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, q := range in {
+		words := strings.Fields(q)
+		if len(words) == 0 {
+			continue
+		}
+		q = strings.Join(words[:min(len(words), maxQueryWords)], " ")
+		key := strings.ToLower(q)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, q)
+		if len(out) >= maxQueriesPerLead {
 			break
 		}
 	}
@@ -289,8 +317,9 @@ func toSubQuestions(in []plannedQuestion, max int) []SubQuestion {
 // ---------------------------------------------------------------------------
 
 type plannedQuestion struct {
-	ID       string `json:"id"`
-	Question string `json:"question"`
+	ID       string   `json:"id"`
+	Question string   `json:"question"`
+	Queries  []string `json:"queries"`
 }
 
 type planResponse struct {

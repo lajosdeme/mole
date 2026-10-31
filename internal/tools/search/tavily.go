@@ -87,7 +87,7 @@ func (p *tavilyProvider) Search(ctx context.Context, query string, opts Options)
 	calls := int64(1)
 	// Tavily can return fewer results when asked for raw content; the rest come
 	// from a second query without it, and the actor fetches those pages itself.
-	if payload.IncludeRawContent && len(parsed.Results) < opts.MaxResults {
+	if payload.IncludeRawContent && !opts.NoTopUp && len(parsed.Results) < opts.MaxResults {
 		payload.IncludeRawContent = false
 		if more, err := p.post(ctx, payload); err == nil {
 			calls++

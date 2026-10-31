@@ -2,9 +2,13 @@ package verifier
 
 import (
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/lajosdeme/mole/internal/core"
 )
@@ -145,6 +149,7 @@ func FollowUpsWithDeferred(verdicts []Judged, opts FollowUpOptions) (queued, def
 				SessionID:   opts.SessionID,
 				ActorType:   actor,
 				Query:       query,
+				Queries:     followUpQueries(v.Pair),
 				RootClaimID: &rootID,
 				VerifyDepth: depth + 1,
 				// Priority above an ordinary lead: a contradiction blocks an honest
@@ -203,6 +208,199 @@ func disambiguationQuery(p Pair) string {
 	b := strings.Join(strings.Fields(p.B.Text), " ")
 	q := "evidence resolving whether " + trimTo(a, 120) + " or instead " + trimTo(b, 120)
 	return trimTo(q, 300)
+}
+
+// Word limits for follow-up search queries.
+const (
+	claimQueryWords   = 8
+	sourceQueryTopics = 4
+	maxUnitWords      = 2
+)
+
+// followUpQueries builds keyword searches from a contradiction: one per claim
+// (figure and entities) and one asking for the source or methodology.
+func followUpQueries(p Pair) []string {
+	a, b := queryWords(p.A.Text), queryWords(p.B.Text)
+	var out []string
+	add := func(q string) {
+		if q != "" && !slices.Contains(out, q) {
+			out = append(out, q)
+		}
+	}
+	add(claimQuery(a))
+	add(claimQuery(b))
+	if src := sourceTerms(a, b); len(src) > 0 {
+		add(strings.Join(src, " ") + " source OR methodology")
+	}
+	return out
+}
+
+// sourceTerms returns the first claim's figure with its unit and first name,
+// or the claims' topic words when neither holds a figure.
+func sourceTerms(a, b []string) []string {
+	for _, ws := range [][]string{a, b} {
+		f := figureIndex(ws)
+		if f < 0 {
+			continue
+		}
+		terms := []string{ws[f]}
+		for _, i := range unitIndices(ws, f) {
+			terms = append(terms, ws[i])
+		}
+		if n := firstName(ws, terms); n != "" {
+			terms = append(terms, n)
+		}
+		return terms
+	}
+	topics := topicWords(a, b)
+	return topics[:min(len(topics), sourceQueryTopics)]
+}
+
+// firstName returns the claim's first capitalised name, else its first content
+// word, skipping words already in terms.
+func firstName(ws, terms []string) string {
+	for _, match := range []func(int, string) bool{
+		func(i int, w string) bool { return i > 0 && isName(w) },
+		func(_ int, w string) bool { return !isStopword(w) && figureIndex([]string{w}) < 0 },
+	} {
+		for i, w := range ws {
+			if match(i, w) && !slices.Contains(terms, w) {
+				return w
+			}
+		}
+	}
+	return ""
+}
+
+// unitIndices returns up to maxUnitWords content words directly after the
+// figure at f.
+func unitIndices(ws []string, f int) []int {
+	var out []int
+	for i := f + 1; i < len(ws) && len(out) < maxUnitWords; i++ {
+		if isStopword(ws[i]) || figureIndex([]string{ws[i]}) == 0 {
+			break
+		}
+		out = append(out, i)
+	}
+	return out
+}
+
+// claimQuery keeps a claim's figure and unit, its capitalised names and then its
+// first content words, in sentence order, up to claimQueryWords words.
+func claimQuery(ws []string) string {
+	keep := make([]bool, len(ws))
+	seen := map[string]bool{}
+	pick := func(i int) {
+		if i >= 0 && !seen[strings.ToLower(ws[i])] && len(seen) < claimQueryWords {
+			keep[i] = true
+			seen[strings.ToLower(ws[i])] = true
+		}
+	}
+	f := figureIndex(ws)
+	pick(f)
+	if f >= 0 {
+		for _, i := range unitIndices(ws, f) {
+			pick(i)
+		}
+	}
+	for i, w := range ws {
+		if i > 0 && isName(w) {
+			pick(i)
+		}
+	}
+	for i, w := range ws {
+		if !isStopword(w) {
+			pick(i)
+		}
+	}
+	var out []string
+	for i, w := range ws {
+		if keep[i] {
+			out = append(out, w)
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+// topicWords returns the content words two claims share, in a's order, or a's
+// first content words when they share none.
+func topicWords(a, b []string) []string {
+	var shared, first []string
+	for _, w := range a {
+		if isStopword(w) || figureIndex([]string{w}) == 0 {
+			continue
+		}
+		first = append(first, w)
+		if slices.ContainsFunc(b, func(x string) bool { return strings.EqualFold(x, w) }) {
+			shared = append(shared, w)
+		}
+	}
+	if len(shared) > 0 {
+		return shared
+	}
+	return first
+}
+
+// queryWords splits claim text into words without surrounding punctuation.
+func queryWords(s string) []string {
+	var out []string
+	for _, f := range strings.Fields(s) {
+		if w := strings.TrimFunc(f, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '%'
+		}); w != "" {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// figureIndex returns the index of the first word holding a digit, preferring
+// one that is not a year, or -1.
+func figureIndex(ws []string) int {
+	first := -1
+	for i, w := range ws {
+		if !strings.ContainsFunc(w, unicode.IsDigit) {
+			continue
+		}
+		if !isYear(w) {
+			return i
+		}
+		if first < 0 {
+			first = i
+		}
+	}
+	return first
+}
+
+// isYear reports a four-digit number from 1900 to 2099.
+func isYear(w string) bool {
+	n, err := strconv.Atoi(w)
+	return err == nil && len(w) == 4 && n >= 1900 && n < 2100
+}
+
+// isName reports whether a word starts with a capital letter.
+func isName(w string) bool {
+	r, _ := utf8.DecodeRuneInString(w)
+	return unicode.IsUpper(r) && !isStopword(w)
+}
+
+// isStopword reports words that carry no search signal; short acronyms such as
+// "AI" are kept.
+func isStopword(w string) bool {
+	if len(w) < 3 {
+		return len(w) < 2 || strings.ToUpper(w) != w || figureIndex([]string{w}) == 0
+	}
+	return queryStopwords[strings.ToLower(w)]
+}
+
+var queryStopwords = map[string]bool{
+	"the": true, "and": true, "for": true, "with": true, "that": true, "this": true,
+	"from": true, "are": true, "was": true, "were": true, "has": true, "have": true,
+	"had": true, "its": true, "their": true, "which": true, "who": true, "per": true,
+	"about": true, "roughly": true, "around": true, "approximately": true, "nearly": true,
+	"some": true, "according": true, "than": true, "more": true, "less": true,
+	"been": true, "into": true, "also": true, "only": true, "while": true, "such": true,
+	"experience": true, "said": true, "says": true, "found": true, "estimated": true,
 }
 
 func trimTo(s string, n int) string {

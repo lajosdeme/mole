@@ -2,6 +2,7 @@ package verifier
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -304,5 +305,76 @@ func TestContradictionsOverTheCapAreDeferred(t *testing.T) {
 		FollowUpOptions{SessionID: "s_1", MaxTotal: 2})
 	if len(q2) != 0 || len(d2) != 0 {
 		t.Errorf("a duplicate produced %d queued and %d deferred", len(q2), len(d2))
+	}
+}
+
+// TestFollowUpQueriesAreShortAndCarryEachFigure checks follow-up queries are short keyword searches.
+func TestFollowUpQueriesAreShortAndCarryEachFigure(t *testing.T) {
+	a := &core.Claim{ID: "c_a", Text: "Battery electric vehicles experience roughly 25 fires per " +
+		"100,000 vehicles sold, according to a 2023 Swedish Civil Contingencies Agency report."}
+	b := &core.Claim{ID: "c_b", Text: "Internal combustion engine vehicles have about 1,530 fires " +
+		"per 100,000 vehicles sold, according to AutoInsuranceEZ, which cited NTSB data."}
+
+	got := FollowUps([]Judged{contradiction(a, b)}, FollowUpOptions{SessionID: "s_1"})
+	if len(got) != 1 {
+		t.Fatalf("got %d follow-ups, want 1", len(got))
+	}
+	qs := got[0].Lead.Queries
+	if len(qs) < 2 || len(qs) > 3 {
+		t.Fatalf("queries = %q, want 2-3", qs)
+	}
+	hasWord := func(word string) bool {
+		for _, q := range qs {
+			for _, w := range strings.Fields(q) {
+				if w == word {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, q := range qs {
+		if n := len(strings.Fields(q)); n > 12 {
+			t.Errorf("query %q has %d words, want at most 12", q, n)
+		}
+		if strings.Contains(q, "evidence resolving") {
+			t.Errorf("query %q is the descriptive lead text", q)
+		}
+	}
+	for _, fig := range []string{"25", "1,530"} {
+		if !hasWord(fig) {
+			t.Errorf("no query carries the figure %s: %q", fig, qs)
+		}
+	}
+	for _, entity := range []string{"Swedish", "AutoInsuranceEZ"} {
+		if !hasWord(entity) {
+			t.Errorf("no query names %s: %q", entity, qs)
+		}
+	}
+	if !strings.Contains(strings.Join(qs, "|"), "source OR methodology") {
+		t.Errorf("no provenance query in %q", qs)
+	}
+	if got[0].Lead.Query == "" {
+		t.Error("follow-up lost its descriptive lead text")
+	}
+}
+
+// TestSourceQueryPairsOneFigureWithItsUnitAndEntity checks the provenance query shape.
+func TestSourceQueryPairsOneFigureWithItsUnitAndEntity(t *testing.T) {
+	a := &core.Claim{ID: "c_a", Text: "Electric cars in Sweden had 3.8 fires per 100,000 vehicles in 2022."}
+	b := &core.Claim{ID: "c_b", Text: "Gasoline cars have 1,530 fires per 100,000 vehicles, according to AutoInsuranceEZ."}
+	qs := followUpQueries(newPair(a, b))
+	want := "3.8 fires Sweden source OR methodology"
+	if !slices.Contains(qs, want) {
+		t.Errorf("queries = %q, want one equal to %q", qs, want)
+	}
+}
+
+// TestClaimQueryKeepsTheUnitAfterTheFigure checks the word after the figure survives the word cap.
+func TestClaimQueryKeepsTheUnitAfterTheFigure(t *testing.T) {
+	q := claimQuery(queryWords("Battery electric vehicles experience roughly 4 fires per 100,000 " +
+		"vehicles sold, according to a 2023 Swedish Civil Contingencies Agency report."))
+	if !strings.Contains(" "+q+" ", " 4 fires ") {
+		t.Errorf("query %q lost the unit after the figure", q)
 	}
 }

@@ -82,6 +82,8 @@ type Options struct {
 	// IncludeDomains / ExcludeDomains restrict the result set where supported.
 	IncludeDomains []string
 	ExcludeDomains []string
+	// NoTopUp sends one request even when a raw-content answer comes back short.
+	NoTopUp bool
 }
 
 func (o Options) withDefaults() Options {

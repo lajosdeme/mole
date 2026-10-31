@@ -409,3 +409,123 @@ func TestPlannerCallsSendMediumEffort(t *testing.T) {
 		t.Errorf("efforts = %q, want two medium", f.efforts)
 	}
 }
+
+// TestLeadsCarryAtMostThreeShortQueries checks queries are parsed, capped at three and at ten words.
+func TestLeadsCarryAtMostThreeShortQueries(t *testing.T) {
+	reply := `{"questions":[{"id":"q1","question":"How often do EVs catch fire?","queries":[
+		"EV fire rate per 100,000 vehicles",
+		"  ",
+		"1,530 fires per 100,000 gasoline cars source",
+		"one two three four five six seven eight nine ten eleven twelve",
+		"EV fire statistic debunked OR misleading"]},
+		{"id":"q2","question":"Who measured it?"}],"rationale":"r"}`
+	f := &fakeLLM{reply: func(string) string { return reply }}
+	p := &planner.Planner{LLM: f}
+
+	check := func(leads []core.Lead) {
+		t.Helper()
+		if len(leads) != 2 {
+			t.Fatalf("got %d leads, want 2", len(leads))
+		}
+		want := []string{
+			"EV fire rate per 100,000 vehicles",
+			"1,530 fires per 100,000 gasoline cars source",
+			"one two three four five six seven eight nine ten",
+		}
+		if strings.Join(leads[0].Queries, "|") != strings.Join(want, "|") {
+			t.Errorf("queries = %q, want %q", leads[0].Queries, want)
+		}
+		if len(leads[1].Queries) != 0 {
+			t.Errorf("lead without queries got %q", leads[1].Queries)
+		}
+	}
+
+	initial, err := p.InitialLeads(context.Background(), session("q"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(initial.Leads)
+
+	d := planner.NewDigest("q", planner.DefaultDigestChars)
+	next, err := p.Replan(context.Background(), session("q"), d, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(next.Leads)
+
+	for _, prompt := range f.prompts {
+		if !strings.Contains(prompt, `"queries"`) {
+			t.Errorf("prompt does not ask for queries:\n%s", prompt)
+		}
+	}
+}
+
+// TestDecomposeAsksToTraceTheHeadlineFigure checks decompose asks for a provenance sub-question.
+func TestDecomposeAsksToTraceTheHeadlineFigure(t *testing.T) {
+	f := &fakeLLM{reply: func(string) string { return plan("one") }}
+	p := &planner.Planner{LLM: f}
+	if _, err := p.InitialLeads(context.Background(), session("q")); err != nil {
+		t.Fatal(err)
+	}
+	prompt := f.lastPrompt()
+	for _, want := range []string{"trace the most-quoted figure to its origin", "denominator", "criticised or superseded"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("decompose prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestReplanJudgesAnsweredFromTheDigest checks the answered rule uses only what the state shows.
+func TestReplanJudgesAnsweredFromTheDigest(t *testing.T) {
+	f := &fakeLLM{reply: func(string) string { return `{"done":false}` }}
+	p := &planner.Planner{LLM: f}
+	if _, err := p.Replan(context.Background(), session("q"), planner.NewDigest("q", 0), 0); err != nil {
+		t.Fatal(err)
+	}
+	prompt := f.lastPrompt()
+	if strings.Contains(prompt, "several claims is") {
+		t.Errorf("replan prompt still answers on claim count:\n%s", prompt)
+	}
+	for _, want := range []string{
+		"has claims and the state reports no contradiction",
+		"stays open until it has claims of its own",
+		"Where the sub-question asks for a figure",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("replan prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "origin\n  is known") || strings.Contains(prompt, "its origin is known") {
+		t.Errorf("replan prompt still asks for an origin the state cannot show:\n%s", prompt)
+	}
+}
+
+// TestReplanKeepsLeadsWhenDone checks a done plan still carries leads for its questions.
+func TestReplanKeepsLeadsWhenDone(t *testing.T) {
+	f := &fakeLLM{reply: func(string) string {
+		return `{"done":true,"questions":[{"id":"q9","question":"where does the figure come from"}]}`
+	}}
+	p := &planner.Planner{LLM: f}
+	got, err := p.Replan(context.Background(), session("q"), planner.NewDigest("q", 0), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Done || len(got.Leads) != 1 {
+		t.Errorf("done=%v leads=%d, want done with 1 lead", got.Done, len(got.Leads))
+	}
+}
+
+// TestDuplicateQueriesAreDropped checks repeated keyword queries are searched once.
+func TestDuplicateQueriesAreDropped(t *testing.T) {
+	reply := `{"questions":[{"id":"q1","question":"How often do EVs catch fire?","queries":[
+		"EV fire rate", "ev  fire RATE", "EV fire rate source"]}],"rationale":"r"}`
+	p := &planner.Planner{LLM: &fakeLLM{reply: func(string) string { return reply }}}
+	initial, err := p.InitialLeads(context.Background(), session("q"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"EV fire rate", "EV fire rate source"}
+	if got := initial.Leads[0].Queries; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("queries = %q, want %q", got, want)
+	}
+}
