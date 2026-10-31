@@ -708,6 +708,10 @@ func fillOutput(out *researchOutput, res *session.Result) {
 		out.Report = rep.Markdown()
 		out.Degraded = rep.Degraded
 	}
+	// A failed run without an error carries its stop reason as the error.
+	if out.Error == "" && res.Status == core.StatusFailed {
+		out.Error = out.StoppedBecause
+	}
 }
 
 // progressPrinter reports each phase as it happens, with elapsed time.
@@ -804,7 +808,7 @@ func printReport(out *researchOutput, report *output.Report, unit core.BudgetUni
 	if out.StoppedBecause != "" {
 		fmt.Printf(" stopped: %s\n", out.StoppedBecause)
 	}
-	if out.Error != "" {
+	if out.Error != "" && out.Error != out.StoppedBecause {
 		fmt.Printf(" error: %s\n", out.Error)
 	}
 	fmt.Printf("\n mole eval %s        for the scorecard\n", out.SessionID)

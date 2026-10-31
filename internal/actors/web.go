@@ -95,8 +95,10 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 		inputTokensUsed int64
 		sourcesRead     int
 		perSource       []sourceSummary
+		refusal         error
 	)
 
+sources:
 	for i, hit := range hits {
 		// Count sources READ, not sources that yielded something. Counting
 		// summaries meant a run where nothing extracted cleanly walked the
@@ -164,6 +166,10 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 			if a.Rows != nil {
 				rows, usage, err := a.mineRowChunk(ctx, lead, src, doc, chunk, remainingClaims, res)
 				inputTokensUsed += usage.InputTokens + usage.CacheReadTokens
+				if llm.Refused(err) {
+					refusal = err
+					break sources
+				}
 				if err != nil {
 					res.Stats.ChunksFailed++
 					a.logger().WarnContext(ctx, "chunk row extraction failed",
@@ -178,6 +184,10 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 			claims, qualifiers, usage, err := a.mineChunk(ctx, lead, src, doc, chunk,
 				max(remainingClaims, 0), remainingQualifiers, res)
 			inputTokensUsed += usage.InputTokens + usage.CacheReadTokens
+			if llm.Refused(err) {
+				refusal = err
+				break sources
+			}
 			if err != nil {
 				// One bad chunk does not fail the lead; the others may still
 				// carry the answer. §9.5 classifies this as degraded — but only
@@ -199,6 +209,9 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 	}
 
 	// 6. Summarize what was found.
+	if refusal != nil {
+		res.Summary = "The model provider refused the request."
+	}
 	if res.Summary == "" {
 		// Say what actually happened. Claiming no sources were found while
 		// printing claims from those sources directly underneath is worse than
@@ -246,6 +259,9 @@ func (a *WebActor) Run(ctx context.Context, lead core.Lead) (*Result, error) {
 		}
 	}
 
+	if refusal != nil {
+		return res, fmt.Errorf("actors/web: mine: %w", refusal)
+	}
 	return res, nil
 }
 
@@ -264,7 +280,8 @@ func searchQueries(lead core.Lead) []string {
 }
 
 // searchAll runs one billed search per query and merges the hits by URL in
-// round-robin rank order. It fails only when every search fails.
+// round-robin rank order. It fails when every search fails or the provider
+// refuses the account.
 func (a *WebActor) searchAll(ctx context.Context, lead core.Lead, budget Budget, res *Result) ([]search.Result, error) {
 	var (
 		lists    [][]search.Result
@@ -280,6 +297,9 @@ func (a *WebActor) searchAll(ctx context.Context, lead core.Lead, budget Budget,
 			NoTopUp:        len(queries) > 1,
 		})
 		if err != nil {
+			if errors.Is(err, search.ErrQuotaExceeded) || errors.Is(err, search.ErrUnauthorized) {
+				return nil, fmt.Errorf("actors/web: search: %w", err)
+			}
 			if firstErr == nil {
 				firstErr = err
 			}

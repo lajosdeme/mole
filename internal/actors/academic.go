@@ -110,7 +110,10 @@ func (a *AcademicActor) Run(ctx context.Context, lead core.Lead) (*Result, error
 	}
 
 	miner := &Miner{LLM: a.LLM, Pricing: a.Pricing, Log: a.Log, SessionID: a.SessionID}
-	var used int64
+	var (
+		used    int64
+		refusal error
+	)
 
 	for _, p := range papers {
 		abstract := strings.TrimSpace(p.Abstract)
@@ -151,6 +154,10 @@ func (a *AcademicActor) Run(ctx context.Context, lead core.Lead) (*Result, error
 		// abstract — so counting the source text alone undercounted real input
 		// by about half.
 		used += out.Usage.InputTokens + out.Usage.CacheReadTokens
+		if llm.Refused(err) {
+			refusal = err
+			break
+		}
 		if err != nil {
 			a.logger().WarnContext(ctx, "mining an abstract failed",
 				"source", citationURL(p), "err", err)
@@ -177,9 +184,13 @@ func (a *AcademicActor) Run(ctx context.Context, lead core.Lead) (*Result, error
 		// which is exactly the spend the ladder exists to avoid.
 		if remaining > 0 && shouldEscalate(lead.Query, out.Claims) {
 			if target := a.fullTextTarget(ctx, p); target != "" {
-				extra, spent := a.readFullText(ctx, lead, p, target, miner, remaining, qualifiersLeft, maxInput-used, res)
+				extra, spent, rerr := a.readFullText(ctx, lead, p, target, miner, remaining, qualifiersLeft, maxInput-used, res)
 				res.Claims = append(res.Claims, extra...)
 				used += spent
+				if rerr != nil {
+					refusal = rerr
+					break
+				}
 				if used >= maxInput {
 					res.Truncated = true
 					break
@@ -200,6 +211,9 @@ func (a *AcademicActor) Run(ctx context.Context, lead core.Lead) (*Result, error
 		}); err != nil {
 			return res, fmt.Errorf("actors/academic: persist claims: %w", err)
 		}
+	}
+	if refusal != nil {
+		return res, fmt.Errorf("actors/academic: mine: %w", refusal)
 	}
 	return res, nil
 }
@@ -456,9 +470,9 @@ func (a *AcademicActor) readFullText(
 	maxQualifiers int,
 	tokenBudget int64,
 	res *Result,
-) ([]core.Claim, int64) {
+) ([]core.Claim, int64, error) {
 	if a.Fetch == nil || a.Extract == nil || tokenBudget <= 0 {
-		return nil, 0
+		return nil, 0, nil
 	}
 
 	fetched, err := a.Fetch.Fetch(ctx, target)
@@ -470,25 +484,25 @@ func (a *AcademicActor) readFullText(
 	if err != nil || fetched == nil || !outcome.Usable() {
 		a.recordOutcome(ctx, lead, target, outcome, status, bytes, errText(err))
 		res.Stats.ChunksFailed++
-		return nil, 0
+		return nil, 0, nil
 	}
 	res.Stats.Fetched++
 
 	pageURL, perr := url.Parse(target)
 	if perr != nil {
-		return nil, 0
+		return nil, 0, nil
 	}
 	doc, err := a.Extract.Extract(ctx, fetched.Content, fetched.ContentType, pageURL)
 	if err != nil || doc == nil || strings.TrimSpace(doc.Text) == "" {
 		a.recordOutcome(ctx, lead, target, fetch.OutcomeExtractFailed, status, bytes, errText(err))
 		res.Stats.ChunksFailed++
-		return nil, 0
+		return nil, 0, nil
 	}
 	a.recordOutcome(ctx, lead, target, outcome, status, bytes, "")
 
 	chunks := llm.Split(doc.Text, llm.ChunkOptions{MaxChars: 6000, OverlapChars: 200, MinChars: 400})
 	if len(chunks) == 0 {
-		return nil, 0
+		return nil, 0, nil
 	}
 
 	order := a.rankChunks(lead.Query, chunks)
@@ -534,6 +548,9 @@ func (a *AcademicActor) readFullText(
 		res.Stats.ClaimsRejected += out.Rejected
 		res.Stats.Chunks++
 		spent += out.Usage.InputTokens + out.Usage.CacheReadTokens
+		if llm.Refused(err) {
+			return claims, spent, err
+		}
 		if err != nil {
 			res.Stats.ChunksFailed++
 			continue
@@ -544,7 +561,7 @@ func (a *AcademicActor) readFullText(
 			break
 		}
 	}
-	return claims, spent
+	return claims, spent, nil
 }
 
 // recordOutcome writes the §10.4 row for one tier-1 fetch.

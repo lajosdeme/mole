@@ -485,11 +485,25 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 	// money set aside at session creation spendable — a run that produced good
 	// claims and could not afford to write them up would have wasted the whole
 	// budget, not just the last call.
-	res.Report, res.Ground = r.finish(ctx, runCtx, led, vf, sess, &actor, spec.Schema)
+	// A model refusal, or a failed report-mode run with no claims, gets no report.
+	var skip string
+	switch {
+	case res.Run != nil && res.Run.ModelRefused:
+		skip = "the model provider refused the request: no report written"
+	case spec.Schema == nil && res.Run != nil &&
+		res.Run.Status == core.StatusFailed && r.noClaims(ctx, sess.ID):
+		skip = "session failed before collecting any claim: no report written"
+	}
+	var refusal error
+	res.Report, res.Ground, refusal = r.finish(ctx, runCtx, led, vf, sess, &actor, spec.Schema, skip)
 
 	if res.Run != nil {
 		res.Status = res.Run.Status
 		res.StoppedBecause = res.Run.StoppedBecause
+	}
+	if refusal != nil {
+		res.Status = core.StatusFailed
+		res.StoppedBecause = executor.FatalReason(refusal)
 	}
 	if res.Err != nil && res.Status == core.StatusDone {
 		res.Status = core.StatusFailed
@@ -562,6 +576,8 @@ const ReportGrace = verifier.DefaultReportAllowance
 // Runs on a context detached from the caller's. Everything here is the payoff
 // for money already spent, and a cancelled research context must not also
 // discard the answer it paid for. run is the research context, derived from parent.
+// A non-empty skip releases escrow, notes skip and writes nothing. A model
+// refusal in grounding or the report is returned, with no report.
 func (r *Runner) finish(
 	parent, run context.Context,
 	led *budget.Ledger,
@@ -569,15 +585,20 @@ func (r *Runner) finish(
 	sess *core.Session,
 	actor *actors.WebActor,
 	schema *dataset.Schema,
-) (*output.Report, *verifier.GroundReport) {
+	skip string,
+) (*output.Report, *verifier.GroundReport, error) {
 	// A cancel skips the report; a deadline skips grounding and bounds the report.
 	cancelled := errors.Is(run.Err(), context.Canceled)
-	timedOut := errors.Is(run.Err(), context.DeadlineExceeded)
+	timedOut := researchTimedOut(run, sess, time.Now())
 	ctx := context.WithoutCancel(parent)
 
 	released, err := led.ReleaseEscrow(ctx, sess.ID)
 	if err != nil {
 		r.notice("could not release escrow: %v", err)
+	}
+	if skip != "" {
+		r.notice("%s", skip)
+		return nil, nil, nil
 	}
 
 	// §11.5.2's grounding pass, between the escrow release and the report.
@@ -590,10 +611,14 @@ func (r *Runner) finish(
 	// well-checked set of claims and no report to put them in.
 	var ground *verifier.GroundReport
 	if !cancelled && !timedOut {
-		ground = r.ground(ctx, vf, sess.ID, released)
+		ground = r.groundByDeadline(ctx, vf, sess, released)
 	}
 	if r.OnGround != nil && ground != nil {
 		r.OnGround(ground)
+	}
+	if ground != nil && ground.Refusal != nil {
+		r.notice("the model provider refused the request: no report written")
+		return nil, ground, ground.Refusal
 	}
 
 	// Reserve BEFORE generating. The order used to be release → generate →
@@ -621,7 +646,7 @@ func (r *Runner) finish(
 	// reserving output tokens for a step that spends none would leave a hold to
 	// settle at zero and report a cost that does not exist.
 	if schema != nil {
-		return r.finishDataset(ctx, sess.ID, *schema), ground
+		return r.finishDataset(ctx, sess.ID, *schema), ground, nil
 	}
 
 	gen := &output.Generator{LLM: actor.LLM, MaxClaims: r.MaxFindings, RecheckModel: r.RecheckModel}
@@ -649,7 +674,7 @@ func (r *Runner) finish(
 	genCtx := ctx
 	if !cancelled {
 		var cancelGen context.CancelFunc
-		genCtx, cancelGen = context.WithTimeout(ctx, ReportGrace)
+		genCtx, cancelGen = context.WithDeadline(ctx, reportDeadline(sess, time.Now()))
 		defer cancelGen()
 		// Stops the report when the parent is cancelled, not when it times out.
 		stop := context.AfterFunc(parent, func() {
@@ -667,7 +692,10 @@ func (r *Runner) finish(
 				r.notice("could not release the report hold: %v", rerr)
 			}
 		}
-		return nil, ground
+		if llm.Refused(err) {
+			return nil, ground, err
+		}
+		return nil, ground, nil
 	}
 
 	if reservation != nil {
@@ -689,7 +717,7 @@ func (r *Runner) finish(
 			r.notice("settling the report failed: %v", serr)
 		}
 	}
-	return report, ground
+	return report, ground, nil
 }
 
 // finishDataset assembles the dataset from the rows the session extracted.
@@ -752,6 +780,56 @@ func (r *Runner) ground(
 		return nil
 	}
 	return rep
+}
+
+// researchTimedOut reports whether the run context hit its deadline or the research deadline has passed.
+func researchTimedOut(run context.Context, sess *core.Session, now time.Time) bool {
+	if errors.Is(run.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	deadline, ok := verifier.ResearchDeadline(sess)
+	return ok && !now.Before(deadline)
+}
+
+// reportDeadline is the later of the wall clock and a tenth of it from now,
+// capped at ReportGrace from now.
+func reportDeadline(sess *core.Session, now time.Time) time.Time {
+	limit := now.Add(ReportGrace)
+	if sess.MaxWallClock <= 0 {
+		return limit
+	}
+	end := sess.CreatedAt.Add(sess.MaxWallClock)
+	if floor := now.Add(sess.MaxWallClock / 10); floor.After(end) {
+		end = floor
+	}
+	if end.After(limit) {
+		return limit
+	}
+	return end
+}
+
+// groundByDeadline grounds under the session's research deadline, skipping it once passed.
+func (r *Runner) groundByDeadline(ctx context.Context, vf *verifier.Verifier, sess *core.Session, released int64) *verifier.GroundReport {
+	if deadline, ok := verifier.ResearchDeadline(sess); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	return r.ground(ctx, vf, sess.ID, released)
+}
+
+// noClaims reports whether the session has no stored claims.
+func (r *Runner) noClaims(ctx context.Context, id string) bool {
+	var n int64
+	err := r.Store.Read(context.WithoutCancel(ctx), func(ctx context.Context, q store.Queries) error {
+		var err error
+		n, err = q.CountClaims(ctx, id)
+		return err
+	})
+	return err == nil && n == 0
 }
 
 func (r *Runner) loadSession(ctx context.Context, id string) (*core.Session, error) {

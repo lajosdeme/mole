@@ -147,6 +147,9 @@ func (e *APIError) Retryable() bool {
 	return errors.Is(e.sentinel, ErrRateLimited) || (e.Status >= 500 && e.Status < 600)
 }
 
+// statusUsageLimit is Tavily's "exceeds your plan's set usage limit".
+const statusUsageLimit = 432
+
 func classifyStatus(kind Kind, status int, body string) error {
 	if status >= 200 && status < 300 {
 		return nil
@@ -157,7 +160,7 @@ func classifyStatus(kind Kind, status int, body string) error {
 		e.sentinel = ErrRateLimited
 	case status == http.StatusUnauthorized, status == http.StatusForbidden:
 		e.sentinel = ErrUnauthorized
-	case status == http.StatusPaymentRequired:
+	case status == http.StatusPaymentRequired, status == statusUsageLimit:
 		e.sentinel = ErrQuotaExceeded
 	}
 	return e

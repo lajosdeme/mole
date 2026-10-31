@@ -27,6 +27,7 @@ import (
 	"github.com/lajosdeme/mole/internal/queue"
 	"github.com/lajosdeme/mole/internal/store"
 	"github.com/lajosdeme/mole/internal/store/sqlite"
+	"github.com/lajosdeme/mole/internal/tools/search"
 	"github.com/lajosdeme/mole/internal/verifier"
 )
 
@@ -39,7 +40,9 @@ type scriptedLLM struct {
 	replies  []string
 	calls    int
 	errAfter int // when >0, calls at or past this index fail
-	prompts  []string
+	// fail, when set, returns the error for call i, or nil to answer it.
+	fail    func(i int) error
+	prompts []string
 }
 
 func (s *scriptedLLM) count() int {
@@ -70,6 +73,11 @@ func (s *scriptedLLM) Complete(ctx context.Context, req llm.Request) (*llm.Respo
 	}
 	if s.errAfter > 0 && i >= s.errAfter {
 		return resp, llm.ErrRateLimited
+	}
+	if s.fail != nil {
+		if err := s.fail(i); err != nil {
+			return resp, err
+		}
 	}
 	resp.Text = `{"done":true}`
 	if i < len(s.replies) {
@@ -383,6 +391,39 @@ func TestFatalErrorsAbortTheSession(t *testing.T) {
 	}
 	if after := r.reload(t); after.Escrow <= 0 {
 		t.Error("escrow was consumed, so no partial report is affordable")
+	}
+}
+
+// TestSearchRefusalFailsTheSession checks a quota or auth refusal from the search provider stops the run.
+func TestSearchRefusalFailsTheSession(t *testing.T) {
+	cases := []struct {
+		sentinel error
+		want     string
+	}{
+		{search.ErrQuotaExceeded, "fatal: search provider refused the request: quota exceeded"},
+		{search.ErrUnauthorized, "fatal: search provider refused the request: unauthorized"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.want, func(t *testing.T) {
+			refused := fmt.Errorf("actors/web: search: %w", tc.sentinel)
+			r := newRig(t, 5*core.MicrosPerUSD, []string{planJSON("a", "b", "c")},
+				func(int, core.Lead) (*actors.Result, error) { return okResult(0, 1_000), refused })
+			r.exec.Workers = 1
+
+			res, err := r.exec.Run(context.Background(), r.sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Status != core.StatusFailed {
+				t.Errorf("status = %s, want failed", res.Status)
+			}
+			if !strings.HasPrefix(res.StoppedBecause, tc.want) {
+				t.Errorf("stopped because %q, want prefix %q", res.StoppedBecause, tc.want)
+			}
+			if r.actor.count() != 1 {
+				t.Errorf("ran %d leads, want 1", r.actor.count())
+			}
+		})
 	}
 }
 
@@ -1349,6 +1390,8 @@ type verifierLLM struct {
 	strictCalls    int
 	// strictErr, when set, fails every strictModel adjudication.
 	strictErr error
+	// adjErr, when set, fails every other adjudication.
+	adjErr error
 }
 
 func (v *verifierLLM) Name() string               { return "fake" }
@@ -1377,6 +1420,8 @@ func (v *verifierLLM) Complete(_ context.Context, req llm.Request) (*llm.Respons
 			if v.strictErr != nil {
 				return resp, v.strictErr
 			}
+		} else if v.adjErr != nil {
+			return resp, v.adjErr
 		}
 		var b strings.Builder
 		b.WriteString(`{"verdicts":[`)
@@ -1399,6 +1444,12 @@ func (v *verifierLLM) Complete(_ context.Context, req llm.Request) (*llm.Respons
 		resp.Text = v.plans[i]
 	}
 	return resp, nil
+}
+
+func (v *verifierLLM) planCalls() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.calls
 }
 
 func (v *verifierLLM) strictAdjudications() int {
@@ -2232,6 +2283,11 @@ func TestPlannerDoneIsOverriddenWhileMostOfTheBudgetIsLeft(t *testing.T) {
 	if !logged {
 		t.Errorf("the override was not recorded in the progress log: %v", events)
 	}
+	for _, ev := range events {
+		if strings.Contains(ev.Detail, "unsettled") {
+			t.Errorf("override message still claims the research is unsettled: %q", ev.Detail)
+		}
+	}
 }
 
 // TestPlannerDoneIsHonouredPastTheThreshold checks done ends the run once half the allowance is gone.
@@ -2300,5 +2356,199 @@ func TestOverriddenDoneThatAddsNothingEndsTheRun(t *testing.T) {
 		if got := len(ranQueries(t, r)); got != 3 {
 			t.Errorf("%s: %d leads ran, want the 3 planned", name, got)
 		}
+	}
+}
+
+// TestALeadCutByTheResearchDeadlineIsNotAFailure checks a lead stopped by the deadline is not failed, not a dead end, and the run stops on max_wallclock.
+func TestALeadCutByTheResearchDeadlineIsNotAFailure(t *testing.T) {
+	r := newRigFromSpec(t, budget.SessionSpec{Budget: 50 * core.MicrosPerUSD, MaxWallClock: time.Second},
+		[]string{planJSON("a")},
+		func(_ int, l core.Lead) (*actors.Result, error) { return nil, context.DeadlineExceeded })
+	r.exec.Actors[core.ActorWeb] = actorFunc(func(ctx context.Context, l core.Lead) (*actors.Result, error) {
+		<-ctx.Done()
+		return nil, fmt.Errorf("search: %w", ctx.Err())
+	})
+
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LeadsFailed != 0 {
+		t.Errorf("%d leads failed, want 0", res.LeadsFailed)
+	}
+	if len(res.Digest.DeadEnds) != 0 {
+		t.Errorf("dead ends recorded: %+v", res.Digest.DeadEnds)
+	}
+	if res.StoppedBecause != "max_wallclock" {
+		t.Errorf("stopped because %q, want max_wallclock", res.StoppedBecause)
+	}
+}
+
+// TestALeadTimeoutBeforeTheDeadlineIsStillAFailure checks a call's own timeout still counts as a failed lead.
+func TestALeadTimeoutBeforeTheDeadlineIsStillAFailure(t *testing.T) {
+	r := newRig(t, 50*core.MicrosPerUSD, []string{planJSON("a")},
+		func(int, core.Lead) (*actors.Result, error) {
+			return nil, fmt.Errorf("fetch: %w", context.DeadlineExceeded)
+		})
+
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LeadsFailed == 0 {
+		t.Error("a lead that timed out on its own was not counted as failed")
+	}
+}
+
+// actorFunc adapts a function to actors.Actor.
+type actorFunc func(context.Context, core.Lead) (*actors.Result, error)
+
+func (actorFunc) Type() core.ActorType { return core.ActorWeb }
+func (f actorFunc) Run(ctx context.Context, l core.Lead) (*actors.Result, error) {
+	return f(ctx, l)
+}
+
+// refusals are the model provider's account refusals, with the stop reason each gives.
+var refusals = []struct {
+	err  error
+	want string
+}{
+	{llm.StatusError("fake", 402, `{"error":{"type":"insufficient_balance_error"}}`),
+		"fatal: model provider refused the request: quota exceeded (fake 402)"},
+	{llm.StatusError("fake", 401, ""),
+		"fatal: model provider refused the request: unauthorized (fake 401)"},
+}
+
+// checkRefused checks a run ended failed with want as its stop reason.
+func checkRefused(t *testing.T, res *executor.Result, err error, want string) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != core.StatusFailed {
+		t.Errorf("status = %s, want failed", res.Status)
+	}
+	if res.StoppedBecause != want {
+		t.Errorf("stopped because %q, want %q", res.StoppedBecause, want)
+	}
+	if !res.ModelRefused {
+		t.Error("ModelRefused is false")
+	}
+}
+
+// TestModelRefusalInPlanningFailsTheSession checks a refused initial plan, mid-loop replan or final replan fails the run.
+func TestModelRefusalInPlanningFailsTheSession(t *testing.T) {
+	for _, tc := range refusals {
+		for _, path := range []struct {
+			name     string
+			plan     string
+			failAt   int
+			wantLead int
+		}{
+			{"initial plan", planJSON("a", "b", "c"), 0, 0},
+			{"mid-loop replan", planJSON("a", "b", "c"), 1, 3},
+			{"final replan", planJSON("a", "b"), 1, 2},
+		} {
+			t.Run(path.name+"/"+tc.want, func(t *testing.T) {
+				r := newRig(t, 5*core.MicrosPerUSD, []string{path.plan},
+					func(int, core.Lead) (*actors.Result, error) { return okResult(1, 1_000), nil })
+				r.llm.fail = func(i int) error {
+					if i >= path.failAt {
+						return tc.err
+					}
+					return nil
+				}
+
+				res, err := r.exec.Run(context.Background(), r.sess.ID)
+				checkRefused(t, res, err, tc.want)
+				if got := r.llm.count(); got != path.failAt+1 {
+					t.Errorf("%d model calls, want %d", got, path.failAt+1)
+				}
+				if got := r.actor.count(); got != path.wantLead {
+					t.Errorf("ran %d leads, want %d", got, path.wantLead)
+				}
+			})
+		}
+	}
+}
+
+// TestModelRefusalInALeadFailsTheSession checks a lead failing on a model refusal stops the run.
+func TestModelRefusalInALeadFailsTheSession(t *testing.T) {
+	for _, tc := range refusals {
+		t.Run(tc.want, func(t *testing.T) {
+			refused := fmt.Errorf("actors/web: mine: %w", tc.err)
+			r := newRig(t, 5*core.MicrosPerUSD, []string{planJSON("a", "b", "c")},
+				func(int, core.Lead) (*actors.Result, error) { return okResult(1, 1_000), refused })
+			r.exec.Workers = 1
+
+			res, err := r.exec.Run(context.Background(), r.sess.ID)
+			checkRefused(t, res, err, tc.want)
+			if r.actor.count() != 1 {
+				t.Errorf("ran %d leads, want 1", r.actor.count())
+			}
+			if got := r.llm.count(); got != 1 {
+				t.Errorf("%d planner calls, want 1", got)
+			}
+		})
+	}
+}
+
+// TestModelRefusalInVerificationFailsTheSession checks a refused adjudication or re-check stops the run.
+func TestModelRefusalInVerificationFailsTheSession(t *testing.T) {
+	for _, tc := range refusals {
+		t.Run("adjudication/"+tc.want, func(t *testing.T) {
+			fl := &verifierLLM{plans: []string{planJSON("a", "b", "c")}, relation: "contradicts", adjErr: tc.err}
+			r := newRig(t, 5*core.MicrosPerUSD, nil, opposingClaims)
+			r.exec.Planner = &planner.Planner{LLM: fl, MaxInitialLeads: 3, ReplanEvery: 3, MaxDepth: 2}
+			r.withVerifier(fl)
+
+			res, err := r.exec.Run(context.Background(), r.sess.ID)
+			checkRefused(t, res, err, tc.want)
+			if fl.adjudications() == 0 {
+				t.Error("no adjudication ran; the test proves nothing")
+			}
+			if got := fl.planCalls(); got != 1 {
+				t.Errorf("%d planner calls, want 1", got)
+			}
+		})
+		t.Run("re-check/"+tc.want, func(t *testing.T) {
+			r, fl := recheckRig(t, "strict")
+			fl.strictErr = tc.err
+
+			res, err := r.exec.Run(context.Background(), r.sess.ID)
+			checkRefused(t, res, err, tc.want)
+			if got := fl.strictAdjudications(); got != 1 {
+				t.Errorf("%d re-check calls, want 1", got)
+			}
+		})
+	}
+}
+
+// TestRateLimitsAreNotRefusals checks a 429 from the planner or a lead does not fail the run.
+func TestRateLimitsAreNotRefusals(t *testing.T) {
+	limited := llm.StatusError("fake", 429, "slow down")
+	r := newRig(t, 5*core.MicrosPerUSD, []string{planJSON("a", "b")},
+		func(n int, _ core.Lead) (*actors.Result, error) {
+			if n == 0 {
+				return okResult(0, 1_000), limited
+			}
+			return okResult(1, 1_000), nil
+		})
+	r.llm.fail = func(i int) error {
+		if i >= 1 {
+			return limited
+		}
+		return nil
+	}
+
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status == core.StatusFailed || res.ModelRefused {
+		t.Errorf("status = %s, refused = %v, stopped because %q", res.Status, res.ModelRefused, res.StoppedBecause)
+	}
+	if r.actor.count() < 3 {
+		t.Errorf("ran %d leads, want the rate-limited lead retried", r.actor.count())
 	}
 }

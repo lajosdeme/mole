@@ -211,14 +211,16 @@ func (g *Generator) Generate(ctx context.Context, st store.Store, sessionID stri
 	}
 
 	fence := fenceToken()
-	gen.writeBody(ctx, llm.Request{
+	if err := gen.writeBody(ctx, llm.Request{
 		Tier:      llm.TierStrong,
 		Effort:    gen.Effort,
 		System:    reportSystemPrompt,
 		Messages:  []llm.Message{llm.User(reportPrompt(fence, sess.Prompt, findings, index))},
 		MaxTokens: gen.MaxTokens,
 	}, rep, wording{noun: "synthesis", verb: "synthesize"},
-		fallbackBody(sess.Prompt, findings, index))
+		fallbackBody(sess.Prompt, findings, index)); err != nil {
+		return nil, err
+	}
 	noteWithheld(rep, withheld)
 	return rep, nil
 }
@@ -254,7 +256,8 @@ type wording struct {
 // A failed synthesis costs the prose, not the evidence. Verified claims with
 // citations are a real answer — less readable, not less true — and the budget
 // already paid to collect them.
-func (gen *Generator) writeBody(ctx context.Context, req llm.Request, rep *Report, w wording, fallback string) {
+// Returns the error only when the provider refused the account.
+func (gen *Generator) writeBody(ctx context.Context, req llm.Request, rep *Report, w wording, fallback string) error {
 	resp, err := gen.LLM.Complete(ctx, req)
 	if resp != nil {
 		rep.Model = resp.Model
@@ -273,6 +276,8 @@ func (gen *Generator) writeBody(ctx context.Context, req llm.Request, rep *Repor
 	}
 
 	switch {
+	case llm.Refused(err):
+		return fmt.Errorf("output: %s: %w", w.noun, err)
 	case err != nil:
 		rep.Body = fallback
 		rep.Degraded = w.noun + " failed"
@@ -291,10 +296,11 @@ func (gen *Generator) writeBody(ctx context.Context, req llm.Request, rep *Repor
 			// output that only the detail should carry.
 			rep.Degraded = w.noun + " rejected — " + safeReason(problem)
 			rep.DegradedDetail = problem.Error()
-			return
+			return nil
 		}
 		rep.Body = strings.TrimSpace(resp.Text)
 	}
+	return nil
 }
 
 // fallbackBody lists the claims without synthesis.

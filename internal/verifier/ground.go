@@ -97,6 +97,8 @@ type GroundReport struct {
 	NotFetchable int
 	// Degraded says what the pass could not finish (§9.5).
 	Degraded string
+	// Refusal is the provider's quota or auth error that stopped the pass, if any.
+	Refusal error
 }
 
 // DefaultMaxGroundChecks bounds how many claims one pass may re-read.
@@ -244,6 +246,11 @@ exhausted:
 			res, cost := v.checkOne(ctx, sessionID, c, text, fetchCall, rep)
 			fetchCall = nil // attached to the first claim's settle only
 			spent += cost
+			// Stops on a provider refusal without recording the unjudged claim.
+			if rep.Refusal != nil {
+				rep.Degraded = "grounding stopped: " + rep.Refusal.Error()
+				break exhausted
+			}
 			verdicts = append(verdicts, groundingOf(res))
 			rep.Results = append(rep.Results, res)
 			rep.Checked++
@@ -455,6 +462,9 @@ func (v *Verifier) checkOne(ctx context.Context, sessionID string, c *core.Claim
 		}
 	}
 
+	if isFatal(callErr) {
+		rep.Refusal = callErr
+	}
 	if callErr != nil || resp == nil || resp.Refused {
 		out.Outcome = GroundUndecided
 		out.Note = "the judge did not answer"

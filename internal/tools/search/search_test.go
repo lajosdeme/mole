@@ -351,6 +351,7 @@ func TestErrorsAreClassifiedForTheRetryPolicy(t *testing.T) {
 		{401, search.ErrUnauthorized, false},
 		{403, search.ErrUnauthorized, false},
 		{402, search.ErrQuotaExceeded, false},
+		{432, search.ErrQuotaExceeded, false},
 		{500, nil, true},
 		{503, nil, true},
 	}

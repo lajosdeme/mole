@@ -191,6 +191,8 @@ type Result struct {
 
 	// Degraded says what the pass could not finish (§9.5). Empty when complete.
 	Degraded string
+	// Refusal is the provider's quota or auth error that stopped the pass, if any.
+	Refusal error
 }
 
 // ErrNoProvider means the Verifier was built without an LLM.
@@ -299,6 +301,9 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 			// was judged: an incomplete graph is worth more than none, and the
 			// claims still need marking verified or the queue never drains.
 			res.Degraded = stop.Error()
+			if isFatal(stop) {
+				res.Refusal = stop
+			}
 			for _, b := range batches[end:] {
 				// Never launched: no response, by definition.
 				unjudged = append(unjudged, b...)
@@ -365,7 +370,7 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 	}
 
 	// Re-checks this pass's new contradictions and drops the withheld from the verdicts.
-	if v.RecheckModel != "" && res.Contradictions > 0 {
+	if v.RecheckModel != "" && res.Contradictions > 0 && res.Refusal == nil {
 		only := map[string]bool{}
 		for _, e := range res.writtenEdges {
 			if e.Kind == core.EdgeContradicts {
@@ -381,6 +386,9 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		res.Contradictions = out.confirmed
 		if out.stop != nil {
 			res.Degraded = joinDegraded(res.Degraded, out.degraded())
+			if isFatal(out.stop) {
+				res.Refusal = out.stop
+			}
 		}
 		for i := range verdicts {
 			if out.withheld[newPairKey(verdicts[i].A.ID, verdicts[i].B.ID)] {
@@ -692,6 +700,15 @@ const DefaultWaveBudget = 60 * time.Second
 // wall clock; a tenth of the wall clock applies when smaller.
 const DefaultReportAllowance = 60 * time.Second
 
+// ResearchDeadline is the wall clock less the report allowance; false without a wall clock.
+func ResearchDeadline(sess *core.Session) (time.Time, bool) {
+	if sess.MaxWallClock <= 0 {
+		return time.Time{}, false
+	}
+	report := min(DefaultReportAllowance, sess.MaxWallClock/10)
+	return sess.CreatedAt.Add(sess.MaxWallClock - report), true
+}
+
 func (v *Verifier) clock() time.Time {
 	if v.now != nil {
 		return v.now()
@@ -717,8 +734,7 @@ func (v *Verifier) waveFits(sess *core.Session) error {
 	if need == 0 {
 		need = min(DefaultWaveBudget, sess.MaxWallClock/10)
 	}
-	report := min(DefaultReportAllowance, sess.MaxWallClock/10)
-	deadline := sess.CreatedAt.Add(sess.MaxWallClock - report)
+	deadline, _ := ResearchDeadline(sess)
 	if left := deadline.Sub(v.clock()); left < need {
 		return fmt.Errorf("wall clock too close for another wave (%s left, a batch takes up to %s)",
 			left.Round(time.Second), need.Round(time.Second))
@@ -930,6 +946,9 @@ func (v *Verifier) Recheck(ctx context.Context, sessionID string) (*Result, erro
 	res.PairsJudged, res.PairsUnjudged = out.judged, out.unjudged
 	if out.stop != nil {
 		res.Degraded = out.degraded()
+		if isFatal(out.stop) {
+			res.Refusal = out.stop
+		}
 	}
 	res.PairsConfirmed, res.PairsUnconfirmed = out.confirmed, out.unconfirmed
 	res.Rechecked, res.Withheld = out.confirmed+out.unconfirmed, out.unconfirmed
@@ -1211,7 +1230,7 @@ func (v *Verifier) verifierSpend(ctx context.Context, sess *core.Session) (int64
 // isFatal reports whether an error will fail every remaining batch the same way
 // (§9.5). A bad credential and an exhausted quota do not improve on retry.
 func isFatal(err error) bool {
-	return errors.Is(err, llm.ErrUnauthorized) || errors.Is(err, llm.ErrQuotaExceeded)
+	return llm.Refused(err)
 }
 
 // fallbackRates prices a call whose model this Verifier cannot look up, at

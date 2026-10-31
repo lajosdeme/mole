@@ -110,7 +110,7 @@ func (g *Generator) Answer(ctx context.Context, st store.Store, sessionID, quest
 	}
 
 	fence := fenceToken()
-	gen.writeBody(ctx, llm.Request{
+	if err := gen.writeBody(ctx, llm.Request{
 		// Cheap tier: arranging two dozen already-verified claims into an answer
 		// is a smaller job than synthesizing a whole session, and §13's promise is
 		// that this is cheap.
@@ -119,7 +119,9 @@ func (g *Generator) Answer(ctx context.Context, st store.Store, sessionID, quest
 		Messages:  []llm.Message{llm.User(askPrompt(fence, question, sess.Prompt, findings, index))},
 		MaxTokens: gen.MaxTokens,
 	}, rep, wording{noun: "answer", verb: "answer"},
-		fallbackBody(question, findings, index))
+		fallbackBody(question, findings, index)); err != nil {
+		return nil, err
+	}
 	noteWithheld(rep, withheld)
 	return rep, nil
 }
