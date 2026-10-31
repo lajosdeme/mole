@@ -89,6 +89,8 @@ type fakeLLM struct {
 	usage    llm.Usage
 	calls    []llm.Request
 	failNext error
+	// failAll, when set, fails every call.
+	failAll error
 }
 
 func (f *fakeLLM) Name() string { return "fake" }
@@ -105,6 +107,9 @@ func (f *fakeLLM) Complete(ctx context.Context, req llm.Request) (*llm.Response,
 	f.calls = append(f.calls, req)
 	failure := f.failNext
 	f.failNext = nil
+	if f.failAll != nil {
+		failure = f.failAll
+	}
 	f.mu.Unlock()
 
 	usage := f.usage
@@ -650,6 +655,39 @@ func TestModelFailureIsRecordedNotSwallowed(t *testing.T) {
 	}
 	if !sawErr {
 		t.Error("the failed model call was not recorded in the ledger rows")
+	}
+}
+
+// TestModelRefusalFailsTheLead checks a quota or auth refusal while mining ends the lead with no further model call.
+func TestModelRefusalFailsTheLead(t *testing.T) {
+	for _, status := range []int{402, 401} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			h := newHarness(t, []search.Result{
+				{URL: "https://a.example/p", Content: articleBody, Rank: 1},
+				{URL: "https://b.example/p", Content: articleBody, Rank: 2},
+			}, nil, nil)
+			h.llm.failAll = llm.StatusError("fake", status, "")
+
+			res, err := h.actor.Run(context.Background(), h.lead)
+			if !llm.Refused(err) {
+				t.Fatalf("err = %v, want a provider refusal", err)
+			}
+			if got := h.llm.callCount(); got != 1 {
+				t.Errorf("%d model calls, want 1", got)
+			}
+			if res == nil || len(res.Costs) == 0 {
+				t.Error("the refused call's cost was not returned")
+			}
+		})
+	}
+}
+
+// TestRateLimitedChunkDoesNotFailTheLead checks a 429 while mining stays a failed chunk.
+func TestRateLimitedChunkDoesNotFailTheLead(t *testing.T) {
+	h := newHarness(t, []search.Result{{URL: "https://a.example/p", Content: articleBody, Rank: 1}}, nil, nil)
+	h.llm.failAll = llm.StatusError("fake", 429, "")
+	if _, err := h.actor.Run(context.Background(), h.lead); err != nil {
+		t.Fatalf("a rate-limited chunk failed the lead: %v", err)
 	}
 }
 

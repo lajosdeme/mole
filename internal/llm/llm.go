@@ -226,6 +226,16 @@ func Retryable(err error) bool {
 	return errors.Is(err, ErrRateLimited) || errors.Is(err, ErrOverloaded)
 }
 
+// Refused reports whether err is the provider refusing the account: quota or auth.
+func Refused(err error) bool {
+	return errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrUnauthorized)
+}
+
+// StatusError is the error a provider returns for an HTTP status, nil for 2xx.
+func StatusError(provider string, status int, body string) error {
+	return classifyStatus(provider, status, body)
+}
+
 func classifyStatus(provider string, status int, body string) error {
 	if status >= 200 && status < 300 {
 		return nil

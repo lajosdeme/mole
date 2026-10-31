@@ -191,6 +191,8 @@ type Result struct {
 
 	// Degraded says what the pass could not finish (§9.5). Empty when complete.
 	Degraded string
+	// Refusal is the provider's quota or auth error that stopped the pass, if any.
+	Refusal error
 }
 
 // ErrNoProvider means the Verifier was built without an LLM.
@@ -299,6 +301,9 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 			// was judged: an incomplete graph is worth more than none, and the
 			// claims still need marking verified or the queue never drains.
 			res.Degraded = stop.Error()
+			if isFatal(stop) {
+				res.Refusal = stop
+			}
 			for _, b := range batches[end:] {
 				// Never launched: no response, by definition.
 				unjudged = append(unjudged, b...)
@@ -365,7 +370,7 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 	}
 
 	// Re-checks this pass's new contradictions and drops the withheld from the verdicts.
-	if v.RecheckModel != "" && res.Contradictions > 0 {
+	if v.RecheckModel != "" && res.Contradictions > 0 && res.Refusal == nil {
 		only := map[string]bool{}
 		for _, e := range res.writtenEdges {
 			if e.Kind == core.EdgeContradicts {
@@ -381,6 +386,9 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		res.Contradictions = out.confirmed
 		if out.stop != nil {
 			res.Degraded = joinDegraded(res.Degraded, out.degraded())
+			if isFatal(out.stop) {
+				res.Refusal = out.stop
+			}
 		}
 		for i := range verdicts {
 			if out.withheld[newPairKey(verdicts[i].A.ID, verdicts[i].B.ID)] {
@@ -938,6 +946,9 @@ func (v *Verifier) Recheck(ctx context.Context, sessionID string) (*Result, erro
 	res.PairsJudged, res.PairsUnjudged = out.judged, out.unjudged
 	if out.stop != nil {
 		res.Degraded = out.degraded()
+		if isFatal(out.stop) {
+			res.Refusal = out.stop
+		}
 	}
 	res.PairsConfirmed, res.PairsUnconfirmed = out.confirmed, out.unconfirmed
 	res.Rechecked, res.Withheld = out.confirmed+out.unconfirmed, out.unconfirmed
@@ -1219,7 +1230,7 @@ func (v *Verifier) verifierSpend(ctx context.Context, sess *core.Session) (int64
 // isFatal reports whether an error will fail every remaining batch the same way
 // (§9.5). A bad credential and an exhausted quota do not improve on retry.
 func isFatal(err error) bool {
-	return errors.Is(err, llm.ErrUnauthorized) || errors.Is(err, llm.ErrQuotaExceeded)
+	return llm.Refused(err)
 }
 
 // fallbackRates prices a call whose model this Verifier cannot look up, at

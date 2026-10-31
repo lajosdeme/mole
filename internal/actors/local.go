@@ -137,6 +137,7 @@ func (a *LocalComputeActor) Run(ctx context.Context, lead core.Lead) (*Result, e
 	var findings []string
 	var usedGate, usedSandbox bool
 	var crossings []core.Crossing
+	var refusal error
 
 	for _, p := range plans {
 		if err := ctx.Err(); err != nil {
@@ -179,6 +180,10 @@ func (a *LocalComputeActor) Run(ctx context.Context, lead core.Lead) (*Result, e
 		}
 		res.Stats.ClaimsProposed += out.Proposed
 		res.Stats.ClaimsRejected += out.Rejected
+		if llm.Refused(err) {
+			refusal = err
+			break
+		}
 		if err != nil {
 			res.Stats.ChunksFailed++
 			a.logger().WarnContext(ctx, "mining a local result failed",
@@ -224,6 +229,9 @@ func (a *LocalComputeActor) Run(ctx context.Context, lead core.Lead) (*Result, e
 	a.recordCrossings(ctx, crossings)
 
 	res.Summary = localSummary(lead, findings, res, usedGate, usedSandbox)
+	if refusal != nil {
+		return res, fmt.Errorf("actors/local: mine: %w", refusal)
+	}
 	return res, nil
 }
 

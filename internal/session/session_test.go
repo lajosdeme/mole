@@ -381,3 +381,100 @@ func TestSearchRefusalWithoutClaimsWritesNoReport(t *testing.T) {
 		})
 	}
 }
+
+// refusingModel plans like emptyPlanner and refuses the account on the calls refuse selects.
+type refusingModel struct {
+	emptyPlanner
+	refuse    func(req llm.Request, planCall int) bool
+	mu        sync.Mutex
+	plans     int
+	synthesis int
+}
+
+func (m *refusingModel) Complete(ctx context.Context, req llm.Request) (*llm.Response, error) {
+	m.mu.Lock()
+	report := strings.Contains(req.System, "synthesis component")
+	if report {
+		m.synthesis++
+	} else if strings.Contains(req.System, "planning component") {
+		m.plans++
+	}
+	refused := m.refuse(req, m.plans)
+	m.mu.Unlock()
+	if refused {
+		return &llm.Response{Model: "stub-model"}, llm.StatusError("openai-compatible", 402, "Insufficient Balance")
+	}
+	return m.emptyPlanner.Complete(ctx, req)
+}
+
+func (m *refusingModel) counts() (plans, synthesis int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.plans, m.synthesis
+}
+
+// TestModelRefusalWritesNoReport checks a refusal in research or in the report fails the run with no report.
+func TestModelRefusalWritesNoReport(t *testing.T) {
+	const want = "fatal: model provider refused the request: quota exceeded (openai-compatible 402)"
+	for _, tc := range []struct {
+		name          string
+		refuse        func(req llm.Request, planCall int) bool
+		wantSynthesis int
+	}{
+		{"final replan", func(req llm.Request, planCall int) bool {
+			return strings.Contains(req.System, "planning component") && planCall > 1
+		}, 0},
+		{"report", func(req llm.Request, _ int) bool {
+			return strings.Contains(req.System, "synthesis component")
+		}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, db := newRunner(t)
+			model := &refusingModel{refuse: tc.refuse}
+			r.Actor.LLM = model
+			spec := testSpec()
+
+			sess, err := r.Create(context.Background(), spec)
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err := db.WithTx(context.Background(), func(ctx context.Context, tx store.Tx) error {
+				return tx.InsertClaims(ctx, []core.Claim{{
+					SessionID: sess.ID, LeadID: "l_1",
+					Text:   "Subword tokenization affects byte-level scaling.",
+					Source: "https://s.example/p",
+					Quote:  "a quote long enough to be real evidence",
+				}})
+			}); err != nil {
+				t.Fatalf("insert claims: %v", err)
+			}
+
+			res, err := r.Run(context.Background(), sess, spec)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if res.Status != core.StatusFailed {
+				t.Errorf("status = %q, want failed", res.Status)
+			}
+			if res.StoppedBecause != want {
+				t.Errorf("stopped because %q, want %q", res.StoppedBecause, want)
+			}
+			if res.Report != nil {
+				t.Error("a report was written")
+			}
+			if _, synthesis := model.counts(); synthesis != tc.wantSynthesis {
+				t.Errorf("%d report calls, want %d", synthesis, tc.wantSynthesis)
+			}
+			after, err := loadSession(t, db, sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Report != "" || after.Status != core.StatusFailed || after.StoppedBecause != want {
+				t.Errorf("stored report/status/stop = %v/%q/%q", after.Report != "", after.Status, after.StoppedBecause)
+			}
+			if after.Escrow != 0 {
+				t.Errorf("escrow is still %d after Run", after.Escrow)
+			}
+		})
+	}
+}

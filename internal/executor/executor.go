@@ -25,6 +25,7 @@ import (
 	"github.com/lajosdeme/mole/internal/budget"
 	"github.com/lajosdeme/mole/internal/cache"
 	"github.com/lajosdeme/mole/internal/core"
+	"github.com/lajosdeme/mole/internal/llm"
 	"github.com/lajosdeme/mole/internal/planner"
 	"github.com/lajosdeme/mole/internal/pricing"
 	"github.com/lajosdeme/mole/internal/queue"
@@ -156,6 +157,8 @@ type Result struct {
 	// StoppedBecause names the ceiling or condition that ended the run, for
 	// the report and the trace.
 	StoppedBecause string
+	// ModelRefused is set when the model provider refused the account and the run failed.
+	ModelRefused bool
 }
 
 func (e *Executor) logger() *slog.Logger {
@@ -257,6 +260,9 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			res.Status = statusForContext(ctxErr)
 		}
 		res.StoppedBecause = "planning failed: " + err.Error()
+		if llm.Refused(err) {
+			return e.refused(ctx, res, err), nil
+		}
 		return res, nil
 	}
 	// Map leads to the IDs the DIGEST assigned, not the ones the model supplied
@@ -353,7 +359,9 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			// planner adds nothing, the loop ends. Skipping it here would leave the
 			// final batch of claims unverified and unscored — every one of them
 			// reaching the report with confidence 0.
-			e.verify(ctx, digest, res)
+			if err := e.verify(ctx, digest, res); err != nil {
+				return e.refused(ctx, res, err), nil
+			}
 
 			// That verification may have queued work, and it is the work this
 			// engine exists to do (§11.4). Go and run it — including anything it
@@ -369,6 +377,9 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			}
 
 			added, done, reason, err := e.replan(ctx, sess, digest, depth, res, leadQuestion)
+			if llm.Refused(err) {
+				return e.refused(ctx, res, err), nil
+			}
 			if err != nil {
 				// A failed replan at drain time is the END of the research, not
 				// a failed session. §9.5 classifies 429/5xx/timeout as transient
@@ -466,6 +477,7 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			}
 			res.Status = core.StatusFailed
 			res.StoppedBecause = fatalReason(fatal.err)
+			res.ModelRefused = llm.Refused(fatal.err)
 			e.logger().ErrorContext(ctx, "session stopped by a fatal error", "err", fatal.err)
 			// Escrow survives, so a partial report is still affordable (§9.5).
 			return res, nil
@@ -476,7 +488,9 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			// batch of leads turned up. A sub-question whose evidence is
 			// contradicted is not answered, and a planner told only the claim count
 			// has no way to know the difference.
-			e.verify(ctx, digest, res)
+			if err := e.verify(ctx, digest, res); err != nil {
+				return e.refused(ctx, res, err), nil
+			}
 
 			// The latch is honoured HERE too, and it was not: a session draining
 			// the verifier's follow-ups asked the planner again every ReplanEvery
@@ -489,6 +503,9 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 			}
 
 			added, done, reason, err := e.replan(ctx, sess, digest, depth, res, leadQuestion)
+			if llm.Refused(err) {
+				return e.refused(ctx, res, err), nil
+			}
 			if err != nil {
 				e.logger().WarnContext(ctx, "replan failed; continuing with the current queue", "err", err)
 			}
@@ -514,10 +531,14 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 	// On any ceiling stop, verify what research found before building the
 	// report.
 	if res.Status == core.StatusExhausted && ctx.Err() == nil {
-		e.verify(ctx, digest, res)
+		if err := e.verify(ctx, digest, res); err != nil {
+			return e.refused(ctx, res, err), nil
+		}
 	}
 	if ctx.Err() == nil {
-		e.recheck(ctx, res)
+		if err := e.recheck(ctx, res); err != nil {
+			return e.refused(ctx, res, err), nil
+		}
 	}
 
 	// Without a live context this read fails on a timed-out or cancelled run —
@@ -1018,8 +1039,27 @@ func (e *Executor) attempt(ctx context.Context, sess *core.Session, lead core.Le
 	return out
 }
 
+// refused fails the run on a model provider refusal and fills in its spend.
+func (e *Executor) refused(ctx context.Context, res *Result, err error) *Result {
+	res.Status = core.StatusFailed
+	res.StoppedBecause = fatalReason(err)
+	res.ModelRefused = true
+	e.logger().ErrorContext(ctx, "session stopped: the model provider refused the request", "err", err)
+	if final, serr := e.session(context.WithoutCancel(ctx), res.SessionID); serr == nil {
+		res.Spent = final.Spent
+	}
+	res.CacheStats = e.Cache.Stats()
+	return res
+}
+
+// FatalReason is the StoppedBecause text for a fatal error.
+func FatalReason(err error) string { return fatalReason(err) }
+
 // fatalReason is the StoppedBecause text for a fatal lead error.
 func fatalReason(err error) string {
+	if llm.Refused(err) {
+		return refusalReason(err)
+	}
 	var refusal string
 	switch {
 	case errors.Is(err, search.ErrQuotaExceeded):
@@ -1031,6 +1071,20 @@ func fatalReason(err error) string {
 	}
 	reason := "fatal: search provider refused the request: " + refusal
 	var apiErr *search.APIError
+	if errors.As(err, &apiErr) {
+		reason += fmt.Sprintf(" (%s %d)", apiErr.Provider, apiErr.Status)
+	}
+	return reason
+}
+
+// refusalReason is the stop text for a model provider's quota or auth refusal.
+func refusalReason(err error) string {
+	refusal := "unauthorized"
+	if errors.Is(err, llm.ErrQuotaExceeded) {
+		refusal = "quota exceeded"
+	}
+	reason := "fatal: model provider refused the request: " + refusal
+	var apiErr *llm.APIError
 	if errors.As(err, &apiErr) {
 		reason += fmt.Sprintf(" (%s %d)", apiErr.Provider, apiErr.Status)
 	}
@@ -1400,9 +1454,10 @@ func statusForContext(err error) core.SessionStatus {
 // pairs and a mostly-empty call, while several leads' claims fill one. And the
 // planner needs the answer: this is the only point in the loop where a
 // contradiction can still change what gets researched next.
-func (e *Executor) verify(ctx context.Context, digest *planner.Digest, res *Result) {
+// Returns the provider's refusal when one stopped the pass.
+func (e *Executor) verify(ctx context.Context, digest *planner.Digest, res *Result) error {
 	if e.Verifier == nil {
-		return
+		return nil
 	}
 
 	e.emit("verifying", fmt.Sprintf("%d claim(s) gathered", digest.ClaimsFound))
@@ -1411,10 +1466,10 @@ func (e *Executor) verify(ctx context.Context, digest *planner.Digest, res *Resu
 		// A store or ledger failure. Worth a warning and nothing more: the research
 		// is still valid and the report can still be written.
 		e.logger().WarnContext(ctx, "verification pass failed; continuing unverified", "err", err)
-		return
+		return nil
 	}
 	if out == nil {
-		return
+		return nil
 	}
 
 	res.VerifyPasses++
@@ -1425,6 +1480,9 @@ func (e *Executor) verify(ctx context.Context, digest *planner.Digest, res *Resu
 	res.Withheld += out.Withheld
 	if out.Degraded != "" {
 		res.VerifyDegraded = out.Degraded
+	}
+	if out.Refusal != nil {
+		return out.Refusal
 	}
 
 	// The planner sees a COUNT, never the claims (§9.1). That keeps page-derived
@@ -1441,18 +1499,20 @@ func (e *Executor) verify(ctx context.Context, digest *planner.Digest, res *Resu
 	// and not lost either — which is what used to happen to every contradiction
 	// past the per-pass cap.
 	e.deferFollowUps(ctx, out.Deferred, res)
+	return nil
 }
 
 // recheck re-judges the session's contradictions with the Verifier's
 // RecheckModel, when one is set.
-func (e *Executor) recheck(ctx context.Context, res *Result) {
+// Returns the provider's refusal when one stopped it.
+func (e *Executor) recheck(ctx context.Context, res *Result) error {
 	if e.Verifier == nil || e.Verifier.RecheckModel == "" {
-		return
+		return nil
 	}
 	out, err := e.Verifier.Recheck(ctx, res.SessionID)
 	if err != nil {
 		e.logger().WarnContext(ctx, "re-check failed; keeping contradictions as judged", "err", err)
-		return
+		return nil
 	}
 	res.Rechecked += out.Rechecked
 	res.Withheld += out.Withheld
@@ -1463,6 +1523,7 @@ func (e *Executor) recheck(ctx context.Context, res *Result) {
 	if out.Rechecked > 0 {
 		e.emit("rechecked", fmt.Sprintf("%d contradiction(s), %d withheld", out.Rechecked, out.Withheld))
 	}
+	return out.Refusal
 }
 
 // deferFollowUps records work the pass judged worth doing and could not take.
