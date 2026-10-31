@@ -91,7 +91,7 @@ func TestConfirmationIsCountedBothWays(t *testing.T) {
 func TestConfirmationOffLeavesEveryVerdictAlone(t *testing.T) {
 	first := []Judged{{Pair: pairOf("c_a", "c_b"), Relation: RelContradicts}}
 	v := &Verifier{Confirm: ConfirmNone}
-	got, _ := v.confirm(context.Background(), "s1", [][]Judged{first}, &Result{})
+	got, _, _ := v.confirm(context.Background(), "s1", [][]Judged{first}, &Result{})
 	if got[0].Relation != RelContradicts {
 		t.Errorf("relation = %q with confirmation off", got[0].Relation)
 	}

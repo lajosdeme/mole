@@ -3,6 +3,7 @@ package session_test
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/lajosdeme/mole/internal/store"
 	"github.com/lajosdeme/mole/internal/store/sqlite"
 	"github.com/lajosdeme/mole/internal/tools/search"
+	"github.com/lajosdeme/mole/internal/verifier"
 )
 
 // emptyPlanner answers every planning call with "no sub-questions", so the loop
@@ -208,4 +210,102 @@ func loadSession(t *testing.T, db store.Store, id string) (*core.Session, error)
 		return err
 	})
 	return s, err
+}
+
+// strongCounter is emptyPlanner that counts strong-tier calls, which only the report makes.
+type strongCounter struct {
+	emptyPlanner
+	mu     sync.Mutex
+	strong int
+}
+
+func (s *strongCounter) Complete(ctx context.Context, req llm.Request) (*llm.Response, error) {
+	if req.Tier == llm.TierStrong {
+		s.mu.Lock()
+		s.strong++
+		s.mu.Unlock()
+		return &llm.Response{Text: "the answer", Model: "stub-model",
+			Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}}, nil
+	}
+	return s.emptyPlanner.Complete(ctx, req)
+}
+
+func (s *strongCounter) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.strong
+}
+
+// TestOnlyACancelSkipsTheReport checks that a timed-out run still writes the
+// synthesized report, and a cancelled one does not.
+func TestOnlyACancelSkipsTheReport(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		ctx        func() context.Context
+		wantReport bool
+		wantStatus core.SessionStatus
+		wantStop   string
+	}{
+		{"deadline", func() context.Context {
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			t.Cleanup(cancel)
+			return ctx
+		}, true, core.StatusExhausted, "deadline before research started"},
+		{"cancel", func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}, false, core.StatusCancelled, "cancelled before research started"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, db := newRunner(t)
+			counter := &strongCounter{}
+			r.Actor.LLM = counter
+			grounded := false
+			r.OnGround = func(*verifier.GroundReport) { grounded = true }
+			spec := testSpec()
+
+			sess, err := r.Create(context.Background(), spec)
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err := db.WithTx(context.Background(), func(ctx context.Context, tx store.Tx) error {
+				return tx.InsertClaims(ctx, []core.Claim{{
+					SessionID: sess.ID, LeadID: "l_1",
+					Text:   "Subword tokenization affects byte-level scaling.",
+					Source: "https://s.example/p",
+					Quote:  "a quote long enough to be real evidence",
+				}})
+			}); err != nil {
+				t.Fatalf("insert claims: %v", err)
+			}
+
+			res, err := r.Run(tc.ctx(), sess, spec)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := counter.count() > 0; got != tc.wantReport {
+				t.Errorf("report generator called = %v, want %v", got, tc.wantReport)
+			}
+			if grounded {
+				t.Error("grounding ran after the research context ended")
+			}
+			if res.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", res.Status, tc.wantStatus)
+			}
+			if res.StoppedBecause != tc.wantStop {
+				t.Errorf("stopped because %q, want %q", res.StoppedBecause, tc.wantStop)
+			}
+			if res.Report == nil {
+				t.Fatal("no report written")
+			}
+			after, err := loadSession(t, db, sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Escrow != 0 {
+				t.Errorf("escrow is still %d after Run; it should have been released", after.Escrow)
+			}
+		})
+	}
 }

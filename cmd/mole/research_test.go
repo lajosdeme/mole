@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lajosdeme/mole/internal/budget"
 	"github.com/lajosdeme/mole/internal/config"
@@ -98,6 +99,42 @@ func TestIncompleteDefaultIsRefusedRatherThanGuessed(t *testing.T) {
 func TestNegativeBudgetRefused(t *testing.T) {
 	if _, _, err := resolveBudget("-1.00", 0, &config.Config{}); err == nil {
 		t.Error("a negative dollar budget was accepted")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Lead cap
+// ---------------------------------------------------------------------------
+
+func TestMaxLeadsFlagOverridesTheDerivedCap(t *testing.T) {
+	got := maxLeadsFor(researchOpts{maxDepth: 2, maxLeads: 30})
+	if got != 30 {
+		t.Errorf("got %d, want 30", got)
+	}
+}
+
+func TestZeroMaxLeadsKeepsTheDerivedCap(t *testing.T) {
+	got := maxLeadsFor(researchOpts{maxDepth: 2})
+	if got != 12 {
+		t.Errorf("got %d, want 12", got)
+	}
+}
+
+func TestNegativeMaxLeadsIsRefused(t *testing.T) {
+	if err := checkMaxLeadsIsValid(-1); err == nil {
+		t.Error("a negative --max-leads was accepted")
+	}
+}
+
+func TestANonPositiveTimeoutIsRefused(t *testing.T) {
+	t.Setenv("MOLE_CONFIG_DIR", t.TempDir())
+	t.Setenv("MOLE_DB", filepath.Join(t.TempDir(), "mole.db"))
+	for _, d := range []time.Duration{0, -time.Second} {
+		err := cmdResearch(context.Background(), "a question",
+			researchOpts{timeout: d, timeoutSet: true, tokens: 1000})
+		if err == nil || !strings.Contains(err.Error(), "--timeout") {
+			t.Errorf("--timeout %v: err = %v, want --timeout refused", d, err)
+		}
 	}
 }
 

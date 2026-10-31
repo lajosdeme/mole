@@ -81,6 +81,7 @@ type researchOpts struct {
 	noConfirm    bool
 	confirmMode  string
 	maxDepth     int
+	maxLeads     int
 	maxFindings  int
 	workers      int
 	actorList    string
@@ -157,6 +158,8 @@ func newResearchCmd() *cobra.Command {
 	f.BoolVar(&o.quiet, "quiet", false, "suppress progress; print only the result")
 	f.IntVar(&o.maxDepth, "max-depth", planner.DefaultMaxDepth,
 		"rounds of follow-up leads the planner may add (0 for none)")
+	f.IntVar(&o.maxLeads, "max-leads", 0,
+		"leads the session may run in total (0 derives it from --max-depth)")
 	f.IntVar(&o.maxFindings, "max-findings", 0,
 		"findings the report is written from, which is what sets its length (0 for the default)")
 	f.BoolVar(&o.alwaysFetch, "always-fetch", false,
@@ -180,6 +183,10 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 	// which bounds one model call rather than the session.
 	if !o.timeoutSet && cfg != nil && cfg.MaxWallClock > 0 {
 		o.timeout = cfg.MaxWallClock.Duration()
+	}
+
+	if err := checkTimeoutIsValid(o.timeout); err != nil {
+		return err
 	}
 
 	unit, amount, err := resolveBudget(o.usd, o.tokens, cfg)
@@ -217,6 +224,9 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 	// missing recording, and a caller who asked for something never allowed
 	// should be told that rather than that the file is absent.
 	if err := checkCassetteIsSerial(o.workers); err != nil {
+		return err
+	}
+	if err := checkMaxLeadsIsValid(o.maxLeads); err != nil {
 		return err
 	}
 
@@ -265,14 +275,6 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 		return err
 	}
 	defer db.Close()
-
-	// The context gets headroom over the wall-clock CEILING so the two do not
-	// fire together. When they do, the loop is killed mid-lead instead of
-	// stopping at its own check, and the run ends in a cascade of "context
-	// deadline exceeded" from whatever was in flight — a persist, a settle, a
-	// count — rather than a clean "stopped: max_wallclock".
-	ctx, cancel := context.WithTimeout(ctx, o.timeout+30*time.Second)
-	defer cancel()
 
 	academicActor, err := buildAcademicActor(cfg, actorTypes, actor)
 	if err != nil {
@@ -394,11 +396,30 @@ func plannerDepth(flag int) int {
 }
 
 func maxLeadsFor(o researchOpts) int {
+	if o.maxLeads > 0 {
+		return o.maxLeads
+	}
 	depth := o.maxDepth
 	if depth < 0 {
 		depth = 0
 	}
 	return planner.DefaultMaxInitialLeads + depth*planner.DefaultMaxNewLeadsPerReplan + 2
+}
+
+// checkTimeoutIsValid rejects a zero or negative --timeout.
+func checkTimeoutIsValid(timeout time.Duration) error {
+	if timeout <= 0 {
+		return fmt.Errorf("--timeout must be positive (got %v)", timeout)
+	}
+	return nil
+}
+
+// checkMaxLeadsIsValid rejects a negative --max-leads.
+func checkMaxLeadsIsValid(maxLeads int) error {
+	if maxLeads < 0 {
+		return fmt.Errorf("--max-leads must not be negative (got %d)", maxLeads)
+	}
+	return nil
 }
 
 func buildWebActor(

@@ -100,8 +100,13 @@ type Verifier struct {
 	// reconciled against the ledger before each wave of batches.
 	spent int64
 
-	// mu guards spent, and the Result counters adjudicate writes (Spent, Calls),
-	// because a wave's batches settle from their own goroutines.
+	// slowestBatch is the longest adjudication batch timed so far.
+	slowestBatch time.Duration
+	// now is the clock; nil takes time.Now.
+	now func() time.Time
+
+	// mu guards spent, slowestBatch, and the Result counters adjudicate writes
+	// (Spent, Calls), because a wave's batches settle from their own goroutines.
 	mu sync.Mutex
 
 	// warnUnpriced logs the "no rate for this model" fallback once per
@@ -262,11 +267,16 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 		// wave's verdicts are kept unconfirmed rather than asked again.
 		if stop == nil || !isFatal(stop) {
 			var confirmStop error
-			judged, confirmStop = v.confirm(ctx, sessionID, groups, res)
+			var unasked int
+			judged, unasked, confirmStop = v.confirm(ctx, sessionID, groups, res)
 			// A fatal second look stops the pass like a fatal first look
 			// would; a non-fatal one is left for the next wave to meet.
 			if stop == nil && confirmStop != nil && isFatal(confirmStop) {
 				stop = confirmStop
+			}
+			// The final wave's stopped second look has no next wave to meet it.
+			if stop == nil && confirmStop != nil && end == len(batches) {
+				res.Degraded = fmt.Sprintf("%d positive(s) left unconfirmed: %v", unasked, confirmStop)
 			}
 		} else {
 			judged = slices.Concat(groups...)
@@ -469,10 +479,10 @@ func confirms(mode ConfirmMode, e Effect) bool {
 // Rests on one property it cannot check: the model must be able to disagree
 // with itself. Re-judging reproduced the stored verdict 54% of the time, so a
 // provider caching identical requests would make this a silent no-op.
-func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Judged, res *Result) ([]Judged, error) {
-	judged := slices.Concat(groups...)
+func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Judged, res *Result) (judged []Judged, unasked int, stop error) {
+	judged = slices.Concat(groups...)
 	if len(judged) == 0 {
-		return judged, nil
+		return judged, 0, nil
 	}
 
 	// Each first-look batch's positives are batched on their own, never
@@ -482,17 +492,17 @@ func (v *Verifier) confirm(ctx context.Context, sessionID string, groups [][]Jud
 		batches = append(batches, Batches(positivesOf(g, v.Confirm), v.BatchSize)...)
 	}
 	if len(batches) == 0 {
-		return judged, nil
+		return judged, 0, nil
 	}
 
 	second := map[string]Relation{}
 	// A pair whose second look never happened keeps its first verdict,
 	// whatever the stop.
-	again, _, _, _, stop := v.runBatches(ctx, sessionID, batches, res)
+	again, missed, _, _, stop := v.runBatches(ctx, sessionID, batches, res)
 	for _, j := range again {
 		second[j.Pair.Key()] = j.Relation.Normalize()
 	}
-	return v.applyConfirmations(judged, second, res), stop
+	return v.applyConfirmations(judged, second, res), len(missed), stop
 }
 
 // positivesOf is the subset worth a second call: verdicts building an edge of a kind
@@ -582,6 +592,10 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 			stop = err
 			break
 		}
+		if err := v.waveFits(sess); err != nil {
+			stop = err
+			break
+		}
 		k, err := v.waveSize(ctx, sess, batches[next:])
 		if err != nil {
 			stop = err
@@ -602,7 +616,9 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 						outcomes[i].panicked = fmt.Sprintf("%v\n\nadjudication goroutine stack:\n%s", p, debug.Stack())
 					}
 				}()
+				began := v.clock()
 				j, u, responded, e := v.adjudicate(ctx, sess, batch, res)
+				v.observeBatch(v.clock().Sub(began))
 				outcomes[i] = batchOutcome{judged: j, unjudged: u, responded: responded, stop: e}
 			}()
 		}
@@ -632,6 +648,48 @@ func (v *Verifier) runBatchGroups(ctx context.Context, sessionID string, batches
 		unanswered = append(unanswered, batch...)
 	}
 	return groups, unjudged, unanswered, consumed, stop
+}
+
+// DefaultWaveBudget caps how long a wave is assumed to take before any batch
+// has been timed; a tenth of the wall clock applies when smaller.
+const DefaultWaveBudget = 60 * time.Second
+
+// DefaultReportAllowance caps the time kept free for the report before the
+// wall clock; a tenth of the wall clock applies when smaller.
+const DefaultReportAllowance = 60 * time.Second
+
+func (v *Verifier) clock() time.Time {
+	if v.now != nil {
+		return v.now()
+	}
+	return time.Now()
+}
+
+func (v *Verifier) observeBatch(d time.Duration) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.slowestBatch = max(v.slowestBatch, d)
+}
+
+// waveFits refuses a wave that would not finish, at the slowest batch timed
+// so far, before the wall clock less the report's allowance.
+func (v *Verifier) waveFits(sess *core.Session) error {
+	if sess.MaxWallClock <= 0 {
+		return nil
+	}
+	v.mu.Lock()
+	need := v.slowestBatch
+	v.mu.Unlock()
+	if need == 0 {
+		need = min(DefaultWaveBudget, sess.MaxWallClock/10)
+	}
+	report := min(DefaultReportAllowance, sess.MaxWallClock/10)
+	deadline := sess.CreatedAt.Add(sess.MaxWallClock - report)
+	if left := deadline.Sub(v.clock()); left < need {
+		return fmt.Errorf("wall clock too close for another wave (%s left, a batch takes up to %s)",
+			left.Round(time.Second), need.Round(time.Second))
+	}
+	return nil
 }
 
 // waveSize is how many of the remaining batches the next wave may launch,
