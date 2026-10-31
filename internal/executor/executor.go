@@ -146,6 +146,9 @@ type Result struct {
 	FollowUpsDeferred int
 	// VerifyDegraded is the last reason a pass could not finish, if any.
 	VerifyDegraded string
+	// Rechecked and Withheld are the final re-check's contradictions judged and removed.
+	Rechecked int
+	Withheld  int
 
 	// Spent is the settled total in the session's budget unit.
 	Spent int64
@@ -499,6 +502,9 @@ func (e *Executor) Run(ctx context.Context, sessionID string) (*Result, error) {
 	// report.
 	if res.Status == core.StatusExhausted && ctx.Err() == nil {
 		e.verify(ctx, digest, res)
+	}
+	if ctx.Err() == nil {
+		e.recheck(ctx, res)
 	}
 
 	// Without a live context this read fails on a timed-out or cancelled run —
@@ -1379,6 +1385,28 @@ func (e *Executor) verify(ctx context.Context, digest *planner.Digest, res *Resu
 	// and not lost either — which is what used to happen to every contradiction
 	// past the per-pass cap.
 	e.deferFollowUps(ctx, out.Deferred, res)
+}
+
+// recheck re-judges the session's contradictions with the Verifier's
+// RecheckModel, when one is set.
+func (e *Executor) recheck(ctx context.Context, res *Result) {
+	if e.Verifier == nil || e.Verifier.RecheckModel == "" {
+		return
+	}
+	out, err := e.Verifier.Recheck(ctx, res.SessionID)
+	if err != nil {
+		e.logger().WarnContext(ctx, "re-check failed; keeping contradictions as judged", "err", err)
+		return
+	}
+	res.Rechecked += out.Rechecked
+	res.Withheld += out.Withheld
+	res.Contradictions = max(0, res.Contradictions-out.Withheld)
+	if out.Degraded != "" {
+		res.VerifyDegraded = out.Degraded
+	}
+	if out.Rechecked > 0 {
+		e.emit("rechecked", fmt.Sprintf("%d contradiction(s), %d withheld", out.Rechecked, out.Withheld))
+	}
 }
 
 // deferFollowUps records work the pass judged worth doing and could not take.

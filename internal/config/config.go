@@ -181,6 +181,9 @@ type LLMConfig struct {
 	// disagreement in the report that was not there.
 	VerifierModel string `json:"verifier_model,omitempty"`
 
+	// RecheckModel re-judges contradiction edges before the report. Empty disables it.
+	RecheckModel string `json:"recheck_model,omitempty"`
+
 	// MaxInputTokens caps a SINGLE request's input.
 	//
 	// Not the same limit as a context window, and often much smaller. A
@@ -354,6 +357,7 @@ func (c *Config) applyEnv() {
 	setIf(&c.Search.Provider, "MOLE_SEARCH_PROVIDER")
 	setIf(&c.Search.BraveKey, "MOLE_BRAVE_API_KEY", "BRAVE_API_KEY")
 	setIf(&c.Search.TavilyKey, "MOLE_TAVILY_API_KEY", "TAVILY_API_KEY")
+	setIf(&c.LLM.Provider, "MOLE_LLM_PROVIDER")
 	// ANTHROPIC_API_KEY fills the top-level key only for an anthropic or unset provider.
 	llmKeys := []string{"MOLE_LLM_API_KEY"}
 	if providerKind(c.LLM.Provider) == "anthropic" {
@@ -362,6 +366,9 @@ func (c *Config) applyEnv() {
 	setIf(&c.LLM.APIKey, llmKeys...)
 	setIf(&c.LLM.BaseURL, "MOLE_LLM_BASE_URL")
 	setIf(&c.LLM.Model, "MOLE_LLM_MODEL")
+	setIf(&c.LLM.CheapModel, "MOLE_LLM_CHEAP_MODEL")
+	setIf(&c.LLM.VerifierModel, "MOLE_LLM_VERIFIER_MODEL")
+	setIf(&c.LLM.RecheckModel, "MOLE_LLM_RECHECK_MODEL")
 	setIf(&c.ContactEmail, "MOLE_CONTACT_EMAIL")
 }
 
@@ -493,6 +500,16 @@ func Fields() []Field {
 			get:  func(c *Config) string { return c.LLM.VerifierModel },
 			set: func(c *Config, v string) error {
 				c.LLM.VerifierModel = strings.TrimSpace(v)
+				return nil
+			},
+		},
+		{
+			Name: "llm.recheck-model",
+			Help: "model that re-judges contradiction edges before the report; empty disables. " +
+				"sent to the provider of the role whose model it names, else the cheap model's provider",
+			get: func(c *Config) string { return c.LLM.RecheckModel },
+			set: func(c *Config, v string) error {
+				c.LLM.RecheckModel = strings.TrimSpace(v)
 				return nil
 			},
 		},

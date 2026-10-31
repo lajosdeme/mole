@@ -291,6 +291,7 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 		Academic:          academicActor,
 		Local:             localActor,
 		VerifierModel:     verifierModelFor(cfg),
+		RecheckModel:      cfg.LLM.RecheckModel,
 		VerifierBatchSize: cfg.LLM.VerifierBatchSize,
 		MaxFindings:       o.maxFindings,
 		Confirm:           confirmMode,
@@ -644,6 +645,8 @@ type researchOutput struct {
 	// Verification and grounding (§11).
 	ClaimsVerified    int `json:"claims_verified"`
 	Contradictions    int `json:"contradictions"`
+	Rechecked         int `json:"rechecked,omitempty"`
+	Withheld          int `json:"withheld,omitempty"`
 	GroundChecked     int `json:"ground_checked"`
 	GroundConfirmed   int `json:"ground_confirmed"`
 	GroundUnsupported int `json:"ground_unsupported"`
@@ -681,6 +684,8 @@ func fillOutput(out *researchOutput, res *session.Result) {
 	if r := res.Run; r != nil {
 		out.ClaimsVerified = r.ClaimsVerified
 		out.Contradictions = r.Contradictions
+		out.Rechecked = r.Rechecked
+		out.Withheld = r.Withheld
 		out.LeadsRun = r.LeadsRun
 		out.LeadsFailed = r.LeadsFailed
 		out.LeadsCached = r.LeadsCached

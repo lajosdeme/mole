@@ -339,6 +339,9 @@ type Tx interface {
 	// UNIQUE constraint or accumulate a second row saying the same thing.
 	InsertEdges(ctx context.Context, edges []core.ClaimEdge) error
 
+	// DeleteEdges removes the edges with the given IDs.
+	DeleteEdges(ctx context.Context, ids []string) error
+
 	// ScoreClaims writes the Verifier's output for a batch of claims.
 	ScoreClaims(ctx context.Context, scores []ClaimScore) error
 

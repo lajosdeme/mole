@@ -1260,6 +1260,15 @@ func (t *queries) InsertEdges(ctx context.Context, edges []core.ClaimEdge) error
 	return nil
 }
 
+func (t *queries) DeleteEdges(ctx context.Context, ids []string) error {
+	for i, id := range ids {
+		if _, err := t.q.ExecContext(ctx, `DELETE FROM claim_edges WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("sqlite: delete edge %d/%d: %w", i+1, len(ids), err)
+		}
+	}
+	return nil
+}
+
 func (t *queries) ListEdges(ctx context.Context, sessionID string, limit int) ([]*core.ClaimEdge, error) {
 	limit = allRowsIfUnset(limit)
 	rows, err := t.q.QueryContext(ctx,

@@ -24,7 +24,8 @@ func isolate(t *testing.T) string {
 		"MOLE_SEARCH_PROVIDER", "MOLE_BRAVE_API_KEY", "BRAVE_API_KEY",
 		"MOLE_TAVILY_API_KEY", "TAVILY_API_KEY", "MOLE_LLM_API_KEY",
 		"ANTHROPIC_API_KEY", "MOLE_LLM_BASE_URL", "MOLE_LLM_MODEL",
-		"MOLE_CONTACT_EMAIL",
+		"MOLE_CONTACT_EMAIL", "MOLE_LLM_VERIFIER_MODEL", "MOLE_LLM_RECHECK_MODEL",
+		"MOLE_LLM_PROVIDER", "MOLE_LLM_CHEAP_MODEL",
 	} {
 		t.Setenv(k, "")
 	}
@@ -239,6 +240,43 @@ func TestEnvOverridesFile(t *testing.T) {
 	}
 	if loaded.Search.BraveKey != "from-env" {
 		t.Errorf("key = %q, want the environment value", loaded.Search.BraveKey)
+	}
+}
+
+// TestEnvSetsVerifierAndRecheckModels.
+func TestEnvSetsVerifierAndRecheckModels(t *testing.T) {
+	isolate(t)
+	t.Setenv("MOLE_SEARCH_PROVIDER", "tavily")
+	t.Setenv("TAVILY_API_KEY", "tvly-env")
+	t.Setenv("MOLE_LLM_VERIFIER_MODEL", "deepseek-chat")
+	t.Setenv("MOLE_LLM_RECHECK_MODEL", "deepseek-reasoner")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.VerifierModel != "deepseek-chat" || cfg.LLM.RecheckModel != "deepseek-reasoner" {
+		t.Errorf("verifier = %q, recheck = %q", cfg.LLM.VerifierModel, cfg.LLM.RecheckModel)
+	}
+}
+
+// TestEnvSelectsAnOpenAICompatibleProvider.
+func TestEnvSelectsAnOpenAICompatibleProvider(t *testing.T) {
+	isolate(t)
+	t.Setenv("MOLE_LLM_PROVIDER", "openai-compatible")
+	t.Setenv("MOLE_LLM_BASE_URL", "https://api.deepseek.com/v1")
+	t.Setenv("MOLE_LLM_API_KEY", "sk-env")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-be-used")
+	t.Setenv("MOLE_LLM_MODEL", "deepseek-chat")
+	t.Setenv("MOLE_LLM_CHEAP_MODEL", "deepseek-chat")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cheap := cfg.LLM.Resolve("cheap")
+	if cheap.Provider != "openai-compatible" || cheap.APIKey != "sk-env" || cheap.Model != "deepseek-chat" {
+		t.Errorf("cheap role = %s %s, key from env = %v", cheap.Provider, cheap.Model, cheap.APIKey == "sk-env")
 	}
 }
 

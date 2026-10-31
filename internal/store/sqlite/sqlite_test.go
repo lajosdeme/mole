@@ -641,6 +641,49 @@ func TestDirectionalEdgesKeepTheirDirection(t *testing.T) {
 	}
 }
 
+// TestDeleteEdgesRemovesOnlyTheNamedEdges checks DeleteEdges removes exactly the given IDs.
+func TestDeleteEdgesRemovesOnlyTheNamedEdges(t *testing.T) {
+	ctx := context.Background()
+	db, _ := open(t)
+	insertSession(t, db, "s_del", 1_000_000)
+	a := insertClaim(t, db, "s_del", "Claim A.", "https://a.example/1")
+	b := insertClaim(t, db, "s_del", "Claim B.", "https://b.example/1")
+	c := insertClaim(t, db, "s_del", "Claim C.", "https://c.example/1")
+
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.InsertEdges(ctx, []core.ClaimEdge{
+			{SessionID: "s_del", FromID: a, ToID: b, Kind: core.EdgeContradicts},
+			{SessionID: "s_del", FromID: b, ToID: c, Kind: core.EdgeContradicts},
+			{SessionID: "s_del", FromID: a, ToID: c, Kind: core.EdgeDuplicateOf},
+		})
+	}); err != nil {
+		t.Fatalf("insert edges: %v", err)
+	}
+	var drop string
+	for _, e := range listEdges(t, db, "s_del") {
+		if e.Kind == core.EdgeContradicts && (e.FromID == b || e.ToID == b) && (e.FromID == c || e.ToID == c) {
+			drop = e.ID
+		}
+	}
+	if drop == "" {
+		t.Fatal("seeded edge not found")
+	}
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.DeleteEdges(ctx, []string{drop})
+	}); err != nil {
+		t.Fatalf("delete edges: %v", err)
+	}
+	left := listEdges(t, db, "s_del")
+	if len(left) != 2 {
+		t.Fatalf("%d edges left, want 2", len(left))
+	}
+	for _, e := range left {
+		if e.ID == drop {
+			t.Errorf("edge %s survived its deletion", drop)
+		}
+	}
+}
+
 // TestSelfEdgesAndUnknownKindsAreRejected covers what the schema lets through.
 //
 // claim_edges has no foreign key to claims and no CHECK against from_id = to_id,

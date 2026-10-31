@@ -1343,6 +1343,10 @@ type verifierLLM struct {
 	plans    []string
 	relation string
 	adjudged int
+	// strictModel's adjudications answer strictRelation and are counted in strictCalls.
+	strictModel    string
+	strictRelation string
+	strictCalls    int
 }
 
 func (v *verifierLLM) Name() string               { return "fake" }
@@ -1364,6 +1368,11 @@ func (v *verifierLLM) Complete(_ context.Context, req llm.Request) (*llm.Respons
 	// recognising it. The tag is structural, so prose edits cannot silently unhook it.
 	if strings.Contains(prompt, "<pairs-") {
 		v.adjudged++
+		rel := v.relation
+		if v.strictModel != "" && req.Model == v.strictModel {
+			v.strictCalls++
+			rel = v.strictRelation
+		}
 		var b strings.Builder
 		b.WriteString(`{"verdicts":[`)
 		n := strings.Count(prompt, `"b":`)
@@ -1371,7 +1380,7 @@ func (v *verifierLLM) Complete(_ context.Context, req llm.Request) (*llm.Respons
 			if i > 1 {
 				b.WriteString(",")
 			}
-			fmt.Fprintf(&b, `{"pair":%d,"relation":%q,"confidence":0.9,"why":"because"}`, i, v.relation)
+			fmt.Fprintf(&b, `{"pair":%d,"relation":%q,"confidence":0.9,"why":"because"}`, i, rel)
 		}
 		b.WriteString("]}")
 		resp.Text = b.String()
@@ -1385,6 +1394,12 @@ func (v *verifierLLM) Complete(_ context.Context, req llm.Request) (*llm.Respons
 		resp.Text = v.plans[i]
 	}
 	return resp, nil
+}
+
+func (v *verifierLLM) strictAdjudications() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.strictCalls
 }
 
 func (v *verifierLLM) adjudications() int {
@@ -2061,5 +2076,74 @@ func TestReserveIsCappedAtHalfTheClock(t *testing.T) {
 		if got := executor.FinishReserveFor(c.wall, c.configured); got != c.want {
 			t.Errorf("finishReserve(%s, %s) = %s, want %s", c.wall, c.configured, got, c.want)
 		}
+	}
+}
+
+// recheckRig is a max_leads-stopped run whose leads produce opposing claims.
+func recheckRig(t *testing.T, recheckModel string) (*rig, *verifierLLM) {
+	t.Helper()
+	fl := &verifierLLM{
+		plans: []string{planJSON("a", "b", "c")}, relation: "contradicts",
+		strictModel: "strict", strictRelation: "neither",
+	}
+	r := newRigFromSpec(t, budget.SessionSpec{
+		Budget: 5 * core.MicrosPerUSD, MaxLeads: 2, MaxToolCalls: 200,
+	}, nil, opposingClaims)
+	r.exec.Planner = &planner.Planner{LLM: fl, MaxInitialLeads: 3, ReplanEvery: 3, MaxDepth: 1}
+	r.withVerifier(fl).RecheckModel = recheckModel
+	return r, fl
+}
+
+// TestThePostLoopRecheckRunsOnceWhenConfigured checks the re-check runs once after the final verify.
+func TestThePostLoopRecheckRunsOnceWhenConfigured(t *testing.T) {
+	r, fl := recheckRig(t, "strict")
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.VerifyPasses == 0 {
+		t.Fatal("no verify pass ran")
+	}
+	if got := fl.strictAdjudications(); got != 1 {
+		t.Errorf("%d re-check calls, want 1", got)
+	}
+	if res.Withheld == 0 || res.Withheld != res.Rechecked {
+		t.Errorf("rechecked %d, withheld %d; want every contradiction withheld", res.Rechecked, res.Withheld)
+	}
+	if res.Contradictions != 0 {
+		t.Errorf("contradictions = %d after every one was withheld", res.Contradictions)
+	}
+	var left int
+	if err := r.db.Read(context.Background(), func(ctx context.Context, q store.Queries) error {
+		edges, err := q.ListEdges(ctx, r.sess.ID, 0)
+		for _, e := range edges {
+			if e.Kind == core.EdgeContradicts {
+				left++
+			}
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Errorf("%d contradicts edges stored after the re-check withheld them", left)
+	}
+}
+
+// TestNoRecheckModelMeansNoPostLoopRecheck checks no re-check runs when none is configured.
+func TestNoRecheckModelMeansNoPostLoopRecheck(t *testing.T) {
+	r, fl := recheckRig(t, "")
+	res, err := r.exec.Run(context.Background(), r.sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fl.strictAdjudications(); got != 0 {
+		t.Errorf("%d re-check calls with no re-check model", got)
+	}
+	if res.Rechecked != 0 || res.Withheld != 0 {
+		t.Errorf("rechecked %d, withheld %d; want 0", res.Rechecked, res.Withheld)
+	}
+	if res.Contradictions == 0 {
+		t.Error("no contradictions found; the test proves nothing")
 	}
 }
