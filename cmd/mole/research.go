@@ -286,17 +286,18 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 	}
 
 	runner := &session.Runner{
-		Store:             db,
-		Actor:             actor,
-		Academic:          academicActor,
-		Local:             localActor,
-		VerifierModel:     verifierModelFor(cfg),
-		RecheckModel:      cfg.LLM.RecheckModel,
-		VerifierBatchSize: cfg.LLM.VerifierBatchSize,
-		MaxFindings:       o.maxFindings,
-		Confirm:           confirmMode,
-		Owner:             "cli",
-		Notice:            func(msg string) { fmt.Fprintf(os.Stderr, "warning: %s\n", msg) },
+		Store:               db,
+		Actor:               actor,
+		Academic:            academicActor,
+		Local:               localActor,
+		VerifierModel:       verifierModelFor(cfg),
+		RecheckModel:        cfg.LLM.RecheckModel,
+		VerifierBatchSize:   cfg.LLM.VerifierBatchSize,
+		VerifierConcurrency: cfg.LLM.VerifierConcurrency,
+		MaxFindings:         o.maxFindings,
+		Confirm:             confirmMode,
+		Owner:               "cli",
+		Notice:              func(msg string) { fmt.Fprintf(os.Stderr, "warning: %s\n", msg) },
 	}
 	if !o.quiet && !o.asJSON {
 		runner.Progress = progressPrinter()

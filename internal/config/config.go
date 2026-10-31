@@ -166,6 +166,9 @@ type LLMConfig struct {
 	// has to finish inside Timeout, and a slow model wants a smaller one.
 	VerifierBatchSize int `json:"verifier_batch_size,omitempty"`
 
+	// VerifierConcurrency is how many adjudication calls run at once. Zero takes the default.
+	VerifierConcurrency int `json:"verifier_concurrency,omitempty"`
+
 	// VerifierModel judges claim pairs and grounding (§11). Empty uses CheapModel.
 	//
 	// A third setting rather than a third tier, because the argument for it is
@@ -369,6 +372,11 @@ func (c *Config) applyEnv() {
 	setIf(&c.LLM.CheapModel, "MOLE_LLM_CHEAP_MODEL")
 	setIf(&c.LLM.VerifierModel, "MOLE_LLM_VERIFIER_MODEL")
 	setIf(&c.LLM.RecheckModel, "MOLE_LLM_RECHECK_MODEL")
+	if v := os.Getenv("MOLE_LLM_VERIFIER_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.LLM.VerifierConcurrency = n
+		}
+	}
 	setIf(&c.ContactEmail, "MOLE_CONTACT_EMAIL")
 }
 
@@ -637,6 +645,29 @@ func Fields() []Field {
 					return errors.New("must be a positive number of pairs")
 				}
 				c.LLM.VerifierBatchSize = n
+				return nil
+			},
+		},
+		{
+			Name: "llm.verifier-concurrency",
+			Help: "adjudication calls in flight at once; lower it if the provider rate-limits",
+			get: func(c *Config) string {
+				if c.LLM.VerifierConcurrency == 0 {
+					return ""
+				}
+				return strconv.Itoa(c.LLM.VerifierConcurrency)
+			},
+			set: func(c *Config, v string) error {
+				v = strings.TrimSpace(v)
+				if v == "" {
+					c.LLM.VerifierConcurrency = 0
+					return nil
+				}
+				n, err := strconv.Atoi(v)
+				if err != nil || n < 1 {
+					return errors.New("must be a positive number of calls")
+				}
+				c.LLM.VerifierConcurrency = n
 				return nil
 			},
 		},

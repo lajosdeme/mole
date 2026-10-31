@@ -124,6 +124,8 @@ type Runner struct {
 	RecheckModel string
 	// VerifierBatchSize caps pairs per adjudication call. Zero takes the default.
 	VerifierBatchSize int
+	// VerifierConcurrency caps adjudication calls in flight. Zero takes the default.
+	VerifierConcurrency int
 
 	// MaxFindings bounds how many findings the report is written from, and with
 	// it how long the document runs. Zero takes output.DefaultMaxClaims.
@@ -439,6 +441,7 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 		Model:        r.VerifierModel,
 		RecheckModel: r.RecheckModel,
 		BatchSize:    r.VerifierBatchSize,
+		Concurrency:  r.VerifierConcurrency,
 		// Both by default: one judgement gets "contradicts" right 51% of the time,
 		// and here a false edge also spends a research lead. Output a person reads
 		// wants ConfirmDuplicates — 98% recall against 67%.

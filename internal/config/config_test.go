@@ -25,7 +25,7 @@ func isolate(t *testing.T) string {
 		"MOLE_TAVILY_API_KEY", "TAVILY_API_KEY", "MOLE_LLM_API_KEY",
 		"ANTHROPIC_API_KEY", "MOLE_LLM_BASE_URL", "MOLE_LLM_MODEL",
 		"MOLE_CONTACT_EMAIL", "MOLE_LLM_VERIFIER_MODEL", "MOLE_LLM_RECHECK_MODEL",
-		"MOLE_LLM_PROVIDER", "MOLE_LLM_CHEAP_MODEL",
+		"MOLE_LLM_PROVIDER", "MOLE_LLM_CHEAP_MODEL", "MOLE_LLM_VERIFIER_CONCURRENCY",
 	} {
 		t.Setenv(k, "")
 	}
@@ -277,6 +277,33 @@ func TestEnvSelectsAnOpenAICompatibleProvider(t *testing.T) {
 	cheap := cfg.LLM.Resolve("cheap")
 	if cheap.Provider != "openai-compatible" || cheap.APIKey != "sk-env" || cheap.Model != "deepseek-chat" {
 		t.Errorf("cheap role = %s %s, key from env = %v", cheap.Provider, cheap.Model, cheap.APIKey == "sk-env")
+	}
+}
+
+// TestVerifierConcurrencyFromKeyAndEnv.
+func TestVerifierConcurrencyFromKeyAndEnv(t *testing.T) {
+	isolate(t)
+	cfg := &config.Config{}
+	if err := cfg.Set("llm.verifier-concurrency", "0"); err == nil {
+		t.Error("a zero concurrency was accepted")
+	}
+	if err := cfg.Set("llm.verifier-concurrency", "6"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load()
+	if err != nil && !errors.Is(err, config.ErrNotConfigured) {
+		t.Fatal(err)
+	}
+	if loaded.LLM.VerifierConcurrency != 6 {
+		t.Errorf("from the file = %d, want 6", loaded.LLM.VerifierConcurrency)
+	}
+
+	t.Setenv("MOLE_LLM_VERIFIER_CONCURRENCY", "12")
+	if loaded, _ = config.Load(); loaded.LLM.VerifierConcurrency != 12 {
+		t.Errorf("from the environment = %d, want 12", loaded.LLM.VerifierConcurrency)
 	}
 }
 

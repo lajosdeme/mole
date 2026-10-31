@@ -171,13 +171,14 @@ func cmdServe(ctx context.Context, o serveOpts) error {
 	defer func() { _ = db.Close() }()
 
 	runner := &session.Runner{
-		Store:             db,
-		Actor:             actor,
-		VerifierModel:     verifierModelFor(cfg),
-		RecheckModel:      cfg.LLM.RecheckModel,
-		VerifierBatchSize: cfg.LLM.VerifierBatchSize,
-		Owner:             "daemon",
-		Log:               actor.Log,
+		Store:               db,
+		Actor:               actor,
+		VerifierModel:       verifierModelFor(cfg),
+		RecheckModel:        cfg.LLM.RecheckModel,
+		VerifierBatchSize:   cfg.LLM.VerifierBatchSize,
+		VerifierConcurrency: cfg.LLM.VerifierConcurrency,
+		Owner:               "daemon",
+		Log:                 actor.Log,
 		Notice: func(msg string) {
 			actor.Log.Warn(msg)
 		},
