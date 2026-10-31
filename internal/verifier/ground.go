@@ -319,7 +319,7 @@ func (v *Verifier) rescore(ctx context.Context, sessionID string) error {
 	}); err != nil {
 		return err
 	}
-	scores, _ := DeriveConfidence(claims, edges)
+	scores, _ := DeriveConfidence(claims, v.scoringEdges(edges))
 	if len(scores) == 0 {
 		return nil
 	}

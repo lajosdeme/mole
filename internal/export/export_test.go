@@ -16,6 +16,7 @@ import (
 	"github.com/lajosdeme/mole/internal/export"
 	"github.com/lajosdeme/mole/internal/store"
 	"github.com/lajosdeme/mole/internal/store/sqlite"
+	"github.com/lajosdeme/mole/internal/verifier"
 )
 
 // A session with the shape a pack needs: two leads, four claims, one
@@ -807,5 +808,59 @@ func TestAnOpeningQuestionClaimsNoLineage(t *testing.T) {
 		if s.VerifyDepth != 0 || s.RootClaimID != "" {
 			t.Errorf("an opening sub-question carries lineage: %+v", s)
 		}
+	}
+}
+
+// setCreatedBy rewrites the created_by of every contradicts edge in the session.
+func setCreatedBy(t *testing.T, db *sqlite.DB, sessionID, by string) {
+	t.Helper()
+	ctx := context.Background()
+	var edges []*core.ClaimEdge
+	if err := db.Read(ctx, func(ctx context.Context, q store.Queries) error {
+		var err error
+		edges, err = q.ListEdges(ctx, sessionID, 0)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var out []core.ClaimEdge
+	for _, e := range edges {
+		e.CreatedBy = by
+		out = append(out, *e)
+	}
+	if err := db.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.InsertEdges(ctx, out)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUncheckedConflictsAreWithheld checks export drops unchecked contradictions only under a re-check model.
+func TestUncheckedConflictsAreWithheld(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		by       string
+		model    string
+		want     int
+		degraded bool
+	}{
+		{"unchecked, withheld", "model", "strict", 0, true},
+		{"re-checked, kept", verifier.RecheckedBy + "strict", "strict", 1, false},
+		{"unchecked, re-check off", "model", "", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, sess := fixture(t)
+			setCreatedBy(t, db, sess.ID, tc.by)
+			ex, err := export.Build(context.Background(), db, sess.ID, export.Options{RecheckModel: tc.model})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ex.Conflicts) != tc.want {
+				t.Errorf("%d conflict(s), want %d", len(ex.Conflicts), tc.want)
+			}
+			if got := strings.Contains(ex.Report.Degraded, "1 contradiction(s) withheld: not re-checked"); got != tc.degraded {
+				t.Errorf("degraded = %q; want the withheld note %v", ex.Report.Degraded, tc.degraded)
+			}
+		})
 	}
 }

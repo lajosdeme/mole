@@ -624,12 +624,12 @@ func newTraceCmd() *cobra.Command {
 		Short: "Show the cost and span breakdown for one session",
 		Args:  exactArgs(1, "mole trace <session-id>"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return cmdTrace(cmd.Context(), dbPath(cmd), args[0])
+			return cmdTrace(cmd.Context(), dbPath(cmd), args[0], configuredRecheckModel())
 		},
 	}
 }
 
-func cmdTrace(ctx context.Context, path, sessionID string) error {
+func cmdTrace(ctx context.Context, path, sessionID, recheckModel string) error {
 	db, err := openDBNoMigrate(ctx, path)
 	if err != nil {
 		return err
@@ -719,7 +719,7 @@ func cmdTrace(ctx context.Context, path, sessionID string) error {
 			v.SpentRecorded, v.SpentFromLedger, v.HeldRecorded, v.HeldFromRows, v.CallsRecorded, v.CallsFromRows)
 	}
 
-	printClaimGraph(os.Stdout, claims, edges)
+	printClaimGraph(os.Stdout, claims, edges, verifier.Rechecks(sess, recheckModel))
 
 	if len(spans) > 0 {
 		fmt.Printf("\nspans (%d):\n", len(spans))
@@ -942,6 +942,22 @@ func configKeyHelp() string {
 	}
 	_ = w.Flush()
 	return b.String()
+}
+
+// recheckModelFromConfig returns the configured re-check model; a missing
+// config file is not an error.
+func recheckModelFromConfig() (string, error) {
+	cfg, err := config.Load()
+	if err != nil && !errors.Is(err, config.ErrNotConfigured) {
+		return "", err
+	}
+	return cfg.LLM.RecheckModel, nil
+}
+
+// configuredRecheckModel is recheckModelFromConfig with any error read as none.
+func configuredRecheckModel() string {
+	m, _ := recheckModelFromConfig()
+	return m
 }
 
 // loadConfigForEdit tolerates a missing file: `mole config set` on a fresh
@@ -1609,7 +1625,7 @@ func pingLLM(ctx context.Context, w io.Writer, cfg *config.Config, roles string,
 // The unverified count is the load-bearing number. §11.3's derived confidence is
 // 0 until the Verifier scores a claim, and a reader who saw only confidences would
 // read a whole session of unscored claims as a session of worthless ones.
-func printClaimGraph(w io.Writer, claims []*core.Claim, edges []*core.ClaimEdge) {
+func printClaimGraph(w io.Writer, claims []*core.Claim, edges []*core.ClaimEdge, labelUnchecked bool) {
 	if len(claims) == 0 {
 		return
 	}
@@ -1681,7 +1697,11 @@ func printClaimGraph(w io.Writer, claims []*core.Claim, edges []*core.ClaimEdge)
 			fmt.Fprintln(w, "\ncontradictions:")
 		}
 		shown++
-		fmt.Fprintf(w, "  %.60q\n  ⚡ %.60q\n", text[e.FromID], text[e.ToID])
+		label := ""
+		if labelUnchecked && !verifier.IsRechecked(e) {
+			label = " (not re-checked)"
+		}
+		fmt.Fprintf(w, "  %.60q\n  ⚡ %.60q%s\n", text[e.FromID], text[e.ToID], label)
 		if e.Rationale != "" {
 			fmt.Fprintf(w, "     %.100s\n", e.Rationale)
 		}

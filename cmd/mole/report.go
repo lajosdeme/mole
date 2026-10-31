@@ -92,7 +92,8 @@ func cmdReport(ctx context.Context, sessionID string, o reportOpts, cfg *config.
 	}
 	defer db.Close()
 
-	gen := &output.Generator{LLM: provider, MaxClaims: o.maxFindings, Effort: o.effort}
+	gen := &output.Generator{LLM: provider, MaxClaims: o.maxFindings, Effort: o.effort,
+		RecheckModel: cfg.LLM.RecheckModel}
 	rep, err := gen.Generate(ctx, db, sessionID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {

@@ -146,7 +146,7 @@ type Result struct {
 	FollowUpsDeferred int
 	// VerifyDegraded is the last reason a pass could not finish, if any.
 	VerifyDegraded string
-	// Rechecked and Withheld are the final re-check's contradictions judged and removed.
+	// Rechecked and Withheld are contradictions re-checked and removed, across every pass.
 	Rechecked int
 	Withheld  int
 
@@ -1367,6 +1367,8 @@ func (e *Executor) verify(ctx context.Context, digest *planner.Digest, res *Resu
 	res.ClaimsVerified += out.ClaimsVerified
 	res.EdgesWritten += out.EdgesWritten
 	res.Contradictions += out.Contradictions
+	res.Rechecked += out.Rechecked
+	res.Withheld += out.Withheld
 	if out.Degraded != "" {
 		res.VerifyDegraded = out.Degraded
 	}
@@ -1400,7 +1402,7 @@ func (e *Executor) recheck(ctx context.Context, res *Result) {
 	}
 	res.Rechecked += out.Rechecked
 	res.Withheld += out.Withheld
-	res.Contradictions = max(0, res.Contradictions-out.Withheld)
+	res.Contradictions += out.Contradictions
 	if out.Degraded != "" {
 		res.VerifyDegraded = out.Degraded
 	}

@@ -76,6 +76,10 @@ type Deps struct {
 	// default table.
 	Pricing *pricing.Table
 
+	// RecheckModel, when set, withholds contradictions not yet re-checked from
+	// research.ask.
+	RecheckModel string
+
 	// AskTimeout bounds one research.ask. Zero takes DefaultAskTimeout.
 	AskTimeout time.Duration
 

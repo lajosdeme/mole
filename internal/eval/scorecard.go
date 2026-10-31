@@ -87,6 +87,9 @@ type Options struct {
 	// Off by default because it costs a fetch per source. Under cassette
 	// replay it is free and deterministic, which is what §14.1 was built for.
 	Citations SourceReader
+	// RecheckModel, when set, labels contradictions not yet re-checked; they are
+	// still counted.
+	RecheckModel string
 }
 
 // Score evaluates one session.
@@ -148,7 +151,7 @@ func Score(ctx context.Context, st store.Store, sessionID string, opts Options) 
 	card.Metrics = append(card.Metrics,
 		verificationCoverage(claims),
 		duplicateCollapse(claims, edges),
-		disagreementRate(claims, edges),
+		disagreementRate(claims, edges, verifier.Rechecks(sess, opts.RecheckModel)),
 		stalenessSeparation(claims, edges),
 	)
 	if g := groundingRate(claims); g != nil {
@@ -555,26 +558,32 @@ func duplicateCollapse(claims []*core.Claim, edges []*core.ClaimEdge) Metric {
 // a session on a contested question reporting zero is suspicious, and one reporting
 // half its claims as disputed probably has an adjudicator saying "contradicts" to
 // anything it cannot parse.
-func disagreementRate(claims []*core.Claim, edges []*core.ClaimEdge) Metric {
+func disagreementRate(claims []*core.Claim, edges []*core.ClaimEdge, label bool) Metric {
 	m := Metric{Name: "disagreement rate", Status: Measured, Unit: "%"}
 	if len(claims) == 0 {
 		m.Status = NotApplicable
 		m.Detail = "no claims"
 		return m
 	}
-	contradicts := 0
+	contradicts, unchecked := 0, 0
 	involved := map[string]bool{}
 	for _, e := range edges {
 		if e == nil || e.Kind != core.EdgeContradicts {
 			continue
 		}
 		contradicts++
+		if !verifier.IsRechecked(e) {
+			unchecked++
+		}
 		involved[e.FromID] = true
 		involved[e.ToID] = true
 	}
 	m.Value = 100 * float64(len(involved)) / float64(len(claims))
 	m.Detail = fmt.Sprintf("%d contradiction(s) involving %d of %d claim(s)",
 		contradicts, len(involved), len(claims))
+	if label && unchecked > 0 {
+		m.Detail += fmt.Sprintf(" (%d not re-checked)", unchecked)
+	}
 	return m
 }
 

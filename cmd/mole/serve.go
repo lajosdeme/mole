@@ -209,6 +209,7 @@ func cmdServe(ctx context.Context, o serveOpts) error {
 		MaxSessionTokens: cfg.MaxSessionTokens,
 		LLM:              actor.LLM,
 		Pricing:          actor.Pricing,
+		RecheckModel:     cfg.LLM.RecheckModel,
 		MaxSources:       defaultServeMaxSources,
 		MaxDepth:         defaultServeMaxDepth,
 		MaxLeads:         defaultServeMaxLeads,

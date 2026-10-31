@@ -10,6 +10,7 @@ import (
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/output"
 	"github.com/lajosdeme/mole/internal/store"
+	"github.com/lajosdeme/mole/internal/verifier"
 )
 
 func at(t time.Time) *time.Time { return &t }
@@ -517,6 +518,69 @@ func TestTheCapNeverShowsOneSideOfADisagreement(t *testing.T) {
 				t.Errorf("cap=%d: the surviving pair was not flagged disputed:\n%s",
 					cap, material(f.prompt))
 			}
+		}
+	}
+}
+
+// linkBy is link with the edge's created_by set.
+func linkBy(t *testing.T, st store.Store, sid, from, to, by string) {
+	t.Helper()
+	if err := st.WithTx(context.Background(), func(ctx context.Context, tx store.Tx) error {
+		return tx.InsertEdges(ctx, []core.ClaimEdge{{
+			SessionID: sid, FromID: from, ToID: to, Kind: core.EdgeContradicts, Weight: 1, CreatedBy: by,
+		}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUncheckedContradictionsAreWithheldFromTheReport checks the report and ask drop unchecked contradictions only when asked.
+func TestUncheckedContradictionsAreWithheldFromTheReport(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		by       string
+		model    string
+		toolkit  bool
+		want     int
+		degraded bool
+	}{
+		{"unchecked, withheld", "fake-model", "strict", false, 0, true},
+		{"re-checked, kept", verifier.RecheckedBy + "strict", "strict", false, 1, false},
+		{"unchecked, re-check off", "fake-model", "", false, 1, false},
+		{"unchecked, toolkit session", "toolkit", "strict", true, 1, false},
+	} {
+		for _, ask := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s ask=%v", tc.name, ask), func(t *testing.T) {
+				claims := []core.Claim{
+					claim("The effect is large.", "https://a.example/1", "a quote long enough to be real evidence one"),
+					claim("The effect is absent.", "https://b.example/1", "a quote long enough to be real evidence two"),
+				}
+				actors := []core.ActorType{core.ActorWeb}
+				if tc.toolkit {
+					actors = append(actors, core.ActorToolkit)
+				}
+				st, sid := newStoreWith(t, claims, actors...)
+				stored := storedClaims(t, st, sid)
+				linkBy(t, st, sid, stored["The effect is large."].ID, stored["The effect is absent."].ID, tc.by)
+
+				gen := &output.Generator{RecheckModel: tc.model}
+				var rep *output.Report
+				var err error
+				if ask {
+					rep, err = gen.Answer(context.Background(), st, sid, "is the effect large")
+				} else {
+					rep, err = gen.Generate(context.Background(), st, sid)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if rep.Disagreements != tc.want {
+					t.Errorf("Disagreements = %d, want %d", rep.Disagreements, tc.want)
+				}
+				if got := strings.Contains(rep.Degraded, "1 contradiction(s) withheld: not re-checked"); got != tc.degraded {
+					t.Errorf("degraded = %q; want the withheld note %v", rep.Degraded, tc.degraded)
+				}
+			})
 		}
 	}
 }
