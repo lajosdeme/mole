@@ -32,10 +32,17 @@ func privateRuntimeDir(t *testing.T, mode os.FileMode) string {
 	return dir
 }
 
+// noRuntimePath is a PATH with no container runtime, so doctor's sandbox probe
+// never starts podman inside the test's XDG_RUNTIME_DIR.
+func noRuntimePath(t *testing.T) string {
+	t.Helper()
+	return t.TempDir()
+}
+
 // TestDoctorReportsTheSocketDirectory, in the ordinary case.
 func TestDoctorReportsTheSocketDirectory(t *testing.T) {
 	privateRuntimeDir(t, 0o700)
-	out, err := doctorRun(t, t.TempDir(), "")
+	out, err := doctorRun(t, t.TempDir(), noRuntimePath(t))
 	if !strings.Contains(out, "mcp socket") {
 		t.Fatalf("doctor says nothing about the socket:\n%s", out)
 	}
@@ -53,10 +60,10 @@ func TestDoctorReportsTheSocketDirectory(t *testing.T) {
 // setup script branches on, so it has to move.
 func TestAnExposedSocketDirectoryFailsDoctor(t *testing.T) {
 	privateRuntimeDir(t, 0o700)
-	_, baseline := doctorRun(t, t.TempDir(), "")
+	_, baseline := doctorRun(t, t.TempDir(), noRuntimePath(t))
 
 	privateRuntimeDir(t, 0o777)
-	out, err := doctorRun(t, t.TempDir(), "")
+	out, err := doctorRun(t, t.TempDir(), noRuntimePath(t))
 
 	if !strings.Contains(out, "group or other can reach the socket") {
 		t.Errorf("an exposed socket directory is not reported:\n%s", out)
@@ -85,7 +92,7 @@ func TestAKeyInTheMCPConfigIsReported(t *testing.T) {
 	}
 	t.Chdir(dir)
 
-	out, err := doctorRun(t, t.TempDir(), "")
+	out, err := doctorRun(t, t.TempDir(), noRuntimePath(t))
 	if !strings.Contains(out, "mcp config") {
 		t.Fatalf("a key in .mcp.json is not reported:\n%s", out)
 	}
@@ -111,7 +118,7 @@ func TestAnMCPConfigWithNoKeyIsNotReported(t *testing.T) {
 	}
 	t.Chdir(dir)
 
-	out, _ := doctorRun(t, t.TempDir(), "")
+	out, _ := doctorRun(t, t.TempDir(), noRuntimePath(t))
 	if strings.Contains(out, "mcp config") {
 		t.Errorf("an ordinary MCP config was flagged as holding a key:\n%s", out)
 	}
@@ -130,7 +137,7 @@ func TestAnUnrelatedMCPConfigIsNotRead(t *testing.T) {
 	}
 	t.Chdir(dir)
 
-	out, _ := doctorRun(t, t.TempDir(), "")
+	out, _ := doctorRun(t, t.TempDir(), noRuntimePath(t))
 	if strings.Contains(out, "mcp config") {
 		t.Errorf("another server's key was reported as mole's problem:\n%s", out)
 	}
