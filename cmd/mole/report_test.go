@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -374,5 +375,71 @@ func TestReportSaveReplacesTheStoredReport(t *testing.T) {
 	}
 	if !strings.Contains(sess.ReportCitationsJSON, "https://example.com/a") {
 		t.Errorf("stored citations = %q", sess.ReportCitationsJSON)
+	}
+}
+
+// TestReportPrintPromptMakesNoCall: --print-prompt prints the synthesis
+// prompt and builds no provider.
+func TestReportPrintPromptMakesNoCall(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.db")
+	sid, _ := seedReportSession(t, path, true)
+
+	called := false
+	factory := func(llm.Config, *http.Client) (llm.Provider, error) {
+		called = true
+		return nil, nil
+	}
+	var out, errBuf bytes.Buffer
+	o := reportOpts{role: "strong", dbPath: path, printPrompt: true}
+	if err := cmdReport(context.Background(), sid, o, reportTestConfig(), factory, &out, &errBuf); err != nil {
+		t.Fatalf("cmdReport: %v", err)
+	}
+	if called {
+		t.Error("a provider was built")
+	}
+	for _, want := range []string{"synthesis component", "Freedonia's capital is Fredonia City", "[1]"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("printed prompt lacks %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestReportBodyFileIsValidatedAndSaved: --body-file is checked like a model
+// response and stored with --save under --body-model.
+func TestReportBodyFileIsValidatedAndSaved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "report.db")
+	sid, _ := seedReportSession(t, path, true)
+
+	good := filepath.Join(dir, "good.md")
+	if err := os.WriteFile(good, []byte("EXTERNAL: the capital is Fredonia City [1]."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errBuf bytes.Buffer
+	o := reportOpts{role: "strong", dbPath: path, bodyFile: good, bodyModel: "claude-sonnet-5-5", save: true}
+	if err := cmdReport(context.Background(), sid, o, reportTestConfig(), nil, &out, &errBuf); err != nil {
+		t.Fatalf("cmdReport: %v", err)
+	}
+	db, err := openDBNoMigrate(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sess *core.Session
+	_ = db.Read(context.Background(), func(ctx context.Context, q store.Queries) error {
+		sess, err = q.GetSession(ctx, sid)
+		return err
+	})
+	db.Close()
+	if !strings.Contains(sess.Report, "EXTERNAL: the capital is Fredonia City") {
+		t.Errorf("stored report = %q", sess.Report)
+	}
+
+	forged := filepath.Join(dir, "forged.md")
+	if err := os.WriteFile(forged, []byte("The capital is Fredonia City [7]."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o.bodyFile = forged
+	if err := cmdReport(context.Background(), sid, o, reportTestConfig(), nil, &out, &errBuf); err == nil {
+		t.Error("a body citing a source that does not exist was accepted")
 	}
 }
