@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,9 @@ type openAIProvider struct {
 	cfg    Config
 	client *http.Client
 	source CredentialSource
+	// openAI is set for api.openai.com, which takes max_completion_tokens and
+	// reasoning_effort instead of max_tokens.
+	openAI bool
 
 	// reasoning remembers what a model's chain of thought costs, per model.
 	//
@@ -66,8 +70,13 @@ func newOpenAICompatible(cfg Config, httpClient *http.Client) (*openAIProvider, 
 		source = CredentialNotNeeded
 	}
 
+	host := ""
+	if u, err := url.Parse(cfg.BaseURL); err == nil {
+		host = strings.ToLower(u.Hostname())
+	}
 	return &openAIProvider{
 		cfg: cfg, client: httpClient, source: source,
+		openAI:    host == "api.openai.com",
 		reasoning: map[string]int64{},
 	}, nil
 }
@@ -84,10 +93,23 @@ func (p *openAIProvider) ModelFor(tier Tier) string {
 }
 
 type openAIRequest struct {
-	Model     string          `json:"model"`
-	Messages  []openAIMessage `json:"messages"`
-	MaxTokens int             `json:"max_tokens,omitempty"`
-	Stream    bool            `json:"stream"`
+	Model               string          `json:"model"`
+	Messages            []openAIMessage `json:"messages"`
+	MaxTokens           int             `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int             `json:"max_completion_tokens,omitempty"`
+	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+	Stream              bool            `json:"stream"`
+}
+
+// openAIEffort maps an effort to OpenAI's reasoning_effort values.
+func openAIEffort(e string) string {
+	switch e {
+	case "low", "medium", "high":
+		return e
+	case "xhigh", "max":
+		return "high"
+	}
+	return ""
 }
 
 // Reasoning allowance bounds.
@@ -328,12 +350,14 @@ func (p *openAIProvider) Complete(ctx context.Context, req Request) (*Response, 
 	)
 	for {
 		attempts++
-		payload, err := json.Marshal(openAIRequest{
-			Model:     model,
-			Messages:  msgs,
-			MaxTokens: answerTokens + int(allowance),
-			Stream:    false,
-		})
+		oreq := openAIRequest{Model: model, Messages: msgs, Stream: false}
+		if p.openAI {
+			oreq.MaxCompletionTokens = answerTokens + int(allowance)
+			oreq.ReasoningEffort = openAIEffort(req.Effort)
+		} else {
+			oreq.MaxTokens = answerTokens + int(allowance)
+		}
+		payload, err := json.Marshal(oreq)
 		if err != nil {
 			return nil, fmt.Errorf("llm: encode: %w", err)
 		}

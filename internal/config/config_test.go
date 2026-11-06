@@ -640,3 +640,39 @@ func TestMoleLLMKeyAppliesWhateverTheProvider(t *testing.T) {
 		t.Errorf("top-level key = %q, want MOLE_LLM_API_KEY", loaded.LLM.APIKey)
 	}
 }
+
+// TestEnvSetsAReportRole: MOLE_LLM_REPORT_* build a report role on its own
+// provider, and an unset report role resolves like the strong one.
+func TestEnvSetsAReportRole(t *testing.T) {
+	isolate(t)
+	t.Setenv("MOLE_LLM_PROVIDER", "openai-compatible")
+	t.Setenv("MOLE_LLM_BASE_URL", "https://api.deepseek.com/v1")
+	t.Setenv("MOLE_LLM_API_KEY", "sk-deepseek")
+	t.Setenv("MOLE_LLM_MODEL", "deepseek-chat")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.Report != nil {
+		t.Fatalf("report block without env: %+v", cfg.LLM.Report)
+	}
+	if r := cfg.LLM.Resolve("report"); r.Model != "deepseek-chat" || r.APIKey != "sk-deepseek" {
+		t.Errorf("unset report role = %s, key from top level = %v", r.Model, r.APIKey == "sk-deepseek")
+	}
+
+	t.Setenv("MOLE_LLM_REPORT_BASE_URL", "https://api.openai.com/v1")
+	t.Setenv("MOLE_LLM_REPORT_API_KEY", "sk-openai")
+	t.Setenv("MOLE_LLM_REPORT_MODEL", "gpt-6.1-sol")
+	if cfg, err = config.Load(); err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.LLM.Resolve("report")
+	if r.Model != "gpt-6.1-sol" || r.BaseURL != "https://api.openai.com/v1" || r.APIKey != "sk-openai" ||
+		r.Provider != "openai-compatible" {
+		t.Errorf("report role = %s %s %s, own key = %v", r.Provider, r.BaseURL, r.Model, r.APIKey == "sk-openai")
+	}
+	if s := cfg.LLM.Resolve("strong"); s.Model != "deepseek-chat" || s.APIKey != "sk-deepseek" {
+		t.Errorf("strong role changed: %s", s.Model)
+	}
+}

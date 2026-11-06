@@ -146,6 +146,9 @@ func defaultTable() map[string]Rates {
 		"deepseek-v4-pro":   {Input: 435, Output: 870, CacheRead: 4, CacheWrite: 435, CacheWrite1h: 435},
 		"deepseek-reasoner": {Input: 435, Output: 870, CacheRead: 4, CacheWrite: 435, CacheWrite1h: 435},
 
+		// OpenAI bills a cache write as input.
+		"gpt-6.1-sol": {Input: 2000, Output: 10000, CacheRead: 100, CacheWrite: 2000, CacheWrite1h: 2000},
+
 		"claude-fable-5":    perMTok(10, 50),
 		"claude-fable-5-1":  {Input: 10000, Output: 50000, CacheRead: 250, CacheWrite: 12500, CacheWrite1h: 20000},
 		"claude-mythos-5":   perMTok(10, 50),
@@ -327,13 +330,18 @@ func (t *Table) Lookup(model string) (Rates, bool) {
 	return Rates{}, false
 }
 
-// stripDateSuffix removes a trailing -YYYYMMDD, reporting whether it found one.
+// stripDateSuffix removes a trailing -YYYYMMDD or -YYYY-MM-DD, reporting whether it found one.
 //
 // Deliberately strict about the shape: eight digits that parse as a plausible
 // date. A looser rule would fold "gpt-4-32768" onto "gpt-4" and price a model
 // against a different one's rates, and mispricing silently is the failure this
 // whole package exists to prevent.
 func stripDateSuffix(model string) (string, bool) {
+	if n := len(model); n > 11 && model[n-11] == '-' {
+		if _, err := time.Parse("2006-01-02", model[n-10:]); err == nil {
+			return model[:n-11], true
+		}
+	}
 	i := strings.LastIndexByte(model, '-')
 	if i <= 0 || len(model)-i-1 != 8 {
 		return "", false

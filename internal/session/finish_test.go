@@ -249,3 +249,68 @@ func TestResearchTimedOut(t *testing.T) {
 		t.Error("a live session was treated as timed out")
 	}
 }
+
+// strongCounter counts strong-tier calls and answers them.
+type strongCounter struct{ strong int }
+
+func (*strongCounter) Name() string             { return "counter" }
+func (*strongCounter) ModelFor(llm.Tier) string { return "counter-model" }
+func (c *strongCounter) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	if req.Tier == llm.TierStrong {
+		c.strong++
+	}
+	return &llm.Response{Text: `{}`, Model: "counter-model"}, nil
+}
+
+// TestAReportProviderWritesTheReport: with ReportLLM set, the report call goes
+// to it and not to the actor's provider.
+func TestAReportProviderWritesTheReport(t *testing.T) {
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "t.db"), sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	counter := &strongCounter{}
+	probe := &reportProbe{started: make(chan struct{})}
+	actor := &actors.WebActor{LLM: counter}
+	r := &Runner{Store: db, Actor: actor, ReportLLM: probe, Owner: "test"}
+	sess, err := r.Create(context.Background(), Spec{
+		Question: "a question", Mode: core.ModeReport, BudgetUnit: core.BudgetUSD,
+		Budget: 1_000_000, MaxSources: 3, MaxDepth: 2, MaxLeads: 5, Timeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := db.WithTx(context.Background(), func(ctx context.Context, tx store.Tx) error {
+		return tx.InsertClaims(ctx, []core.Claim{{
+			SessionID: sess.ID, LeadID: "l_1",
+			Text:   "Subword tokenization affects byte-level scaling.",
+			Source: "https://s.example/p",
+			Quote:  "a quote long enough to be real evidence",
+		}})
+	}); err != nil {
+		t.Fatalf("insert claims: %v", err)
+	}
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	vf := &verifier.Verifier{Store: db, Ledger: r.ledger(), LLM: counter}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.finish(parent, parent, r.ledger(), vf, sess, actor, nil, "")
+	}()
+	select {
+	case <-probe.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the report provider was never called")
+	}
+	cancelParent()
+	<-done
+	if counter.strong != 0 {
+		t.Errorf("the actor's provider took %d strong call(s)", counter.strong)
+	}
+}
