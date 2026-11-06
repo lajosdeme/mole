@@ -584,3 +584,29 @@ func TestUncheckedContradictionsAreWithheldFromTheReport(t *testing.T) {
 		}
 	}
 }
+
+// TestAFigureInsideTheOtherRangeIsNotADisagreement: findings whose texts are a
+// point and a range containing it are not presented as conflicting.
+func TestAFigureInsideTheOtherRangeIsNotADisagreement(t *testing.T) {
+	inRange := "Around 8 million tonnes of plastic enter the oceans every year."
+	span := "Between 4.8 and 12.7 million tonnes of plastic enter the ocean each year."
+	claims := []core.Claim{
+		claim(inRange, "https://a.example/1", "a quote long enough to be real evidence one"),
+		claim(span, "https://b.example/1", "a quote long enough to be real evidence two"),
+	}
+	st, sid := newStore(t, claims)
+	stored := storedClaims(t, st, sid)
+	link(t, st, sid, stored[inRange].ID, stored[span].ID, core.EdgeContradicts)
+
+	f := &fakeLLM{reply: func(string) string { return "Estimates vary [1][2]." }}
+	rep, err := (&output.Generator{LLM: f}).Generate(context.Background(), st, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Disagreements != 0 {
+		t.Errorf("Disagreements = %d, want 0", rep.Disagreements)
+	}
+	if strings.Contains(material(f.prompt), "cannot both be true") {
+		t.Errorf("a compatible pair was named as a conflict:\n%s", material(f.prompt))
+	}
+}

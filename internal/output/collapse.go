@@ -146,7 +146,9 @@ func Findings(question string, claims []*core.Claim, edges []*core.ClaimEdge, ma
 	// translated them using the sorted slice as the pre-sort reference — incoherent, and
 	// it passed whenever the sort happened not to reorder anything.
 	repOf := make(map[string]string, len(claims))
+	textOf := make(map[string]string, len(out))
 	for _, f := range out {
+		textOf[f.Claim.ID] = f.Claim.Text
 		for _, c := range f.cluster {
 			repOf[c.ID] = f.Claim.ID
 		}
@@ -159,6 +161,9 @@ func Findings(question string, claims []*core.Claim, edges []*core.ClaimEdge, ma
 		from, okFrom := repOf[e.FromID]
 		to, okTo := repOf[e.ToID]
 		if !okFrom || !okTo || from == to {
+			continue
+		}
+		if verifier.PointInRange(textOf[from], textOf[to]) {
 			continue
 		}
 		disputes[from] = appendUnique(disputes[from], to)
