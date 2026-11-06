@@ -195,7 +195,7 @@ func newRigFromSpec(t *testing.T, spec budget.SessionSpec, replies []string, out
 	}
 
 	led := budget.New(db, budget.DefaultConfig())
-	spec.Prompt, spec.Mode = "the research question", core.ModeReport
+	spec.Prompt, spec.Mode = "Does subword tokenization improve accuracy?", core.ModeReport
 	spec.ActorTypes = []core.ActorType{core.ActorWeb}
 	spec.BudgetUnit = core.BudgetUSD
 	sess, err := led.CreateSession(ctx, spec)

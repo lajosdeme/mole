@@ -378,3 +378,24 @@ func TestClaimQueryKeepsTheUnitAfterTheFigure(t *testing.T) {
 		t.Errorf("query %q lost the unit after the figure", q)
 	}
 }
+
+// TestOnTopicContradictionsAreFollowedUpFirst: with room for one follow-up,
+// the contradiction sharing more of the question's terms is queued and the
+// other deferred.
+func TestOnTopicContradictionsAreFollowedUpFirst(t *testing.T) {
+	q := "How many marine mammals are killed by plastic pollution each year?"
+	tonnageA := &core.Claim{ID: "c_a", Text: "12.7 million tonnes of plastic reach the ocean every year."}
+	tonnageB := &core.Claim{ID: "c_b", Text: "Around 8 million tonnes of plastic enter the oceans each year."}
+	mammalsA := &core.Claim{ID: "c_c", Text: "An estimated 100,000 marine mammals are killed by plastic each year."}
+	mammalsB := &core.Claim{ID: "c_d", Text: "Plastic kills about 1,000 marine mammals a year."}
+
+	queued, deferred := FollowUpsWithDeferred(
+		[]Judged{contradiction(tonnageA, tonnageB), contradiction(mammalsA, mammalsB)},
+		FollowUpOptions{SessionID: "s_1", Question: q, MaxTotal: 1})
+	if len(queued) != 1 || len(deferred) != 1 {
+		t.Fatalf("queued %d, deferred %d; want 1 and 1", len(queued), len(deferred))
+	}
+	if !strings.Contains(queued[0].Because, "marine mammals") {
+		t.Errorf("queued %s", queued[0].Because)
+	}
+}

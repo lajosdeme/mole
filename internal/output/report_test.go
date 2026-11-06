@@ -707,3 +707,52 @@ func TestReportSynthesisSendsTheGivenEffort(t *testing.T) {
 		t.Errorf("effort = %q, want xhigh", f.effort)
 	}
 }
+
+// TestReportPromptLeadsWithTheCorrectionAndDoesNotCalculate checks that the
+// prompt puts a correction of the headline figure in the opening and forbids
+// derived arithmetic.
+func TestReportPromptLeadsWithTheCorrectionAndDoesNotCalculate(t *testing.T) {
+	st, sid := newStore(t, []core.Claim{
+		claim("The value is 1.31.", "https://a.example", "reports 1.31"),
+	})
+	f := &fakeLLM{reply: func(string) string { return "The value is 1.31 [1]." }}
+	if _, err := (&output.Generator{LLM: f}).Generate(context.Background(), st, sid); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"the first sentence names the figure it corrects",
+		"Do not calculate",
+	} {
+		if !strings.Contains(f.prompt, want) {
+			t.Errorf("the prompt lacks %q", want)
+		}
+	}
+}
+
+// TestCorrectionsAreListedForTheOpening checks that findings worded as a
+// correction of another figure are listed apart, and that others are not.
+func TestCorrectionsAreListedForTheOpening(t *testing.T) {
+	correction := "RAND's 80% figure is not RAND's own estimate but cited from a 2022 Fortune article."
+	plain := "Interruptions of 2.8 seconds doubled the rate of errors on the main task."
+	st, sid := newStore(t, []core.Claim{
+		claim("More than 80% of AI projects fail.", "https://a.example/1", "more than 80 percent fail"),
+		claim(correction, "https://b.example/1", "by some estimates, footnote 3"),
+		claim(plain, "https://c.example/1", "doubled the rate of errors"),
+	})
+	f := &fakeLLM{reply: func(string) string { return "Most fail [1]." }}
+	if _, err := (&output.Generator{LLM: f}).Generate(context.Background(), st, sid); err != nil {
+		t.Fatal(err)
+	}
+	mat := material(f.prompt)
+	i := strings.Index(mat, "findings that correct another figure")
+	if i < 0 {
+		t.Fatalf("no corrections block in the material:\n%s", mat)
+	}
+	block := mat[i:]
+	if !strings.Contains(block, "not RAND's own estimate") {
+		t.Errorf("the correction is not listed:\n%s", block)
+	}
+	if strings.Contains(block, "doubled the rate of errors") {
+		t.Errorf("a finding about task errors was listed as a correction:\n%s", block)
+	}
+}

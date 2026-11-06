@@ -267,6 +267,10 @@ func parseVerdicts(raw string, batch []Pair) (judged []Judged, unjudged []Pair, 
 			rel = RelNeither
 			rationale = oneLine("different quantities: " + v.QuantityA + " / " + v.QuantityB)
 		}
+		if rel == RelContradicts && PointInRange(batch[idx].A.Text, batch[idx].B.Text) {
+			rel = RelNeither
+			rationale = "one figure lies inside the other's range"
+		}
 		seen[idx] = true
 		judged = append(judged, Judged{
 			Pair:      batch[idx],
