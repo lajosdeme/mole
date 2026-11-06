@@ -443,3 +443,32 @@ func TestReportBodyFileIsValidatedAndSaved(t *testing.T) {
 		t.Error("a body citing a source that does not exist was accepted")
 	}
 }
+
+// TestReportRoleBuildsItsOwnProvider: --role report uses llm.report.
+func TestReportRoleBuildsItsOwnProvider(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.db")
+	sid, _ := seedReportSession(t, path, true)
+
+	var built llm.Config
+	factory := func(c llm.Config, _ *http.Client) (llm.Provider, error) {
+		built = c
+		return &reportFakeProvider{text: "R: Fredonia City [1].", model: c.StrongModel}, nil
+	}
+	cfg := reportTestConfig()
+	cfg.LLM.Report = &config.LLMRole{Provider: "openai-compatible",
+		BaseURL: "https://api.openai.com/v1", APIKey: "sk-openai", Model: "gpt-6.1-sol"}
+	var out, errBuf bytes.Buffer
+	o := reportOpts{role: "report", dbPath: path}
+	if err := cmdReport(context.Background(), sid, o, cfg, factory, &out, &errBuf); err != nil {
+		t.Fatalf("cmdReport: %v", err)
+	}
+	if built.StrongModel != "gpt-6.1-sol" || built.BaseURL != "https://api.openai.com/v1" ||
+		built.Kind != llm.KindOpenAICompatible {
+		t.Errorf("built %+v", built)
+	}
+
+	cfg.LLM.Report = nil
+	if err := cmdReport(context.Background(), sid, o, cfg, factory, &out, &errBuf); err == nil {
+		t.Error("--role report without llm.report was accepted")
+	}
+}

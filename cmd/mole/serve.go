@@ -21,6 +21,7 @@ import (
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/daemon"
 	"github.com/lajosdeme/mole/internal/executor"
+	"github.com/lajosdeme/mole/internal/llm"
 	"github.com/lajosdeme/mole/internal/mcpserver"
 	"github.com/lajosdeme/mole/internal/session"
 	"github.com/spf13/cobra"
@@ -170,7 +171,12 @@ func cmdServe(ctx context.Context, o serveOpts) error {
 	}
 	defer func() { _ = db.Close() }()
 
+	reportLLM, _, err := reportRoleLLM(cfg, nil, "", llm.New)
+	if err != nil {
+		return err
+	}
 	runner := &session.Runner{
+		ReportLLM:           reportLLM,
 		Store:               db,
 		Actor:               actor,
 		VerifierModel:       verifierModelFor(cfg),
