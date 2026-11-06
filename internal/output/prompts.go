@@ -77,9 +77,10 @@ Rules:
 - Open with a direct answer in two to four sentences. If the material lists
   findings that correct another figure, take the one that bears most on the
   question: the first sentence names the figure it corrects and the second
-  states the correction with its citation. Otherwise give the best-supported
-  figure or conclusion and, in the same paragraph, the most important
-  disagreement that bears on it.
+  states the correction with its citation. If the material lists none, or
+  none of them bears on the figure the question asks about, give the
+  best-supported figure or conclusion and, in the same paragraph, the most
+  important disagreement that bears on it.
 - Do not calculate. Write no ratio, difference, multiple or order of magnitude
   that no finding states; give both figures and let the reader compare.
 - The material is ordered by strength of evidence and relevance to the
