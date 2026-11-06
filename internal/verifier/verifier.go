@@ -408,7 +408,12 @@ func (v *Verifier) Run(ctx context.Context, sessionID string) (*Result, error) {
 			"skipping lead generation rather than uncapping it", "err", err)
 		return res, nil
 	}
+	question := ""
+	if sess, err := v.session(ctx, sessionID); err == nil && sess != nil {
+		question = sess.Prompt
+	}
 	res.FollowUps, res.Deferred = FollowUpsWithDeferred(verdicts, FollowUpOptions{
+		Question:        question,
 		SessionID:       sessionID,
 		StalenessGap:    v.StalenessGap,
 		ActorType:       followUpActor(),

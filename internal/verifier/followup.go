@@ -65,6 +65,50 @@ type FollowUpOptions struct {
 	// ExistingPerRoot is how many follow-ups each root already has, so the
 	// per-root cap counts the session rather than the pass.
 	ExistingPerRoot map[string]int
+
+	// Question, when set, orders follow-ups by the share of its terms their
+	// contradiction carries, so MaxTotal defers the least relevant first.
+	Question string
+}
+
+// framingTerms are question words that frame the ask rather than its subject.
+var framingTerms = map[string]bool{
+	"many": true, "each": true, "every": true, "year": true, "annual": true,
+	"annually": true, "averag": true, "percentag": true, "percent": true, "per": true,
+}
+
+// questionTerms returns the question's subject terms.
+func questionTerms(q string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, t := range tokenize(q) {
+		if t == "" || unicode.IsDigit(rune(t[0])) || framingTerms[t] || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	return out
+}
+
+// questionShare is the share of terms found in p's claims; a term of three or
+// more letters matches a claim word sharing its first four (or three) letters.
+func questionShare(terms []string, p Pair) float64 {
+	if len(terms) == 0 {
+		return 0
+	}
+	words := append(tokenize(p.A.Text), tokenize(p.B.Text)...)
+	hit := 0
+	for _, t := range terms {
+		prefix := t[:min(len(t), 4)]
+		for _, w := range words {
+			if (len(t) < 3 && w == t) || (len(t) >= 3 && strings.HasPrefix(w, prefix)) {
+				hit++
+				break
+			}
+		}
+	}
+	return float64(hit) / float64(len(terms))
 }
 
 // FollowUps proposes leads to settle the contradictions in a set of verdicts.
@@ -111,8 +155,10 @@ func FollowUpsWithDeferred(verdicts []Judged, opts FollowUpOptions) (queued, def
 	ordered := append([]Judged(nil), verdicts...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Key() < ordered[j].Key() })
 
+	terms := questionTerms(opts.Question)
 	seen := map[string]bool{}
 	var out []FollowUp
+	var shares []float64
 	for _, v := range ordered {
 		if v.Relation != RelContradicts {
 			continue
@@ -144,6 +190,7 @@ func FollowUpsWithDeferred(verdicts []Judged, opts FollowUpOptions) (queued, def
 		perRoot[root]++
 
 		rootID := root
+		shares = append(shares, questionShare(terms, v.Pair))
 		out = append(out, FollowUp{
 			Lead: core.Lead{
 				SessionID:   opts.SessionID,
@@ -159,6 +206,17 @@ func FollowUpsWithDeferred(verdicts []Judged, opts FollowUpOptions) (queued, def
 			Because: fmt.Sprintf("%.60q contradicts %.60q", v.A.Text, v.B.Text),
 		})
 	}
+	order := make([]int, len(out))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool { return shares[order[i]] > shares[order[j]] })
+	sorted := make([]FollowUp, len(out))
+	for i, k := range order {
+		sorted[i] = out[k]
+	}
+	out = sorted
+
 	// The budget cuts the list; it does not decide the list. Everything above
 	// this line is a question of whether a contradiction DESERVES a follow-up,
 	// and everything below is a question of how many fit now.
