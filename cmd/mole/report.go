@@ -19,8 +19,8 @@ import (
 
 // mole report
 //
-// Rewrites a stored session's report with any model. Read-only: it writes
-// nothing back to the session or the ledger.
+// Rewrites a stored session's report with any model. With --save the rewrite
+// replaces the session's stored report; nothing is added to the ledger.
 
 const reportUsage = `Rewrite a stored session's report with any model.
 
@@ -29,9 +29,10 @@ report in ` + "`mole research`" + `) and reruns synthesis over the session's
 already-verified claims. --model overrides that role's model for this run
 only.
 
-Nothing is written back: no report row, no ledger row. This is for comparing
-report-writer models on identical evidence, not for replacing the stored
-answer — see ` + "`mole export`" + ` for the one on record.
+Without --save nothing is written back: this compares report-writer models
+on identical evidence. --save replaces the session's stored report and
+citations with the rewrite, so ` + "`mole export`" + ` carries it; the
+rewrite's cost is not added to the ledger.
 `
 
 type reportOpts struct {
@@ -41,6 +42,7 @@ type reportOpts struct {
 	maxFindings int
 	out         string
 	dbPath      string
+	save        bool
 }
 
 func newReportCmd() *cobra.Command {
@@ -69,6 +71,7 @@ func newReportCmd() *cobra.Command {
 	f.IntVar(&o.maxFindings, "max-findings", 0,
 		"findings the report is written from (0 for the session's own default)")
 	f.StringVarP(&o.out, "out", "o", "", "write here instead of stdout")
+	f.BoolVar(&o.save, "save", false, "replace the session's stored report with the rewrite")
 	return c
 }
 
@@ -100,6 +103,12 @@ func cmdReport(ctx context.Context, sessionID string, o reportOpts, cfg *config.
 			return fmt.Errorf("no session %s", sessionID)
 		}
 		return err
+	}
+
+	if o.save {
+		if err := output.Save(ctx, db, rep); err != nil {
+			return err
+		}
 	}
 
 	md := rep.Markdown()

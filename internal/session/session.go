@@ -18,7 +18,6 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -532,23 +531,7 @@ func (r *Runner) Run(ctx context.Context, sess *core.Session, spec Spec) (*Resul
 			r.logger().Warn("report degraded",
 				"session", sess.ID, "reason", res.Report.Degraded, "detail", d)
 		}
-		if err := r.Store.WithTx(context.WithoutCancel(ctx), func(ctx context.Context, tx store.Tx) error {
-			if err := tx.SetSessionReport(ctx, sess.ID, res.Report.Markdown(), res.Report.Degraded); err != nil {
-				return err
-			}
-			// Written WITH the report, because it cannot be written later. The
-			// [n] markers in the prose are numbered over a findings set capped by
-			// the report's token budget, and that cap does not outlive this call.
-			cited := res.Report.Citations
-			if cited == nil {
-				cited = []output.Citation{}
-			}
-			cites, err := json.Marshal(cited)
-			if err != nil {
-				return err
-			}
-			return tx.SetSessionReportCitations(ctx, sess.ID, string(cites))
-		}); err != nil {
+		if err := output.Save(context.WithoutCancel(ctx), r.Store, res.Report); err != nil {
 			r.notice("could not store the report: %v", err)
 		}
 	}

@@ -13,6 +13,7 @@ package output
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -223,6 +224,24 @@ func (g *Generator) Generate(ctx context.Context, st store.Store, sessionID stri
 	}
 	noteWithheld(rep, withheld)
 	return rep, nil
+}
+
+// Save stores rep's prose, degraded reason and citations on its session.
+func Save(ctx context.Context, st store.Store, rep *Report) error {
+	cited := rep.Citations
+	if cited == nil {
+		cited = []Citation{}
+	}
+	cites, err := json.Marshal(cited)
+	if err != nil {
+		return err
+	}
+	return st.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		if err := tx.SetSessionReport(ctx, rep.SessionID, rep.Markdown(), rep.Degraded); err != nil {
+			return err
+		}
+		return tx.SetSessionReportCitations(ctx, rep.SessionID, string(cites))
+	})
 }
 
 // noteWithheld appends the count of withheld contradictions to rep.Degraded.

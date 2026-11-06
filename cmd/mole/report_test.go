@@ -342,3 +342,37 @@ func TestReportCostUsesDeclaredRates(t *testing.T) {
 		t.Errorf("declared rate not used:\n%s", buf.String())
 	}
 }
+
+// TestReportSaveReplacesTheStoredReport: --save stores the rewritten prose and
+// its citations on the session.
+func TestReportSaveReplacesTheStoredReport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.db")
+	sid, _ := seedReportSession(t, path, true)
+
+	factory, _ := reportFakeFactory("SAVED: the capital is Fredonia City [1].")
+	o := reportOpts{role: "strong", dbPath: path, save: true}
+	var out, errBuf bytes.Buffer
+	if err := cmdReport(context.Background(), sid, o, reportTestConfig(), factory, &out, &errBuf); err != nil {
+		t.Fatalf("cmdReport: %v", err)
+	}
+
+	db, err := openDBNoMigrate(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var sess *core.Session
+	if err := db.Read(context.Background(), func(ctx context.Context, q store.Queries) error {
+		var err error
+		sess, err = q.GetSession(ctx, sid)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sess.Report, "SAVED: the capital is Fredonia City") {
+		t.Errorf("stored report = %q", sess.Report)
+	}
+	if !strings.Contains(sess.ReportCitationsJSON, "https://example.com/a") {
+		t.Errorf("stored citations = %q", sess.ReportCitationsJSON)
+	}
+}
