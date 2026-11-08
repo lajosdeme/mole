@@ -285,7 +285,12 @@ func cmdResearch(ctx context.Context, rawQuestion string, o researchOpts) error 
 		return err
 	}
 
+	reportLLM, _, err := reportRoleLLM(cfg, rec.Client(), "", llm.New)
+	if err != nil {
+		return err
+	}
 	runner := &session.Runner{
+		ReportLLM:           reportLLM,
 		Store:               db,
 		Actor:               actor,
 		Academic:            academicActor,

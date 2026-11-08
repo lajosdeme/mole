@@ -200,6 +200,8 @@ type LLMConfig struct {
 	Strong   *LLMRole `json:"strong,omitempty"`
 	Cheap    *LLMRole `json:"cheap,omitempty"`
 	Verifier *LLMRole `json:"verifier,omitempty"`
+	// Report, when set, writes the report in place of the strong role.
+	Report *LLMRole `json:"report,omitempty"`
 }
 
 // LLMRole is one role's provider and model; empty fields inherit the top level,
@@ -212,7 +214,7 @@ type LLMRole struct {
 }
 
 // RoleNames lists the roles that accept an llm.<role>.* block.
-var RoleNames = []string{"strong", "cheap", "verifier"}
+var RoleNames = []string{"strong", "cheap", "verifier", "report"}
 
 // block returns the address of a role's override pointer.
 func (l *LLMConfig) block(role string) **LLMRole {
@@ -223,6 +225,8 @@ func (l *LLMConfig) block(role string) **LLMRole {
 		return &l.Cheap
 	case "verifier":
 		return &l.Verifier
+	case "report":
+		return &l.Report
 	}
 	return nil
 }
@@ -231,7 +235,7 @@ func (l *LLMConfig) block(role string) **LLMRole {
 func (l LLMConfig) Resolve(role string) LLMRole {
 	r := LLMRole{Provider: l.Provider, APIKey: l.APIKey, BaseURL: l.BaseURL}
 	switch role {
-	case "strong":
+	case "strong", "report":
 		r.Model = l.Model
 	case "cheap":
 		r.Model = l.CheapModel
@@ -275,7 +279,7 @@ func (l LLMConfig) Block(role string) *LLMRole {
 
 // HasRoleBlocks reports whether any role overrides the top level.
 func (l LLMConfig) HasRoleBlocks() bool {
-	return l.Strong != nil || l.Cheap != nil || l.Verifier != nil
+	return l.Strong != nil || l.Cheap != nil || l.Verifier != nil || l.Report != nil
 }
 
 func firstNonEmpty(a, b string) string {
@@ -372,6 +376,21 @@ func (c *Config) applyEnv() {
 	setIf(&c.LLM.CheapModel, "MOLE_LLM_CHEAP_MODEL")
 	setIf(&c.LLM.VerifierModel, "MOLE_LLM_VERIFIER_MODEL")
 	setIf(&c.LLM.RecheckModel, "MOLE_LLM_RECHECK_MODEL")
+	var report LLMRole
+	setIf(&report.Provider, "MOLE_LLM_REPORT_PROVIDER")
+	setIf(&report.APIKey, "MOLE_LLM_REPORT_API_KEY")
+	setIf(&report.BaseURL, "MOLE_LLM_REPORT_BASE_URL")
+	setIf(&report.Model, "MOLE_LLM_REPORT_MODEL")
+	if report != (LLMRole{}) {
+		if c.LLM.Report != nil {
+			b := *c.LLM.Report
+			report.Provider = firstNonEmpty(report.Provider, b.Provider)
+			report.APIKey = firstNonEmpty(report.APIKey, b.APIKey)
+			report.BaseURL = firstNonEmpty(report.BaseURL, b.BaseURL)
+			report.Model = firstNonEmpty(report.Model, b.Model)
+		}
+		c.LLM.Report = &report
+	}
 	if v := os.Getenv("MOLE_LLM_VERIFIER_CONCURRENCY"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.LLM.VerifierConcurrency = n

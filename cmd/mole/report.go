@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/lajosdeme/mole/internal/config"
 	"github.com/lajosdeme/mole/internal/core"
@@ -73,7 +74,7 @@ func newReportCmd() *cobra.Command {
 
 	f := c.Flags()
 	f.StringVar(&o.role, "role", string(llm.RoleStrong),
-		"role whose provider writes the report: strong, cheap or verifier")
+		"role whose provider writes the report: strong, cheap, verifier or report")
 	f.StringVar(&o.model, "model", "", "override the role's model for this run")
 	f.StringVar(&o.effort, "effort", "", "synthesis effort: low, medium, high, xhigh or max (default medium)")
 	f.IntVar(&o.maxFindings, "max-findings", 0,
@@ -113,6 +114,14 @@ func cmdReport(ctx context.Context, sessionID string, o reportOpts, cfg *config.
 		}
 		captured.text, captured.model = string(body), o.bodyModel
 		provider, model = captured, o.bodyModel
+	case role == reportRole:
+		var err error
+		if provider, model, err = reportRoleLLM(cfg, nil, o.model, newProvider); err != nil {
+			return err
+		}
+		if provider == nil {
+			return errors.New("--role report: no report role configured (set llm.report.model or MOLE_LLM_REPORT_MODEL)")
+		}
 	default:
 		var err error
 		if provider, model, err = buildReportLLM(cfg, nil, role, o.model, newProvider); err != nil {
@@ -297,3 +306,30 @@ func (p *fixedProvider) Complete(_ context.Context, req llm.Request) (*llm.Respo
 }
 func (p *fixedProvider) Name() string               { return "fixed" }
 func (p *fixedProvider) ModelFor(_ llm.Tier) string { return p.model }
+
+// reportRole names the optional llm.report role, which only writes reports.
+const reportRole llm.ModelRole = "report"
+
+// reportRoleLLM builds the llm.report role's provider, or nil when none is set.
+func reportRoleLLM(cfg *config.Config, client *http.Client, modelOverride string,
+	newProvider func(llm.Config, *http.Client) (llm.Provider, error)) (llm.Provider, string, error) {
+	if cfg.LLM.Report == nil {
+		return nil, "", nil
+	}
+	r := cfg.LLM.Resolve(string(reportRole))
+	model := firstNonEmpty(modelOverride, r.Model)
+	if model == "" {
+		return nil, "", errors.New("llm.report has no model (set llm.report.model or MOLE_LLM_REPORT_MODEL)")
+	}
+	kind := kindOf(r.Provider)
+	if kind == llm.KindOpenAICompatible && strings.HasPrefix(r.APIKey, "sk-ant-") {
+		return nil, "", errors.New("llm.report holds an Anthropic key, but the report role uses provider " +
+			string(llm.KindOpenAICompatible) + "; set a key for that provider instead")
+	}
+	p, err := newProvider(llm.Config{Kind: kind, APIKey: r.APIKey, BaseURL: r.BaseURL,
+		StrongModel: model, CheapModel: model, Timeout: cfg.LLM.Timeout}, client)
+	if err != nil {
+		return nil, "", fmt.Errorf("report role: %w", err)
+	}
+	return p, model, nil
+}

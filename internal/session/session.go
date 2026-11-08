@@ -121,6 +121,8 @@ type Runner struct {
 	VerifierModel string
 	// RecheckModel re-judges contradiction edges before the report. Empty disables it.
 	RecheckModel string
+	// ReportLLM writes the report when set; nil uses the actor's provider.
+	ReportLLM llm.Provider
 	// VerifierBatchSize caps pairs per adjudication call. Zero takes the default.
 	VerifierBatchSize int
 	// VerifierConcurrency caps adjudication calls in flight. Zero takes the default.
@@ -633,6 +635,9 @@ func (r *Runner) finish(
 	}
 
 	gen := &output.Generator{LLM: actor.LLM, MaxClaims: r.MaxFindings, RecheckModel: r.RecheckModel}
+	if r.ReportLLM != nil {
+		gen.LLM = r.ReportLLM
+	}
 	var reservation *core.Reservation
 	if cancelled {
 		// Cancel means stop spending. Escrow is still released and every hold

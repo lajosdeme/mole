@@ -466,3 +466,16 @@ func TestHaikuFiveFiveTiersByPromptLength(t *testing.T) {
 		t.Errorf("haiku-5-5 mixed (90k in + 20k cache + 1k out) = %d micros, want %d", c.USDMicros, want)
 	}
 }
+
+func TestGPT61SolIsPricedWithItsDatedName(t *testing.T) {
+	tbl := pricing.NewTable()
+	for _, m := range []string{"gpt-6.1-sol", "gpt-6.1-sol-2026-10-04"} {
+		r, ok := tbl.Lookup(m)
+		if !ok || r.Input != 2000 || r.Output != 10000 {
+			t.Errorf("%s: %+v, %v", m, r, ok)
+		}
+	}
+	if _, ok := tbl.Lookup("gpt-6.1-sol-2026-13-40"); ok {
+		t.Error("an impossible date was stripped")
+	}
+}
