@@ -33,6 +33,11 @@ Without --save nothing is written back: this compares report-writer models
 on identical evidence. --save replaces the session's stored report and
 citations with the rewrite, so ` + "`mole export`" + ` carries it; the
 rewrite's cost is not added to the ledger.
+
+--print-prompt prints the synthesis prompt and calls no model. --body-file
+takes a response written elsewhere (--body-model names its model) and puts
+it through the same citation checks as a model's; a body that fails them is
+an error.
 `
 
 type reportOpts struct {
@@ -43,6 +48,9 @@ type reportOpts struct {
 	out         string
 	dbPath      string
 	save        bool
+	printPrompt bool
+	bodyFile    string
+	bodyModel   string
 }
 
 func newReportCmd() *cobra.Command {
@@ -72,6 +80,9 @@ func newReportCmd() *cobra.Command {
 		"findings the report is written from (0 for the session's own default)")
 	f.StringVarP(&o.out, "out", "o", "", "write here instead of stdout")
 	f.BoolVar(&o.save, "save", false, "replace the session's stored report with the rewrite")
+	f.BoolVar(&o.printPrompt, "print-prompt", false, "print the synthesis prompt instead of calling a model")
+	f.StringVar(&o.bodyFile, "body-file", "", "use this file as the model's response instead of calling a model")
+	f.StringVar(&o.bodyModel, "body-model", "", "the model that wrote --body-file (required with it)")
 	return c
 }
 
@@ -84,9 +95,29 @@ func cmdReport(ctx context.Context, sessionID string, o reportOpts, cfg *config.
 		return fmt.Errorf("--effort %q: want low, medium, high, xhigh or max", o.effort)
 	}
 	role := llm.ModelRole(o.role)
-	provider, model, err := buildReportLLM(cfg, nil, role, o.model, newProvider)
-	if err != nil {
-		return err
+	var (
+		provider llm.Provider
+		model    string
+		captured = &fixedProvider{}
+	)
+	switch {
+	case o.printPrompt:
+		provider = captured
+	case o.bodyFile != "":
+		if o.bodyModel == "" {
+			return errors.New("--body-file needs --body-model naming the model that wrote it")
+		}
+		body, err := os.ReadFile(o.bodyFile)
+		if err != nil {
+			return err
+		}
+		captured.text, captured.model = string(body), o.bodyModel
+		provider, model = captured, o.bodyModel
+	default:
+		var err error
+		if provider, model, err = buildReportLLM(cfg, nil, role, o.model, newProvider); err != nil {
+			return err
+		}
 	}
 
 	db, err := openDBNoMigrate(ctx, o.dbPath)
@@ -103,6 +134,21 @@ func cmdReport(ctx context.Context, sessionID string, o reportOpts, cfg *config.
 			return fmt.Errorf("no session %s", sessionID)
 		}
 		return err
+	}
+
+	if o.printPrompt {
+		if captured.req == nil {
+			return errors.New("the session has no claims to write a report from")
+		}
+		fmt.Fprintln(stdout, captured.req.System)
+		for _, m := range captured.req.Messages {
+			fmt.Fprintln(stdout)
+			fmt.Fprintln(stdout, m.Text)
+		}
+		return nil
+	}
+	if o.bodyFile != "" && rep.DegradedDetail != "" {
+		return fmt.Errorf("%s rejected: %s", o.bodyFile, rep.DegradedDetail)
 	}
 
 	if o.save {
@@ -238,3 +284,16 @@ func validEffort(e string) bool {
 	}
 	return false
 }
+
+// fixedProvider records the request it receives and answers with text.
+type fixedProvider struct {
+	text, model string
+	req         *llm.Request
+}
+
+func (p *fixedProvider) Complete(_ context.Context, req llm.Request) (*llm.Response, error) {
+	p.req = &req
+	return &llm.Response{Text: p.text, Model: p.model}, nil
+}
+func (p *fixedProvider) Name() string               { return "fixed" }
+func (p *fixedProvider) ModelFor(_ llm.Tier) string { return p.model }

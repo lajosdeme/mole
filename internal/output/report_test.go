@@ -721,6 +721,7 @@ func TestReportPromptLeadsWithTheCorrectionAndDoesNotCalculate(t *testing.T) {
 	}
 	for _, want := range []string{
 		"the first sentence names the figure it corrects",
+		"none of them bears on the figure",
 		"Do not calculate",
 	} {
 		if !strings.Contains(f.prompt, want) {
