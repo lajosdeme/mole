@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/lajosdeme/mole/internal/cache"
 	"github.com/lajosdeme/mole/internal/core"
@@ -402,6 +403,7 @@ func (a *WebActor) readSource(ctx context.Context, lead core.Lead, hit search.Re
 		a.Cache.Put(&cache.Entry{
 			Key: key, Text: hit.Content, Title: hit.Title, PublishedAt: hit.PublishedAt,
 		})
+		a.storeDocument(ctx, hit.URL, hit.Title, hit.Content, hit.PublishedAt)
 		return source{
 			doc: &extract.Document{
 				Text:        hit.Content,
@@ -473,7 +475,26 @@ func (a *WebActor) readSource(ctx context.Context, lead core.Lead, hit search.Re
 			Key: fk, Text: doc.Text, Title: doc.Title, PublishedAt: doc.PublishedAt,
 		})
 	}
+	a.storeDocument(ctx, finalURL, doc.Title, doc.Text, doc.PublishedAt)
 	return source{doc: doc, url: finalURL, domain: domain}, true
+}
+
+// storeDocument keeps the text claims are mined from, so the export receipt can
+// check each quote against the exact text that was read.
+func (a *WebActor) storeDocument(ctx context.Context, rawURL, title, text string, published *time.Time) {
+	if a.Store == nil {
+		return
+	}
+	doc := core.Document{SessionID: a.SessionID, URL: rawURL, Title: title, Text: text}
+	if published != nil {
+		doc.PublishedAt = *published
+	}
+	err := a.Store.WithTx(ctx, func(ctx context.Context, tx store.Tx) error {
+		return tx.InsertDocument(ctx, doc)
+	})
+	if err != nil {
+		a.logger().WarnContext(ctx, "storing source text failed", "url", rawURL, "err", err)
+	}
 }
 
 // mineChunk delegates to the shared Miner.
