@@ -374,3 +374,55 @@ func TestCacheDoesNotServeUnusableText(t *testing.T) {
 		t.Errorf("fetched %d times; the thin entry should have fallen through", res.Stats.Fetched)
 	}
 }
+
+// TestReadTextIsStored. The export receipt checks each quote against the stored
+// text; provider-supplied and fetched pages must both be stored, under the URL
+// the claims cite.
+func TestReadTextIsStored(t *testing.T) {
+	const (
+		searchURL = "https://old.example/a"
+		finalURL  = "https://new.example/a"
+	)
+	ctx := context.Background()
+
+	h := newHarness(t, []search.Result{
+		{URL: "https://provider.example/a", Content: articleBody, Rank: 1},
+		{URL: searchURL, Rank: 2},
+	}, map[string]*fetch.Result{
+		searchURL: {URL: searchURL, FinalURL: finalURL, Domain: "new.example",
+			Outcome: fetch.OutcomeOK, StatusCode: 200, ContentType: "text/html",
+			Content: []byte(articleHTML())},
+	}, nil)
+	h.actor.Budget = actors.Budget{MaxSources: 5, MaxInputTokens: 1_000_000}
+
+	if _, err := h.actor.Run(ctx, h.lead); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var docs []core.Document
+	if err := h.db.Read(ctx, func(ctx context.Context, q store.Queries) error {
+		var err error
+		docs, err = q.DocumentsForSession(ctx, h.actor.SessionID, time.Now())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	byURL := map[string]string{}
+	for _, d := range docs {
+		byURL[d.URL] = d.Text
+	}
+	if byURL["https://provider.example/a"] != articleBody {
+		t.Errorf("provider text not stored verbatim; stored URLs: %v", keys(byURL))
+	}
+	if byURL[finalURL] == "" {
+		t.Errorf("fetched text not stored under %s; stored URLs: %v", finalURL, keys(byURL))
+	}
+}
+
+func keys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

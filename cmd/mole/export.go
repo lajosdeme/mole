@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/lajosdeme/mole/internal/core"
 	"github.com/lajosdeme/mole/internal/eval"
@@ -138,6 +139,7 @@ func verifyReceipt(ctx context.Context, db store.Store, sessionID string) (*expo
 		sess     *core.Session
 		claims   []*core.Claim
 		outcomes []*store.FetchOutcome
+		docs     []core.Document
 	)
 	if err := db.Read(ctx, func(ctx context.Context, q store.Queries) error {
 		var err error
@@ -147,7 +149,10 @@ func verifyReceipt(ctx context.Context, db store.Store, sessionID string) (*expo
 		if claims, err = q.ListClaims(ctx, sessionID, 0); err != nil {
 			return err
 		}
-		outcomes, err = q.ListFetchOutcomes(ctx, sessionID, 0)
+		if outcomes, err = q.ListFetchOutcomes(ctx, sessionID, 0); err != nil {
+			return err
+		}
+		docs, err = q.DocumentsForSession(ctx, sessionID, time.Now().UTC())
 		return err
 	}); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -172,8 +177,13 @@ func verifyReceipt(ctx context.Context, db store.Store, sessionID string) (*expo
 		}),
 		extract.New(),
 	)
-	rep := eval.VerifyCitations(ctx, claims,
-		fetch.ProviderSupplied(outcomes), eval.NewStoredReader(db, sessionID, network))
+	// A provider-supplied page is checked only when its text was stored; a
+	// re-fetch would run a different extractor and report false mismatches.
+	skip := fetch.ProviderSupplied(outcomes)
+	for _, d := range docs {
+		delete(skip, d.URL)
+	}
+	rep := eval.VerifyCitations(ctx, claims, skip, eval.NewStoredReader(db, sessionID, network))
 
 	return &export.Receipt{
 		Verified: rep.Verified, Mismatch: rep.Mismatch, OffsetDrift: rep.OffsetDrift,
